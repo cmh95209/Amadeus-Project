@@ -23,6 +23,14 @@ if not defined AMADEUS_CONDA_EXE (
     exit /b 1
 )
 
+rem ---- WebUI fix (added by your helper) ------------------------------------
+rem Windows is set to block PowerShell from running local scripts, which stops
+rem the web interface (vite) from starting. These two lines fix it:
+rem   1) tell npm to start vite with cmd.exe instead of PowerShell (instant fix)
+rem   2) relax your user's PowerShell script policy as a backup
+set "npm_config_script_shell=cmd.exe"
+powershell -NoProfile -Command "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned" >nul 2>&1
+
 "%AMADEUS_CONDA_EXE%" run -n amadeus --no-capture-output python "%CD%\scripts\launcher.py"
 
 set "EXIT_CODE=%errorlevel%"

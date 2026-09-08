@@ -4,6 +4,41 @@ import runpy
 import sys
 import os
 
+
+def _install_audio_fallback():
+    """Make audio loading robust on Windows.
+
+    GPT-SoVITS reads the reference clip with torchaudio.load(). Newer torchaudio
+    (2.11) routes WAV files through 'torchcodec', whose native DLLs often fail to
+    load here (missing FFmpeg libraries). We keep the normal path, but if it fails
+    we transparently fall back to soundfile - which is already installed and works.
+    """
+    try:
+        import torchaudio
+        import soundfile as sf
+        import torch
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[Amadeus] audio fallback not installed: {exc!r}")
+        return
+
+    _orig_load = torchaudio.load
+
+    def _load(path, *args, **kwargs):
+        try:
+            return _orig_load(path, *args, **kwargs)
+        except Exception as exc:
+            print(f"[Amadeus] torchaudio.load failed ({exc!r}); using soundfile fallback")
+            data, sr = sf.read(str(path), dtype="float32")
+            if data.ndim == 1:
+                data = data[None, :]        # mono -> (1, samples)
+            else:
+                data = data.T               # (samples, ch) -> (ch, samples)
+            return torch.from_numpy(data).contiguous(), sr
+
+    torchaudio.load = _load
+
+
 def main():
     # run_gptsovits.py is inside Amadeus/, so project root is one level up
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,9 +62,11 @@ def main():
     os.chdir(GPT_ROOT)
 
     print("[Amadeus] Starting GPT-SoVITS native API...")
+    _install_audio_fallback()
 
     # Run script
     runpy.run_path(str(GPT_ROOT / "api_v2.py"), run_name="__main__")
+
 
 if __name__ == "__main__":
     main()

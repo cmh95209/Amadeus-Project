@@ -1,1 +1,1 @@
-deepseek/deepseek-v4-flash
+Qwen3.8-27B-GGUF
