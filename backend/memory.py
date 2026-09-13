@@ -14,6 +14,7 @@ PATH_TO_LLM_MODEL = os.path.join(DATA_DIR, "llm_model.txt")
 PATH_TO_WEB_ACCESS = os.path.join(DATA_DIR, "web_access.txt")
 PATH_TO_ACTIVE_CONV = os.path.join(DATA_DIR, "active_conversation.txt")
 PATH_TO_VOICE_RETENTION = os.path.join(DATA_DIR, "voice_retention.txt")
+PATH_TO_CONTEXT_BUDGET = os.path.join(DATA_DIR, "context_budget.txt")
 # Lives in the backend folder (not data/) - llm.py reads the same file.
 PATH_TO_LLM_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_server.txt")
 #PATH_TO_TRANSLATION_INSTRUCTIONS = os.path.join(TXT_DIR, "translation_instructions.txt")
@@ -54,8 +55,13 @@ def save_llm_model(model: str) -> None:
 
 # ---------- WEB ACCESS TOGGLE ---------- (NO SQL)
 def load_web_access() -> bool:
-    """Whether Amadeus may search the web. Defaults to ON."""
-    _ensure_file(PATH_TO_WEB_ACCESS, default_text="1")
+    """Whether Amadeus may search the web.
+
+    Fresh installs default to OFF (it adds ~560 tokens to every prompt); the
+    file written on first read makes the choice explicit from then on, and
+    existing installs keep whatever they saved.
+    """
+    _ensure_file(PATH_TO_WEB_ACCESS, default_text="0")
     with open(PATH_TO_WEB_ACCESS, "r", encoding="utf-8") as f:
         return f.read().strip() not in ("0", "false", "False", "")
 
@@ -272,10 +278,40 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
 # ---------- CONTEXT BUDGET ----------
 #
 # How far back Amadeus looks into one chat before a reply, in *estimated tokens*.
-# Her model's context window is 150k tokens; this budget keeps the history far
-# below that (leaving room for the personality prompt, voice block and her reply).
-# Raise or lower this number to taste: bigger = remembers more, replies slightly slower.
-CONTEXT_TOKEN_BUDGET = 40000
+# This caps HISTORY only: the fixed prompt parts (personality, voice block, output
+# rules, tool definitions) are always sent on top of it, so keep the budget
+# comfortably below the model's context window minus ~6k tokens.
+#
+# The default is 40000, but it is USER-CONFIGURABLE (Settings -> Connection) via
+# data/context_budget.txt: small local models (7B-class, tight VRAM) want a lower
+# number; big-context models can raise it. Bigger = remembers more, slower
+# replies, more tokens per message.
+DEFAULT_CONTEXT_BUDGET = 40000
+# Sanity clamps: below ~500 the budget is meaningless (the fixed prompt parts
+# alone cost ~4k tokens); above 1M it is almost certainly a typo.
+MIN_CONTEXT_BUDGET = 500
+MAX_CONTEXT_BUDGET = 1000000
+
+
+def load_context_budget() -> int:
+    """The user's history token budget (estimated tokens), clamped to a sane range."""
+    _ensure_file(PATH_TO_CONTEXT_BUDGET, default_text=str(DEFAULT_CONTEXT_BUDGET))
+    with open(PATH_TO_CONTEXT_BUDGET, "r", encoding="utf-8") as f:
+        raw = f.read().strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_CONTEXT_BUDGET
+    return max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, value))
+
+
+def save_context_budget(budget: int) -> int:
+    """Persist the history token budget, clamped to [MIN_CONTEXT_BUDGET, MAX_CONTEXT_BUDGET]."""
+    value = max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, int(budget or 0)))
+    _ensure_file(PATH_TO_CONTEXT_BUDGET, default_text=str(DEFAULT_CONTEXT_BUDGET))
+    with open(PATH_TO_CONTEXT_BUDGET, "w", encoding="utf-8") as f:
+        f.write(str(value))
+    return value
 
 # Always keep at least this many of the newest messages, even if the budget is
 # tight (guards against a long stretch of tiny messages being over-trimmed).
@@ -299,12 +335,15 @@ def estimate_tokens(text: str) -> int:
     return int(cjk / 1.5 + other / 3.5) + (1 if (cjk or other) else 0)
 
 
-# pre: token_budget is the max estimated tokens of history to keep (defaults to the global budget)
+# pre: token_budget is the max estimated tokens of history to keep; None (the
+#      default) reads the user-configurable budget from data/context_budget.txt
 # post: returns model-facing messages (role/content only), chronological, for the ACTIVE session.
 #       Assistant lines use their Japanese voice line when one exists. Newest-first packing:
 #       walks from the latest message backwards until the budget is used up, and always
 #       keeps at least MIN_RECENT_MESSAGES of the newest lines.
-def build_prompt_messages(token_budget: int = CONTEXT_TOKEN_BUDGET, exclude_ids=None) -> List[Dict[str, str]]:
+def build_prompt_messages(token_budget: int | None = None, exclude_ids=None) -> List[Dict[str, str]]:
+    if token_budget is None:
+        token_budget = load_context_budget()
     messages = load_memory_for_prompt(exclude_ids=exclude_ids)
     if len(messages) <= MIN_RECENT_MESSAGES:
         return messages

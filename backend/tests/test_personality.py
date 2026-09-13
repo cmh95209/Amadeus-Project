@@ -50,8 +50,8 @@ class PersonalityTests(unittest.TestCase):
         captured = []
         reply = self.chat.AmadeusPack(assistant_reply_ENG='Hello', assistant_reply_JPS='こんにちは')
         # Cover BOTH reply paths: web-access OFF goes through
-        # with_structured_output; web-access ON (the default) goes through
-        # bind_tools and a forced AmadeusPack tool call.
+        # with_structured_output; web-access ON goes through bind_tools and a
+        # forced AmadeusPack tool call. (Fresh installs default to OFF now.)
         tool_reply = SimpleNamespace(tool_calls=[{
             'name': 'AmadeusPack',
             'id': 'c1',
@@ -66,7 +66,14 @@ class PersonalityTests(unittest.TestCase):
         )
         with patch.object(self.chat, 'get_llm', return_value=fake):
             self.chat.getResponsePacked([])
-        self.assertEqual(captured[0], {'role': 'system', 'content': updated.strip()})
+        # Amadeus merges ALL of its instruction blocks (personality, timing,
+        # output rules, voice) into ONE leading system message, because most
+        # chat templates reject or silently drop extra system messages.
+        systems = [m for m in captured if m["role"] == "system"]
+        self.assertEqual(len(systems), 1)
+        self.assertTrue(captured[0]["content"].startswith(updated.strip()))
+        self.assertIn("assistant_reply_JPS", captured[0]["content"])
+        self.assertIn("Private timing context", captured[0]["content"])
         self.assertEqual(self.memory.load_memory_raw()[0]['content'], 'Keep this conversation')
 
     def test_invalid_input_does_not_overwrite_personality(self):

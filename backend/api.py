@@ -447,6 +447,26 @@ def set_voice_retention():
     return jsonify({"status": "ok", "limit": saved})
 
 
+@application.route("/getContextBudget", methods=["GET"])
+def get_context_budget():
+    """The user's conversation-history token budget (estimated tokens)."""
+    return jsonify({"budget": memory.load_context_budget()})
+
+
+@application.route("/setContextBudget", methods=["POST"])
+def set_context_budget():
+    """Persist the history token budget (clamped to a sane range)."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "budget" not in data:
+        return jsonify({"message": "Missing 'budget' field"}), 400
+    try:
+        budget = int(data["budget"])
+    except (TypeError, ValueError):
+        return jsonify({"message": "'budget' must be a number"}), 400
+    saved = memory.save_context_budget(budget)
+    return jsonify({"status": "ok", "budget": saved})
+
+
 @application.route("/getLLMServer", methods=["GET"])
 def get_llm_server():
     """The saved model-server address ('' = auto-detect local ports)."""

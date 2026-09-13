@@ -223,6 +223,26 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
     return pack
 
 
+# pre: messages is the assembled prompt list (system blocks followed by history)
+# post: a new list whose LEADING run of system messages is folded into a single
+#       system message; everything else is unchanged.
+#
+# Why: Amadeus builds several system blocks (personality, timing context, output
+# rules, voice block, search block). Most chat templates only accept ONE leading
+# system message - Qwen's template raises on a second one, and some templates
+# (older Mistral-class) silently DROP system messages they don't handle. Folding
+# the leading run into one message is the maximum-compatibility layout for every
+# model family, and also removes a few tokens of per-message framing overhead.
+def _merge_leading_system_messages(messages):
+    start = 0
+    while start < len(messages) and messages[start].get("role") == "system":
+        start += 1
+    if start <= 1:
+        return list(messages)
+    merged = [m.get("content", "") for m in messages[:start]]
+    return [{"role": "system", "content": "\n\n".join(merged)}] + list(messages[start:])
+
+
 def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     """Chat loop with the web_search tool available.
 
@@ -332,7 +352,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 
     web_on = store.load_web_access()
 
-    messages = (
+    messages = _merge_leading_system_messages(
         store.load_default_personality_messages()
         + [internal_context if internal_context is not None else store.load_internal_context()]
         + [pack_rules]
