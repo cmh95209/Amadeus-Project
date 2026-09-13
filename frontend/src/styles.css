@@ -45,7 +45,8 @@ button {
   height: 100vh;
   height: 100dvh;
   display: grid;
-  grid-template-columns: clamp(320px, 42vw, 720px) minmax(0, 1fr);
+  grid-template-columns: clamp(320px, 42vw, 720px) clamp(190px, 17vw, 250px) minmax(0, 1fr);
+
 }
 
 .character-panel {
@@ -234,6 +235,11 @@ button {
   box-shadow: 0 0 12px rgba(121, 168, 137, 0.45);
 }
 
+.status-dot.offline {
+  background: #e0564f;
+  box-shadow: 0 0 6px rgba(224, 86, 79, 0.6);
+}
+
 .status-dot.warning {
   background: #e5b94f;
   box-shadow: 0 0 12px rgba(229, 185, 79, 0.35);
@@ -412,7 +418,7 @@ button {
   margin: 0 clamp(18px, 3vw, 48px) 12px;
   padding: 8px;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 8px;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 10px;
@@ -449,6 +455,31 @@ button {
 .composer button:disabled {
   opacity: 0.35;
   cursor: default;
+}
+
+/* Web access toggle in the message composer */
+.composer .web-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #1a2230;
+  color: #8b96a9;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.composer .web-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.composer .web-toggle.on {
+  background: #17352a;
+  border-color: #2f9e6e;
+  color: #7fe0b0;
 }
 
 .modal-backdrop {
@@ -647,6 +678,10 @@ button {
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   }
 
+  .sessions-rail {
+    display: none;
+  }
+
   .chat-panel {
     height: max(560px, 85dvh);
   }
@@ -700,4 +735,455 @@ button {
   border-radius: 50%;
   background: #b89a63;
   box-shadow: 0 0 7px rgba(184, 154, 99, 0.25);
+}
+
+/* ---- Message actions: replay / edit / delete / regenerate / undo ---- */
+.message-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 10px;
+}
+
+.message-actions button {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #9aa7b8;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.message:hover .message-actions button,
+.message-actions button:focus-visible {
+  opacity: 1;
+}
+
+.message-actions button:hover {
+  color: #e6edf6;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* ---- Model connection status (Settings) ---- */
+.settings-intro {
+  color: #b7c2d2;
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 14px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #c6d0dd;
+  flex-wrap: wrap;
+}
+
+.conn-status .ghost-button {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 11px;
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #6b7686;
+  flex: none;
+}
+
+.conn-status.ok { border-color: rgba(63, 194, 122, 0.45); }
+.conn-status.ok .conn-dot { background: #3fc27a; box-shadow: 0 0 7px rgba(63, 194, 122, 0.55); }
+
+.conn-status.warn { border-color: rgba(227, 179, 63, 0.5); }
+.conn-status.warn .conn-dot { background: #e3b33f; box-shadow: 0 0 7px rgba(227, 179, 63, 0.55); }
+
+.conn-status.fail { border-color: rgba(224, 86, 79, 0.5); }
+.conn-status.fail .conn-dot { background: #e0564f; box-shadow: 0 0 7px rgba(224, 86, 79, 0.55); }
+
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.model-chips-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #8b98ab;
+}
+
+.model-chips button {
+  font-size: 11px;
+  color: #9aa7b8;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-chips button:hover {
+  color: #e6edf6;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.model-chips button.active {
+  color: #3fc27a;
+  border-color: rgba(63, 194, 122, 0.5);
+}
+
+/* ---- Version navigation: prev / count / next ---- */
+.version-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.version-nav button {
+  font-size: 11px;
+  color: #9aa7b8;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 1px 4px;
+  cursor: pointer;
+}
+
+.version-nav button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.version-nav button:not(:disabled):hover {
+  color: #e6edf6;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.version-count {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #c7d2e0;
+  min-width: 24px;
+  text-align: center;
+}
+
+.edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.edit-box textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  color: #d8dee7;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.edit-actions button {
+  font-size: 12px;
+  color: #d8dee7;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.edit-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ---- Conversation sessions rail ---- */
+.sessions-rail {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.sessions-head {
+  padding: 14px 12px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.sessions-head button {
+  width: 100%;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: #d8dee7;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.sessions-head button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.sessions-head button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sessions-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px;
+}
+
+.session-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  padding: 1px 4px;
+}
+
+.session-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.session-item.active {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.session-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: 13px;
+  color: #c8d2de;
+  background: none;
+  border: 0;
+  padding: 8px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.session-item.active .session-title {
+  color: #eef3f9;
+}
+
+.session-actions {
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.session-item:hover .session-actions,
+.session-item.active .session-actions {
+  opacity: 1;
+}
+
+.session-actions button {
+  font-size: 11px;
+  background: none;
+  border: 0;
+  color: #9aa7b8;
+  padding: 3px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.session-actions button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.session-rename {
+  width: 100%;
+  font-size: 13px;
+  color: #e6edf6;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+
+/* Relationship stats (trust, and any added later) in Settings */
+.stats-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.stats-intro {
+  color: #8b96a5;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 6px;
+}
+
+.stat-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stat-row .stat-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.stat-label {
+  color: #8b96a5;
+}
+
+.stat-value {
+  color: #d8dee7;
+  font-weight: 600;
+}
+
+/* Deep-thinking toggle in Settings (optional, off by default) */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-toggle-title {
+  color: #d8dee7;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.settings-toggle-desc {
+  color: #99a5b7;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 14px 6px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #1a2230;
+  color: #8b96a9;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-toggle:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.settings-toggle:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.settings-toggle.on {
+  background: #17352a;
+  border-color: #2f9e6e;
+  color: #7fe0b0;
+}
+
+.settings-toggle-knob {
+  width: 30px;
+  height: 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.14);
+  position: relative;
+  transition: background 0.15s ease;
+}
+
+.settings-toggle-knob::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #8b96a9;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.settings-toggle.on .settings-toggle-knob {
+  background: #2f9e6e;
+}
+
+.settings-toggle.on .settings-toggle-knob::after {
+  transform: translateX(14px);
+  background: #eafff5;
 }
