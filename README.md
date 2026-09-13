@@ -224,6 +224,30 @@ The Live2D runtime does not require users to install Cubism Editor or Unity. The
 
 # Installation
 
+## One-click install (Windows)
+
+Prefer to let a single script do all of this for you? Download
+`install_windows.ps1` from the [latest release](https://github.com/cmh95209/Amadeus-Project/releases)
+(it is also in `scripts/install_windows.ps1` in this repository), save it
+somewhere you remember - e.g. your Downloads folder - then:
+
+1. Press the Windows key, type **PowerShell**, right-click it and choose
+   **Run as administrator**.
+2. Paste this one line and press Enter (adjust the path if you saved the
+   script somewhere other than Downloads):
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass; & "$HOME\Downloads\install_windows.ps1"
+   ```
+
+3. Press Enter when asked, then wait. The script installs everything,
+   connects Amadeus to your local model server, writes a log to
+   `Amadeus\install_log.txt`, and is safe to re-run if it ever stops
+   partway - it resumes where it left off.
+
+The manual steps below are what the script does for you, in case you prefer
+to do it yourself or run into something the script cannot handle.
+
 ## 0. Requirements
 
 Before installing Amadeus, make sure you have:
