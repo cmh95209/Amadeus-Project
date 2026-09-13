@@ -115,8 +115,12 @@ def _stream_audio(text: str, play: bool):
             temp_path.unlink()
 
 
-def streamVoiceChunks(text: str):
-    """Yield GPT-SoVITS WAV chunks for browser playback while saving a copy."""
+def streamVoiceChunks(text: str, save_path=None):
+    """Yield GPT-SoVITS WAV chunks for browser playback while saving a copy.
+
+    When save_path is given, the finished line is also kept there so the
+    message it belongs to can be replayed later.
+    """
     with _speech_lock:
         OUT_WAV.parent.mkdir(parents=True, exist_ok=True)
         temp_path = OUT_WAV.with_suffix(".browser.tmp")
@@ -136,6 +140,12 @@ def streamVoiceChunks(text: str):
                         output.write(chunk)
                         yield chunk
             temp_path.replace(OUT_WAV)
+            if save_path is not None:
+                try:
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    save_path.write_bytes(OUT_WAV.read_bytes())
+                except Exception:
+                    pass
         finally:
             if temp_path.exists():
                 temp_path.unlink()
@@ -151,6 +161,39 @@ def generateVoice(text: str):
     """Generate a complete WAV without starting playback."""
     with _speech_lock:
         _stream_audio(text, play=False)
+
+
+def renderVoiceToPath(text: str, path) -> bool:
+    """Synthesize a line straight into a specific WAV file (no playback).
+
+    Used to re-voice an old reply on demand when its file was deleted by the
+    retention cap. Returns True when the file was written.
+    """
+    from pathlib import Path
+    path = Path(path)
+    with _speech_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(path.name + ".tmp")
+        try:
+            with requests.post(
+                f"{GPTSOVITS_API_URL}/tts",
+                json=_request_payload(text),
+                stream=True,
+                timeout=(10, 120),
+            ) as response:
+                response.raise_for_status()
+                with temp_path.open("wb") as output:
+                    for chunk in response.iter_content(chunk_size=4096):
+                        if chunk:
+                            output.write(chunk)
+            temp_path.replace(path)
+            return True
+        except Exception as exc:
+            print(f"[AmadeusSpeak] renderVoiceToPath failed: {exc!r}")
+            return False
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
 
 def _play_wav_path(wav_path: Path):
