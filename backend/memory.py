@@ -18,7 +18,7 @@ PATH_TO_VOICE_RETENTION = os.path.join(DATA_DIR, "voice_retention.txt")
 PATH_TO_LLM_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_server.txt")
 #PATH_TO_TRANSLATION_INSTRUCTIONS = os.path.join(TXT_DIR, "translation_instructions.txt")
 
-DEFAULT_LLM_MODEL = "deepseek/deepseek-v3.2-exp"
+DEFAULT_LLM_MODEL = ""  # intentionally blank: a fresh install starts with no model chosen
 
 def _ensure_file(path: str, default_text: str = "") -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)

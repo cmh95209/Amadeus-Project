@@ -1246,7 +1246,7 @@ export default function App() {
                   onChange={(event) => {
                     setModelName(event.target.value);
                   }}
-                  placeholder="Qwen3.8-27B-GGUF"
+                  placeholder="your model name"
                 />
               </label>
 

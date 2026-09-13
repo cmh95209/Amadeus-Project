@@ -323,7 +323,11 @@ try {
     $modelFile = Join-Path $backend "data\llm_model.txt"
     if (Test-Path $modelFile) {
         $defaultModel = ((Get-Content $modelFile | Select-Object -First 1).Trim())
-        Log ("  Default model name Amadeus will ask for: " + $defaultModel + "   (in backend\data\llm_model.txt)")
+        if ($defaultModel) {
+            Log ("  Default model name Amadeus will ask for: " + $defaultModel + "   (in backend\data\llm_model.txt)")
+        } else {
+            Log "  No default model is set - you will choose yours in Settings -> Connection."
+        }
     }
 
     # ---------- DONE ----------
