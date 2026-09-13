@@ -278,6 +278,22 @@ export async function setVoiceRetention(limit: number): Promise<number> {
   return typeof data.limit === "number" ? data.limit : limit;
 }
 
+export async function getContextBudget(): Promise<number> {
+  const data = await parseResponse(await fetch(`${API_BASE}/getContextBudget`, { cache: "no-store" }));
+  return typeof data.budget === "number" ? data.budget : 40000;
+}
+
+export async function setContextBudget(budget: number): Promise<number> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/setContextBudget`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ budget }),
+    })
+  );
+  return typeof data.budget === "number" ? data.budget : budget;
+}
+
 export type ConnectionStatus = {
   address: string;
   configured: boolean;

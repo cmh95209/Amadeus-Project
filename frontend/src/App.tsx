@@ -26,6 +26,8 @@ import {
   regenerateMessageVoice,
   getVoiceRetention,
   setVoiceRetention,
+  getContextBudget,
+  setContextBudget,
   getLLMServer,
   setLLMServer,
   testConnection,
@@ -66,6 +68,7 @@ export default function App() {
   const [deepThinking, setDeepThinkingState] = useState<boolean | null>(null);
   const [deepThinkingBusy, setDeepThinkingBusy] = useState(false);
   const [voiceRetention, setVoiceRetentionState] = useState<number>(100);
+  const [contextBudget, setContextBudgetState] = useState<number>(40000);
   const [serverAddress, setServerAddressState] = useState<string>("");
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
   const [connTesting, setConnTesting] = useState(false);
@@ -226,7 +229,7 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, serverAddr] =
+      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
@@ -235,6 +238,7 @@ export default function App() {
           getDeepThinking().catch(() => false),
           listConversations().catch(() => null),
           getVoiceRetention().catch(() => 100),
+          getContextBudget().catch(() => 40000),
           getLLMServer().catch(() => ""),
         ]);
 
@@ -244,6 +248,7 @@ export default function App() {
       setWebAccessState(webOn);
       setDeepThinkingState(deepThinkingOn);
       setVoiceRetentionState(voiceCap);
+      setContextBudgetState(budgetCap);
       setServerAddressState(serverAddr);
       if (convs) {
         setConversations(convs.conversations);
@@ -364,6 +369,7 @@ export default function App() {
       }
       await setModel(nextModel);
       await setVoiceRetention(voiceRetention);
+      await setContextBudget(contextBudget);
       await setLLMServer(serverAddress);
       void refreshConnection();
 
@@ -1313,6 +1319,32 @@ export default function App() {
                 How many voice recordings to keep on disk. 0 keeps everything.
                 Older ones are deleted automatically, but any reply can always be
                 replayed — its line is re-synthesized on demand.
+              </p>
+
+              <label>
+                Conversation memory (tokens)
+                <input
+                  type="number"
+                  min={500}
+                  max={1000000}
+                  step={500}
+                  value={contextBudget}
+                  disabled={settingsBusy}
+                  aria-describedby="context-budget-help"
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setContextBudgetState(
+                      Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+                    );
+                  }}
+                />
+              </label>
+              <p className="settings-help" id="context-budget-help">
+                How much recent conversation she keeps in each prompt, in
+                estimated tokens. Lower = remembers less but replies faster and
+                uses less memory — good for small local models. Default is
+                40000. The model's context window should hold this number plus
+                about 6000.
               </p>
 
               <div className="settings-toggle-row" aria-label="Deep thinking">

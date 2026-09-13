@@ -492,6 +492,9 @@ can be inspected and picked from the settings view.
   search-judgement call only, keeping the final reply fast.
 - **Voice retention** — keeps the last N voice recordings and prunes older
   ones automatically.
+- **Conversation memory (tokens)** — how much recent conversation she keeps
+  in each prompt (estimated tokens, default 40000). Lower it for small
+  models or limited VRAM.
 
 ---
 
@@ -925,6 +928,47 @@ Longer-term ideas include richer character interaction, additional activities su
 ---
 
 # Changelog
+
+## Prompt Optimization and Model Compatibility — September 13, 2026
+
+The prompt Amadeus sends to the model on every message was measured and
+optimized, and made more robust across model families.
+
+### Single-Message System Prompt
+
+Amadeus previously sent its instructions (personality, timing context,
+output rules, voice block, and the optional search block) as five separate
+`system` messages. Most model chat templates only accept a single leading
+`system` message — Qwen's template raises an error on a second one, and
+older Mistral-class templates silently drop system messages they don't
+handle. The leading system blocks are now folded into ONE system message
+before every call, which is the maximum-compatibility layout for every model
+family and also removes a little per-message framing overhead.
+
+### Configurable Conversation Memory (context budget)
+
+The amount of conversation history she keeps in each prompt is now a
+user setting instead of a fixed constant. Settings → Connection has a
+"Conversation memory (tokens)" field (default 40000, clamped to 500–1000000,
+stored in `data/context_budget.txt`). Lower it for small local models (7B-class)
+or limited VRAM so the prompt stays inside the model's context window; raise
+it on a large-context model to remember more. The number is *estimated*
+tokens of history only — the fixed prompt parts (personality, voice block,
+output rules, tool definitions) are always sent on top of it.
+
+### Web Access Defaults Off for Fresh Installs
+
+Web access now starts switched off for brand-new installs (it adds roughly
+560 tokens to every prompt). Existing installs keep whatever they had saved,
+and it can still be turned on in Settings at any time.
+
+### Health Check
+
+A `check_amadeus.bat` at the project root runs the backend self-tests and
+reports a plain-English pass/fail, so a healthy install can be confirmed
+without loading a model.
+
+---
 
 ## Local LLM Support, Native-Japanese Dialogue, and Conversation Management — September 13, 2026
 
