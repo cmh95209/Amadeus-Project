@@ -1,6 +1,7 @@
 import os
 import json
 from typing import List, Dict
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,16 +149,96 @@ def load_personality() -> str:
 
 
 def load_default_personality_messages() -> List[Dict[str, str]]:
-    personality = load_personality().strip()
-    if not personality:
+    # Core persona only. The on-demand character book (appearance/outfit)
+    # stays OUT of the base prompt and is injected separately when the user
+    # asks how Amadeus looks.
+    core, _ = _split_character_book(load_personality())
+    if not core:
         return []
-    return [{"role": "system", "content": personality}]
+    return [{"role": "system", "content": core}]
 
 
 def save_personality(context: str) -> None:
     _ensure_file(PATH_TO_PERSONALITY, default_text="")
     with open(PATH_TO_PERSONALITY, "w", encoding="utf-8") as f:
         f.write((context or "").strip())
+
+
+# ---------- CHARACTER BOOK (on-demand appearance/outfit) ----------
+#
+# Her appearance & outfit sections live inside personality.txt, wrapped in
+# CHARACTER_BOOK marker lines. They are NOT part of the base prompt (saves
+# ~230 tokens on every turn) and load only when the user asks how Amadeus
+# looks, so she can describe herself in her own words. To edit what she says
+# about herself, change the text between the two CHARACTER_BOOK marker lines
+# in data/personality.txt.
+
+
+def _split_character_book(full_text: str):
+    """Split personality text into (core, character_book).
+
+    The character book is the block between the first line containing
+    "CHARACTER_BOOK" (but not "/CHARACTER_BOOK") and the next line containing
+    "/CHARACTER_BOOK". If the markers are missing, everything is core and the
+    book is empty - so plain personality files keep working unchanged.
+    """
+    lines = (full_text or "").split("\n")
+    open_idx = close_idx = None
+    for i, ln in enumerate(lines):
+        if open_idx is None and "CHARACTER_BOOK" in ln and "/CHARACTER_BOOK" not in ln:
+            open_idx = i
+        elif open_idx is not None and "/CHARACTER_BOOK" in ln:
+            close_idx = i
+            break
+    if open_idx is None or close_idx is None or close_idx <= open_idx:
+        return (full_text or "").strip(), ""
+    core = "\n".join(lines[:open_idx] + lines[close_idx + 1:]).strip()
+    book = "\n".join(lines[open_idx + 1:close_idx]).strip()
+    return core, book
+
+
+def load_character_book() -> str:
+    """Return the on-demand appearance/outfit block ("" if none present)."""
+    return _split_character_book(load_personality())[1]
+
+
+# Phrases that mean the user is asking how Amadeus looks. Add more here if
+# you want her to describe herself in other situations. Patterns are
+# case-insensitive and matched against the user's latest message.
+CHARACTER_BOOK_PATTERNS = [
+    r"appearance",
+    r"how do you look",
+    r"what do you look like",
+    r"what you look like",
+    r"what are you wearing",
+    r"you're wearing",
+    r"your outfit",
+    r"your clothes",
+    r"your attire",
+    r"your hair",
+    r"your look",
+    r"dressed in",
+    r"describe yourself",
+    r"見た目", r"外見", r"服装", r"着ている", r"髪型", r"髪の色",
+]
+_CB_REGEXES = [re.compile(p, re.IGNORECASE) for p in CHARACTER_BOOK_PATTERNS]
+
+
+def character_book_requested(text: str) -> bool:
+    """True if the user's message looks like it's asking how Amadeus looks."""
+    t = (text or "").lower()
+    return any(r.search(t) for r in _CB_REGEXES)
+
+
+def load_character_book_messages(last_user_text: str) -> List[Dict[str, str]]:
+    """Return [] normally; when the user asks how she looks, a single system
+    message carrying her appearance/outfit so she can describe herself."""
+    book = load_character_book()
+    if not book or not character_book_requested(last_user_text):
+        return []
+    head = ("Appearance & outfit reference (describe herself with it only when the "
+            "user asks how she looks - do not volunteer it otherwise): ")
+    return [{"role": "system", "content": head + book}]
 
 
 # ---------- Additional Instructions ---------- (NO SQL)

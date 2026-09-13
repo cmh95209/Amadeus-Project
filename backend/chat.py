@@ -76,7 +76,7 @@ def get_raw_memory():
 
 class AmadeusPack(BaseModel):
     assistant_reply_JPS: str = Field(..., description=(
-        "PRIMARY response: Kurisu's dialogue written natively in Japanese, as she would actually speak it. "
+        "PRIMARY response: Amadeus's dialogue written natively in Japanese, as she would actually speak it. "
         "Must be plain spoken Japanese for TTS."
         " Allowed: Japanese characters, ASCII letters/digits if needed, and these punctuation marks only: 、。！？"
         " Newlines are allowed. Do NOT include: parentheses/brackets/quotes/asterisks/emojis/markdown/ellipses (…)/colons/semicolons."
@@ -339,12 +339,12 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     pack_rules = {
         "role": "system",
         "content": (
-            "Write only Kurisu's spoken dialogue. "
+            "Write only Amadeus's spoken dialogue. "
             "Do not include narration, stage directions, actions, facial expressions, "
             "body language, or inner thoughts in either response. "
             "FIRST write assistant_reply_JPS natively in Japanese: think and speak the way a native "
-            "Japanese speaker (Makise Kurisu) really would — natural, idiomatic spoken Japanese, "
-            "NOT a word-for-word translation from English. "
+            "Japanese speaker would — natural, idiomatic spoken Japanese, NOT a word-for-word "
+            "translation from English. "
             "THEN write assistant_reply_ENG as an English translation of that Japanese dialogue, for the user to read. "
             "Keep the meaning and tone consistent between both languages."
         ),
@@ -352,8 +352,18 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 
     web_on = store.load_web_access()
 
+    # Character book: her appearance/outfit are NOT in the base prompt (saves ~230
+    # tokens every turn). Load them only when the user's latest message asks how
+    # she looks, so she can describe herself.
+    last_user = next(
+        (m.get("content", "") for m in reversed(message_context) if m.get("role") == "user"),
+        "",
+    )
+    book_messages = store.load_character_book_messages(last_user)
+
     messages = _merge_leading_system_messages(
         store.load_default_personality_messages()
+        + book_messages
         + [internal_context if internal_context is not None else store.load_internal_context()]
         + [pack_rules]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
