@@ -1,1 +1,1 @@
-Qwen3.8-27B-GGUF
+qwen3.8-27b-nvfp4
