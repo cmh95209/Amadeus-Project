@@ -16,48 +16,58 @@ The project is still actively evolving. It is not intended to be a finished prod
 
 Amadeus currently separates the **text you read** from the **voice you hear**.
 
-By default, you can chat with Kurisu in **English**.
+You can chat with Kurisu in **English** (or any language she can understand).
 
-For each normal response, Amadeus asks the LLM to produce two versions of the same reply in a single model call:
+For each normal response, Amadeus asks the LLM to write her reply **natively in Japanese first**, then an English version of it for the UI — in a single model call:
 
-- **English (`assistant_reply_ENG`)** — displayed in the conversation UI.
-- **Japanese (`assistant_reply_JPS`)** — natural spoken Japanese sent to GPT-SoVITS for voice synthesis.
+- **Japanese (`assistant_reply_JPS`)** — natural spoken Japanese, written the way Kurisu would actually talk; sent to GPT-SoVITS for voice synthesis. This is also what is stored in her memory, so her own history stays in her own voice.
+- **English (`assistant_reply_ENG`)** — a translation of that Japanese line, displayed in the conversation UI.
 
 So a typical conversation looks like:
 
 ```text
-You type in English
+You type a message
         │
         ▼
       LLM
         │
-        ├── English response ──► displayed in the WebUI
+        ├── Japanese dialogue (native) ─► GPT-SoVITS ─► Kurisu speaks Japanese
         │
-        └── Japanese dialogue ─► GPT-SoVITS ─► Kurisu speaks Japanese
+        └── English translation ─────► displayed in the WebUI
 ```
 
 > [!IMPORTANT]
 > ### Does Amadeus run a local LLM?
 >
-> **No — Amadeus currently uses OpenRouter for the conversational LLM.**
+> **Yes — or it can.** The conversational LLM can run **on your own GPU**
+> (Unsloth Desktop, Ollama, LM Studio, llama.cpp, vLLM, or any
+> OpenAI-compatible server) **or** remotely through **OpenRouter** with your
+> own API key.
 >
-> You provide your own OpenRouter API key and select which supported model you want Amadeus to use from the settings menu.
+> Point Amadeus at your model server in Settings → Connection ("Model server
+> address"). Leave the field empty and Amadeus auto-detects the usual local
+> ports (8888, 8000) — which is how it finds an Unsloth Desktop server that
+> picks a new port every time it restarts.
 >
-> The LLM itself therefore does **not** run on your GPU.
+> The connection status dot and the "Test connection" button ask the server
+> for its real model list, so a mistyped model name shows an amber warning
+> instead of failing mid-conversation, and the server's models appear as
+> clickable chips.
 >
-> What currently runs locally:
+> What runs locally:
 >
+> - **The conversational LLM** (when pointed at a local server) — on your GPU
 > - **GPT-SoVITS** — Japanese voice synthesis
 > - **Live2D / Cubism** — character rendering and animation
 > - **Conversation history** — stored locally in SQLite
 > - **Amadeus frontend and backend**
 >
-> What currently runs remotely:
+> What can run remotely:
 >
-> - **LLM inference** — through OpenRouter
+> - **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
 >
-> Amadeus does **not currently bundle or automatically install a local LLM.**
-> Local LLM support may be added in the future.
+> Amadeus does **not bundle or automatically install a local LLM** — run the
+> model with a server of your choice and point Amadeus at it.
 
 ## Current Status
 
@@ -76,6 +86,15 @@ The current development version includes:
 - Audio-amplitude-driven Live2D lip synchronization
 - Paired text + prerecorded audio variants for special interactions
 - Cross-platform automatic launcher for macOS and Windows
+- Local model server support (Unsloth Desktop, Ollama, LM Studio, llama.cpp, vLLM) alongside OpenRouter
+- Live connection status with the server's model list and a "Test connection" button
+- Native-Japanese-first dialogue with an English translation shown in the UI
+- Trust-based relationship stats and trust-aware voice lines
+- Multiple named chat sessions (create, rename, delete, switch)
+- Reply regeneration with saved versions, plus edit / delete / undo
+- Per-message voice replay and on-demand re-voice
+- Voice retention cap (keep the last N recordings)
+- Optional local web search, with optional deep thinking for the search decision
 - Backend connection/status display
 - Conversation memory reset controls
 
@@ -424,6 +443,31 @@ The backend exposes model-control endpoints including:
 /setLLMModel
 /getCurrLLMModel
 ```
+
+## Model Server Address
+
+Amadeus talks to whichever OpenAI-compatible server you configure in
+Settings → Connection ("Model server address"), for example:
+
+```text
+http://localhost:8888/v1    (Unsloth Desktop)
+http://localhost:11434/v1   (Ollama)
+https://openrouter.ai/api/v1
+```
+
+The address is stored in `backend/llm_server.txt`. Leave it empty to let
+Amadeus auto-detect the common local ports (8888, 8000). The default model
+name lives in `backend/data/llm_model.txt`; the server's actual model list
+can be inspected and picked from the settings view.
+
+## Web Access, Deep Thinking, and Voice Retention
+
+- **Web access** toggle — lets Kurisu search the web (local DuckDuckGo, no
+  API key) when a message references something recent.
+- **Deep thinking** toggle — enables model-side reasoning for the
+  search-judgement call only, keeping the final reply fast.
+- **Voice retention** — keeps the last N voice recordings and prunes older
+  ones automatically.
 
 ---
 
@@ -837,6 +881,14 @@ Audio-driven lip sync         ✓
 Prerecorded interaction audio ✓
 frontend personality editing  ✓
 Improved Temporal awareness   ✓
+Local LLM server support      ✓
+Native-Japanese dialogue      ✓
+Connection status + test      ✓
+Multi-session conversations   ✓
+Reply versions + undo         ✓
+Relationship (trust) stats    ✓
+Web access + deep thinking    ✓
+Voice retention               ✓
 Poke interactions (stomach)   planned
 Prompting improvements        planned (high priority)
 Expression control            planned (very low priority)
@@ -849,6 +901,50 @@ Longer-term ideas include richer character interaction, additional activities su
 ---
 
 # Changelog
+
+## Local LLM Support, Native-Japanese Dialogue, and Conversation Management — September 13, 2026
+
+### Local Model Servers
+
+Amadeus no longer depends on OpenRouter. Settings → Connection accepts the
+address of any OpenAI-compatible server (Unsloth Desktop, Ollama, LM
+Studio, llama.cpp, vLLM, cloud providers); a blank address auto-detects the
+usual local ports. The status dot and "Test connection" probe the server's
+real `/v1/models` list, and the server's models appear as clickable chips.
+Matching is prefix-aware, so a server that lists `unsloth/MyModel` matches
+the bare `MyModel` name the app actually talks with.
+
+### Native-Japanese-First Dialogue
+
+Her reply is now generated in Japanese first — the way she actually speaks —
+with the English field becoming a translation for the UI. Her memory stores
+the Japanese lines, so past conversations read in her own voice.
+Trust-based relationship stats drive how her voice lines sound, and a
+background rescorer keeps the stat current without blocking the chat.
+
+### Conversation Management
+
+Multiple named sessions (create / rename / delete / switch), reply
+regeneration with saved versions, edit / delete / undo on individual
+messages, per-message voice replay with on-demand re-voice, and a
+"keep the last N recordings" voice retention cap.
+
+### Web Access and Deep Thinking
+
+A toggleable web search (local DuckDuckGo, no API key) lets her verify
+recent events, with an optional "deep thinking" mode that enables model
+reasoning for the search decision only.
+
+### Reliability
+
+- Dead model-server ports are detected and probed on every use, so a
+  restarted local server no longer hangs the first message.
+- The reply client uses a long generation timeout so a cold large-model
+  reply is not clipped at 120 seconds, and genuine failures surface as
+  plain-English errors ("can't reach the server", "took too long to
+  respond") instead of a fabricated reply.
+
+---
 
 ## Interactive Live2D, Lip Sync, and Voiced Reactions — September 5, 2026
 
