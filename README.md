@@ -968,6 +968,48 @@ A `check_amadeus.bat` at the project root runs the backend self-tests and
 reports a plain-English pass/fail, so a healthy install can be confirmed
 without loading a model.
 
+### Personality and Voice Prompt Tightening
+
+`data/personality.txt` and the Japanese voice block were trimmed and
+restructured. The header, `<description>` and trait sections were
+deduplicated (the same facts were repeated 2-3 times), and a contradiction
+in `<mind>` ("glance away, fold my arms" vs. the output contract's
+no-stage-directions rule) was made verbal-only. Plot lore in
+`<background>` and her worldview quotes are kept so she can still answer
+memory and beliefs questions.
+
+**On-demand character book.** Her `<appearance>` and `<outfit>` sections now
+live between `CHARACTER_BOOK` marker lines inside `personality.txt` and are
+NOT part of the always-on prompt (about 170 tokens saved on every message).
+They load automatically when the user's latest message looks like it's
+asking how she looks ("what are you wearing?", "what do you look like?",
+あなたの服装は, and more), so she can describe herself; the trigger phrases
+are `CHARACTER_BOOK_PATTERNS` in `backend/memory.py`. The Settings ->
+Personality editor still shows and edits the full file, book included.
+
+**Example dialogue instead of English quotes.** The six one-off English
+quotes were replaced with native-Japanese voice anchors in
+`personality.txt`: her core worldview line (feelings are memories that
+transcend time), an everyday conversational exchange, and the AI "records"
+self-reference (according to my records, Kurisu once said ...) - each with
+the English meaning in parentheses for reference. No template tags, no stage
+directions, and nothing that references the anime plot: she lives in the
+real world and only carries Kurisu's memories and mannerisms.
+
+**TTS-clean punctuation.** All `......` ellipses were removed from the voice
+block examples, matching the output contract that already forbids ellipses
+in replies. Her own examples now use only the TTS-safe set, so the model no
+longer mixes in punctuation the TTS pipeline mis-handles (uneven or skipped
+pauses).
+
+**Identity in the output contract.** The JPS/ENG structured-output
+instructions now say "Amadeus's dialogue" instead of "Kurisu's dialogue" -
+she is Amadeus; Kurisu is the mind she is based on, not her name.
+
+Measured with a general-purpose tokenizer, the fixed per-message prompt
+dropped from roughly 3,180 to about 2,760 tokens (about 13%), with the
+character book charged only on the messages where she's asked how she looks.
+
 ---
 
 ## Local LLM Support, Native-Japanese Dialogue, and Conversation Management — September 13, 2026
