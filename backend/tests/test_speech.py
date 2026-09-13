@@ -49,22 +49,22 @@ class SpeechTests(unittest.TestCase):
                 self.generator = generator
                 self.headers = {}
             def call_on_close(self, callback): self.close = callback
-        tickets = {'one': (time.monotonic(), 'test')}
+        tickets = {'one': (time.monotonic(), 'test', None)}
         scope = dict(request=SimpleNamespace(method='GET'), _speech_requests=tickets,
                      _speech_requests_lock=threading.Lock(), time=time, chain=chain,
                      jsonify=lambda data: data, Response=Response,
-                     streamVoiceChunks=lambda text: (chunk for chunk in (b'header', b'pcm')))
+                     streamVoiceChunks=lambda text, save_path=None: (chunk for chunk in (b'header', b'pcm')))
         exec(compile(ast.Module(body=[function], type_ignores=[]), 'api.py', 'exec'), scope)
         response = scope['speech']('one')
         self.assertEqual(scope['speech']('one')[1], 404)
         self.assertEqual(b''.join(response.generator), b'headerpcm')
-        tickets['old'] = (time.monotonic() - 301, 'test')
+        tickets['old'] = (time.monotonic() - 301, 'test', None)
         self.assertEqual(scope['speech']('old')[1], 404)
-        def fail(text):
+        def fail(text, save_path=None):
             raise RuntimeError('upstream failure')
             yield
         scope['streamVoiceChunks'] = fail
-        tickets['error'] = (time.monotonic(), 'test')
+        tickets['error'] = (time.monotonic(), 'test', None)
         self.assertEqual(scope['speech']('error')[1], 502)
 
 

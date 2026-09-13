@@ -21,7 +21,10 @@ class PersonalityTests(unittest.TestCase):
         self.addCleanup(sys.path.remove, backend)
         modules = patch.dict(sys.modules, {
             'llm': SimpleNamespace(get_llm=lambda *args: None, reset_llm=lambda: None),
-            'tts': SimpleNamespace(streamVoiceChunks=lambda text: iter(())),
+            'tts': SimpleNamespace(
+                streamVoiceChunks=lambda text, save_path=None: iter(()),
+                renderVoiceToPath=lambda text, path: False,
+            ),
         })
         modules.start()
         self.addCleanup(modules.stop)
@@ -46,8 +49,21 @@ class PersonalityTests(unittest.TestCase):
         self.assertEqual(Path('data/personality.txt').read_text(encoding='utf-8'), updated.strip())
         captured = []
         reply = self.chat.AmadeusPack(assistant_reply_ENG='Hello', assistant_reply_JPS='こんにちは')
-        fake = SimpleNamespace(with_structured_output=lambda *a, **k:
-                               SimpleNamespace(invoke=lambda messages: captured.extend(messages) or reply))
+        # Cover BOTH reply paths: web-access OFF goes through
+        # with_structured_output; web-access ON (the default) goes through
+        # bind_tools and a forced AmadeusPack tool call.
+        tool_reply = SimpleNamespace(tool_calls=[{
+            'name': 'AmadeusPack',
+            'id': 'c1',
+            'args': {'assistant_reply_JPS': reply.assistant_reply_JPS,
+                     'assistant_reply_ENG': reply.assistant_reply_ENG},
+        }])
+        fake = SimpleNamespace(
+            with_structured_output=lambda *a, **k: SimpleNamespace(
+                invoke=lambda messages: captured.extend(messages) or reply),
+            bind_tools=lambda tools, **k: SimpleNamespace(
+                invoke=lambda messages: captured.extend(messages) or tool_reply),
+        )
         with patch.object(self.chat, 'get_llm', return_value=fake):
             self.chat.getResponsePacked([])
         self.assertEqual(captured[0], {'role': 'system', 'content': updated.strip()})

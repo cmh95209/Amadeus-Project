@@ -57,7 +57,8 @@ class TemporalContextTests(unittest.TestCase):
                         and n.name == 'getOutputPacked')
         now = datetime(2026, 9, 6, 18, 42).astimezone()
         captures = []
-        reply = SimpleNamespace(assistant_reply_ENG='Welcome back.')
+        reply = SimpleNamespace(assistant_reply_ENG='Welcome back.',
+                                assistant_reply_JPS='おかえり。')
         def respond(context, internal_context):
             captures.append(internal_context['content'])
             self.assertEqual(context[-1], {'role': 'user', 'content': 'Hello again'})
@@ -65,10 +66,22 @@ class TemporalContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 store, 'PATH_TO_MEMORY', str(Path(directory) / 'memory.db')):
             store.append_message('user', 'Earlier message')
-            with store.sqlite3.connect(store.PATH_TO_MEMORY) as conn:
+            # A sqlite3 `with` only commits; it does NOT close, and the
+            # leftover handle would keep the file locked when the temp
+            # directory is removed (fails on Windows). Close explicitly.
+            conn = store.sqlite3.connect(store.PATH_TO_MEMORY)
+            try:
                 conn.execute("UPDATE messages SET created_at = '2026-09-06 14:10'")
+                # close() rolls back uncommitted changes; commit first or the
+                # timestamp never actually changes.
+                conn.commit()
+            finally:
+                conn.close()
             original_context = store.load_internal_context
-            scope = {'store': store, 'AmadeusPack': object, 'getResponsePacked': respond}
+            # maybe_schedule_trust_rescore is a real chat.py helper the
+            # orchestration calls after storing the reply; no-op it here.
+            scope = {'store': store, 'AmadeusPack': object, 'getResponsePacked': respond,
+                     'maybe_schedule_trust_rescore': lambda: None}
             exec(compile(ast.Module(body=[function], type_ignores=[]), 'chat.py', 'exec'), scope)
             with patch.object(store, 'load_internal_context', side_effect=lambda: original_context(now)):
                 scope['getOutputPacked']('Hello again')
