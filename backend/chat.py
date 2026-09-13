@@ -223,6 +223,63 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
     return pack
 
 
+def _salvage_plain_text(raw, llm) -> "AmadeusPack":
+    """Last resort: turn whatever plain text the model actually produced into an
+    AmadeusPack, so a flaky model/server still yields *an* answer instead of a hard
+    error. Called only when the structured AmadeusPack tool call never came through
+    but she did say something usable in prose.
+
+    - If the text already contains Japanese, keep it as the spoken (TTS) line and add
+      an English translation for the UI.
+    - Otherwise treat it as the English display line and translate it to Japanese so
+      her voice stays in Japanese.
+    - If a translation pass fails or returns nothing, fall back to showing/voicing the
+      original text rather than returning empty fields.
+
+    Raises ValueError only when there is literally no text at all (the honest
+    "nothing came back" case) - never fabricates a reply out of thin air.
+    """
+    text = _strip_thinking(raw or "").strip()
+    if not text:
+        raise ValueError("The model returned no usable reply (no AmadeusPack and no text).")
+
+    if _has_japanese(text):
+        # She already spoke Japanese - use it as the TTS line, add English for the UI.
+        jps = text
+        eng = ""
+        try:
+            trans = llm.invoke([{
+                "role": "user",
+                "content": (
+                    "Translate the following Japanese into natural spoken English. "
+                    "Output ONLY the English text - no quotes, no commentary.\n\n"
+                    + text[:1500]
+                ),
+            }])
+            eng = _strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)).strip()
+        except Exception as e:
+            print("[Amadeus] Salvage: English translation failed:", repr(e))
+        return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=eng or jps)
+
+    # No Japanese - use the text for the UI and translate it to Japanese for the voice.
+    eng = text
+    jps = ""
+    try:
+        trans = llm.invoke([{
+            "role": "user",
+            "content": (
+                "Translate the following into natural spoken Japanese, in the voice of Makise Kurisu "
+                "(a sharp, confident scientist who speaks casually to close friends). "
+                "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
+                + text[:1500]
+            ),
+        }])
+        jps = _strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)).strip()
+    except Exception as e:
+        print("[Amadeus] Salvage: Japanese translation failed:", repr(e))
+    return AmadeusPack(assistant_reply_JPS=jps or eng, assistant_reply_ENG=eng)
+
+
 # pre: messages is the assembled prompt list (system blocks followed by history)
 # post: a new list whose LEADING run of system messages is folded into a single
 #       system message; everything else is unchanged.
@@ -303,16 +360,41 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
         if first.get("name") == "AmadeusPack":
             return _pack_from_args(first.get("args"))
 
-        # web_search call(s): run them all and feed the results back
-        convo.append(reply)
+        # web_search call(s): run them all, then feed the results back as
+        # PLAIN-TEXT turns instead of a native role:"tool" round-trip.
+        #
+        # Why not role:"tool"? Gemma 4 encodes tool calls with its own native
+        # tokens (e.g. "<|tool_call>call:web_search{...}<tool_call|>") and local
+        # servers render the assistant tool-call turn + the tool-result turn that
+        # follows it in a way that makes Gemma stall with NO output on the very
+        # next request - exactly the "search ran, results were added to the prompt,
+        # but no answer ever comes out" hang. Qwen's template copes with the OpenAI
+        # tool round-trip, which is why it never hit this. Ordinary assistant/user
+        # text is rendered correctly by EVERY chat template (Qwen, Gemma, ...), so we
+        # keep the whole search exchange in plain language and just ask her to finish
+        # with AmadeusPack. This keeps web search working across model families.
+        searches = []
         for call in calls:
             query = (call.get("args") or {}).get("query", "")
-            result = _run_web_search(query) if call.get("name") == "web_search" else "Unknown tool."
+            if call.get("name") == "web_search":
+                searches.append((query, _run_web_search(query)))
+            else:
+                searches.append((query, "Unknown tool."))
+
+        if searches:
             convo.append({
-                "role": "tool",
-                "tool_call_id": call.get("id"),
-                "content": result,
+                "role": "assistant",
+                "content": "I searched the web for: " + ", ".join(q for q, _ in searches),
             })
+            for query, result in searches:
+                convo.append({
+                    "role": "user",
+                    "content": (
+                        f"Web search results for '{query}':\n{result}\n\n"
+                        "Now answer the user's original request using the AmadeusPack tool, "
+                        "based on these results."
+                    ),
+                })
 
     # ---- Phase 2: force the final structured answer ----------------------
     if last_plain:
@@ -323,13 +405,16 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     if calls and calls[0].get("name") == "AmadeusPack":
         return _pack_from_args(calls[0].get("args"))
 
-    # ---- Phase 3 (last resort) -------------------------------------------
-    # The structured AmadeusPack never came through (she answered in plain text
-    # or the call failed). Do NOT dump raw single-language text into the
-    # English display field and voice a fake "I'm feeling sick" line - surface
-    # a clean, honest error; getOutputPacked() cleans up the user turn.
-    print("[Amadeus] Web loop: no AmadeusPack reply; surfacing error.")
-    raise ValueError("The model did not return a usable AmadeusPack reply.")
+    # ---- Phase 3 (last resort): salvage plain text -----------------------
+    # The structured AmadeusPack never came through, but she may have said
+    # something usable in prose. Rather than erroring out, turn that into a pack
+    # so the user still gets an answer. We prefer the text from the last (phase 2)
+    # call and fall back to any plain answer captured during the search loop.
+    # _salvage_plain_text only raises if there is literally no text at all.
+    raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+    candidate = _strip_thinking(raw) or last_plain
+    print("[Amadeus] Web loop: no AmadeusPack; salvaging plain text.")
+    return _salvage_plain_text(candidate, llm)
 
 
 def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
@@ -393,22 +478,24 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         try:
             final_llm = llm.bind_tools([convert_to_openai_tool(AmadeusPack)], tool_choice="required")
             reply = final_llm.invoke(messages)
-            calls = getattr(reply, "tool_calls", None) or []
-            if calls and calls[0].get("name") == "AmadeusPack":
-                return _ensure_japanese(_pack_from_args(calls[0].get("args")), llm)
         except Exception as e2:
             # The forced-pack call itself failed (timeout / dropped connection).
-            # Surface it so the user gets a clean, specific error ("took too
-            # long", "can't reach server", ...) rather than a fabricated reply.
+            # There is no text to salvage here, so surface a clean, specific error
+            # ("took too long", "can't reach server", ...) rather than fabricating.
             # getOutputPacked() removes the user turn so her memory stays clean.
             print("[Amadeus] Forced pack retry failed:", repr(e2))
             raise
-        # The forced-pack call returned, but not in the AmadeusPack format (she
-        # answered in plain text). Raising - instead of dumping raw single-
-        # language text into the English display field and voicing a fake
-        # "I'm feeling sick" line - gives an honest error and keeps memory clean.
-        print("[Amadeus] Forced pack call returned no AmadeusPack; surfacing error.")
-        raise ValueError("The model did not return a usable AmadeusPack reply.")
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusPack":
+            return _ensure_japanese(_pack_from_args(calls[0].get("args")), llm)
+
+        # The call returned but not as an AmadeusPack (she answered in plain text).
+        # Rather than erroring out, salvage whatever she said into a pack so the user
+        # still gets an answer. _salvage_plain_text only raises if there is literally
+        # no text at all - the honest "nothing came back" case.
+        raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+        print("[Amadeus] Forced pack call returned no AmadeusPack; salvaging plain text.")
+        return _ensure_japanese(_salvage_plain_text(raw, llm), llm)
 
 
 # pre:

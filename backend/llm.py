@@ -182,6 +182,13 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # a shorter/longer ceiling (e.g. 300 = 5 minutes).
             "timeout": 600,
             "max_retries": 0,
+            # Bound the OUTPUT length. Without a cap, a local model that gets stuck
+            # in a repetition loop (a known Gemma failure mode when it cannot satisfy
+            # a forced tool call) would generate until the full timeout - i.e. appear
+            # to hang for ~10 minutes. Capping at 4096 tokens (far more than any reply
+            # she actually gives) means a runaway/stuck generation stops quickly and
+            # chat.py surfaces a clean error instead of an endless spin.
+            "max_tokens": 4096,
         }
         if local:
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
