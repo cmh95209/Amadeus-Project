@@ -77,7 +77,8 @@ def get_raw_memory():
 class AmadeusPack(BaseModel):
     assistant_reply_JPS: str = Field(..., description=(
         "PRIMARY response: Amadeus's dialogue written natively in Japanese, as she would actually speak it. "
-        "Must be plain spoken Japanese for TTS."
+        "Must be plain spoken Japanese ONLY, for TTS - do NOT append the English translation or any "
+        "English line/sentence to it (the English belongs solely in assistant_reply_ENG). "
         " Allowed: Japanese characters, ASCII letters/digits if needed, and these punctuation marks only: 、。！？"
         " Newlines are allowed. Do NOT include: parentheses/brackets/quotes/asterisks/emojis/markdown/ellipses (…)/colons/semicolons."
         " Avoid long dashes and repeated punctuation.")
@@ -183,10 +184,17 @@ def _pack_from_args(args) -> "AmadeusPack":
 
 
 def _strip_thinking(text: str) -> str:
-    """Remove explicit thinking blocks if a model ever leaks them into its answer."""
+    """Remove thinking/channel tokens a model may leak into its answer: Qwen
+    <thinking>...</thinking> and bare <think></think>, plus Gemma-style
+    <channel|>thought / <channel|> markers, which a degenerating local model
+    can repeat into a run-on loop ("<|channel>thought<channel|>" xN)."""
     t = text or ""
     t = re.sub(r"(?is)<thinking>.*?</thinking>", "", t)
     t = re.sub(r"(?is)</?think(ing)?>", "", t)
+    t = re.sub(r"(?is)<\|channel>.*?</channel\|>", "", t)   # full channel block
+    t = re.sub(r"(?s)\s*<\|channel>\s*thought\b", "", t)     # unclosed open token
+    t = re.sub(r"(?s)<channel\|>\s*", "", t)                  # close token
+    t = re.sub(r"(?m)^\s*thought\s*$", "", t)                 # bare 'thought' line
     return t.strip()
 
 
@@ -195,14 +203,133 @@ def _has_japanese(text: str) -> bool:
     return any("\u3040" <= ch <= "\u30ff" for ch in (text or ""))
 
 
-def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
-    """Guarantee the TTS field actually contains Japanese.
+def _has_latin(text: str) -> bool:
+    """True if the text contains any A-Z / a-z letter."""
+    return any(("a" <= ch <= "z") or ("A" <= ch <= "Z") for ch in (text or ""))
 
-    Local models occasionally fill assistant_reply_JPS with English; GPT-SoVITS
-    would then read it out in a flat foreign accent. If that happens, do one
-    quick translation pass so her voice always stays in Japanese.
+
+def _has_japanese_script(text: str) -> bool:
+    """True if the text has any kana OR CJK ideograph (broader than _has_japanese,
+    which is kana-only). Used to tell a leaked whole-English line apart from a
+    Japanese line that merely contains a Latin token (a product name, "AI", a number)."""
+    for ch in (text or ""):
+        o = ord(ch)
+        if 0x3040 <= o <= 0x30FF or 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
+            return True
+    return False
+
+
+def _collapse_runaway(text: str) -> str:
+    """Truncate a runaway repeated phrase (a local-model degeneration such as a
+    short line x200 or "mount of effort." x500). Fires only when a short phrase
+    repeats 8+ times in a row at the tail, so normal short stammers and deliberate
+    repetition are left alone. Returns the text unchanged when there is no loop."""
+    t = text
+    n = len(t)
+    if n < 40:
+        return t
+    best_cut = None
+    for unit_len in range(2, 24):
+        tail_unit = t[n - unit_len:]
+        if len(tail_unit.strip()) < 2 or not any(ch.isalnum() for ch in tail_unit):
+            continue
+        i = n
+        count = 0
+        while i >= unit_len and t[i - unit_len:i] == tail_unit:
+            i -= unit_len
+            count += 1
+        if count >= 8 and i < n - 8:
+            if best_cut is None or i < best_cut:
+                best_cut = i
+    if best_cut is not None:
+        return t[:best_cut].rstrip()
+    return t
+
+
+def _strip_pack_scaffolding(text: str) -> str:
+    """Remove the AmadeusPack 'scaffolding' a model may emit as PLAIN TEXT instead
+    of a tool call - markdown code fences, bare JSON structure lines, and the
+    field labels (assistant_reply_JPS / assistant_reply_ENG) - so the TTS never
+    reads 'assistant_reply_JPS:', 'json', '{' or a JSON block. Stripping a label
+    keeps the value that follows it; a line that is only JSON punctuation is dropped.
     """
-    if _has_japanese(pack.assistant_reply_JPS):
+    t = text or ""
+    # If the model wrote the field labels inline without line breaks, split before
+    # each label so the line-based cleaning below can isolate each field's value.
+    t = re.sub(r"(?=assistant_reply_(?:JPS|ENG)\s*[:：])", "\n", t)
+    t = re.sub(r"(?s)```[a-zA-Z]*.*?```", "", t)   # fenced block (```json ... ```) 
+    t = re.sub(r"```", "", t)                          # stray fence
+    kept = []
+    for line in t.split("\n"):
+        s = line.strip()
+        if s and re.fullmatch(r"[{}\[\],:\"\s]+", s):
+            continue                                   # line of pure JSON punctuation
+        s = re.sub(r'^["\']?\s*assistant_reply_(JPS|ENG)\s*["\']?\s*[:：]\s*', "", s)
+        if not s:
+            continue                                   # was just a label / structure
+        kept.append(s)
+    return "\n".join(kept)
+
+
+def _clean_tts_text(text: str) -> str:
+    """Sanitize the Japanese (TTS) field before it reaches GPT-SoVITS.
+
+    A weaker model (Gemma) can pollute assistant_reply_JPS in several ways: it may
+    dump the English translation into it, or write the whole AmadeusPack as plain
+    text (the field labels, a JSON block, markdown fences) instead of a tool call,
+    or degenerate into a run-on repetition. Because the TTS speaks exactly what is
+    in JPS, all of that would otherwise be read out loud. We therefore:
+      - strip thinking/channel tokens (see _strip_thinking);
+      - for a field with NO Japanese at all (pure English), keep it intact so the
+        caller's translation pass can rebuild it as Japanese (only collapsing a
+        runaway loop);
+      - for a field that DOES have Japanese: strip the pack scaffolding, drop any
+        line that has Latin letters but no Japanese (a whole-English gloss line -
+        not a Japanese line that merely names a product), drop pure-English
+        parentheticals, and truncate runaway repetition.
+    Japanese lines that merely contain a few Latin tokens (a product name, "AI", a
+    number) are left untouched, so a legitimate mixed line is never broken.
+    """
+    t = _strip_thinking(text or "").strip()
+    if not t:
+        return t
+    # Pure-English field (no Japanese at all): keep it for the translation pass.
+    if _has_latin(t) and not _has_japanese_script(t):
+        return _collapse_runaway(t)
+    # Normal case: the field carries Japanese. Strip leaked English + scaffolding.
+    t = _strip_pack_scaffolding(t)
+    if _has_latin(t):
+        kept = []
+        for line in t.split("\n"):
+            s = line.strip()
+            if s and _has_latin(s) and not _has_japanese_script(s):
+                continue
+            kept.append(s)
+        t = "\n".join(kept)
+        t = re.sub(r"[（(][^（）()]*[）)]",
+                   lambda m: m.group(0) if _has_japanese_script(m.group(0)) else "", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+    return _collapse_runaway(t).strip()
+
+
+def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
+    """Guarantee the TTS field is clean, spoken Japanese.
+
+    Two local-model failure modes are cleaned here so GPT-SoVITS never reads
+    garbage out loud:
+      - English leak: a weaker model (Gemma) may dump the English translation into
+        assistant_reply_JPS (it reproduces the bilingual JP/EN layout from the
+        personality quotes), so the voice would speak Japanese then English.
+        _clean_tts_text strips the leaked English.
+      - Runaway repetition: a degenerating local model may loop a short phrase
+        hundreds of times; _clean_tts_text truncates it.
+    If, after cleaning, the field has no Japanese at all (it was pure English),
+    do one quick translation pass so her voice still stays in Japanese.
+    """
+    cleaned = _clean_tts_text(pack.assistant_reply_JPS)
+    if cleaned != (pack.assistant_reply_JPS or ""):
+        pack = AmadeusPack(assistant_reply_JPS=cleaned, assistant_reply_ENG=pack.assistant_reply_ENG)
+    if _has_japanese_script(pack.assistant_reply_JPS):
         return pack
     try:
         trans = llm.invoke([{
@@ -214,8 +341,8 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
                 + (pack.assistant_reply_ENG or "")[:1500]
             ),
         }])
-        jps = _strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content))
-        if _has_japanese(jps):
+        jps = _clean_tts_text(_strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)))
+        if _has_japanese_script(jps):
             print("[Amadeus] JPS was not Japanese - repaired with a translation pass")
             return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=pack.assistant_reply_ENG)
     except Exception as e:
@@ -280,6 +407,51 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
     return AmadeusPack(assistant_reply_JPS=jps or eng, assistant_reply_ENG=eng)
 
 
+def _forced_tool_choice_rejected(exc) -> bool:
+    """True when a server refused a forced tool choice (tool_choice="required").
+
+    NInfer (and possibly other servers) accept tool *definitions* but refuse to
+    guarantee a call, answering HTTP 400 with a message like:
+        tool_choice='required' requires at least one tool call, which NInfer cannot guarantee
+    The exception type name varies by openai/langchain-openai version
+    (BadRequestError, OpenAIInvalidRequestError, ...), so detect on status + text
+    instead. Only a genuine 400 about tool forcing matches; a real 400 about e.g.
+    a malformed schema still raises normally so the user can fix the config.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        code = getattr(exc, "code", None)
+        status = code if isinstance(code, int) else None
+    if status != 400:
+        return False
+    text = str(exc).lower()
+    # Match the FORCED-tool-choice refusal specifically. Do NOT key on
+    # "invalid_request_error" - that is the generic OpenAI 400 type present in
+    # EVERY 400 (incl. unrelated llama.cpp errors like context overflow or a
+    # malformed model tool-call), and matching it would silently auto-retry real
+    # errors instead of surfacing them.
+    return ("tool_choice" in text or "tool choice" in text
+            or "cannot guarantee" in text)
+
+
+def _invoke_forced(bound_llm, convo):
+    """Invoke a tool_choice="required" binding; if the server rejects the forced
+    choice (see _forced_tool_choice_rejected), retry once with tool_choice="auto"
+    - the same tools, no guarantee. Her system prompt still instructs the right
+    tool, and _salvage_plain_text covers a plain-text answer. Other exceptions
+    (timeouts, connection drops, real schema 400s) propagate unchanged.
+    """
+    try:
+        return bound_llm.invoke(convo)
+    except Exception as exc:
+        if not _forced_tool_choice_rejected(exc):
+            raise
+        print("[Amadeus] Server rejected forced tool choice; retrying with tool_choice=auto:",
+              type(exc).__name__)
+        return bound_llm.bind(tool_choice="auto").invoke(convo)
+
+
+
 # pre: messages is the assembled prompt list (system blocks followed by history)
 # post: a new list whose LEADING run of system messages is folded into a single
 #       system message; everything else is unchanged.
@@ -338,11 +510,11 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
         """One search-judgement call: thinking on, with a safe fallback."""
         if think_state["on"]:
             try:
-                return think_llm.invoke(convo_)
+                return _invoke_forced(think_llm, convo_)
             except Exception as exc:
                 think_state["on"] = False
                 print("[Amadeus] Web loop: thinking call failed, switching to non-thinking:", repr(exc))
-        return tool_llm.invoke(convo_)
+        return _invoke_forced(tool_llm, convo_)
 
     # ---- Phase 1: search (or answer) loop -------------------------------
     last_plain = ""
@@ -400,7 +572,7 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     if last_plain:
         convo.append({"role": "assistant", "content": last_plain})
     final_llm = llm.bind_tools([pack_tool], tool_choice="required")
-    reply = final_llm.invoke(convo)
+    reply = _invoke_forced(final_llm, convo)
     calls = getattr(reply, "tool_calls", None) or []
     if calls and calls[0].get("name") == "AmadeusPack":
         return _pack_from_args(calls[0].get("args"))
@@ -429,8 +601,10 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             "body language, or inner thoughts in either response. "
             "FIRST write assistant_reply_JPS natively in Japanese: think and speak the way a native "
             "Japanese speaker would — natural, idiomatic spoken Japanese, NOT a word-for-word "
-            "translation from English. "
+            "translation from English. assistant_reply_JPS must contain ONLY Japanese - do NOT "
+            "append the English translation, an English line, or any English sentence to it. "
             "THEN write assistant_reply_ENG as an English translation of that Japanese dialogue, for the user to read. "
+            "The English belongs only in assistant_reply_ENG, never in assistant_reply_JPS. "
             "Keep the meaning and tone consistent between both languages."
         ),
     }
@@ -477,7 +651,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         # tool is offered, so she cannot wander off into other behaviour.
         try:
             final_llm = llm.bind_tools([convert_to_openai_tool(AmadeusPack)], tool_choice="required")
-            reply = final_llm.invoke(messages)
+            reply = _invoke_forced(final_llm, messages)
         except Exception as e2:
             # The forced-pack call itself failed (timeout / dropped connection).
             # There is no text to salvage here, so surface a clean, specific error

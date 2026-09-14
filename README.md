@@ -929,6 +929,56 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Voice Sanitization for Weaker Local Models — September 14, 2026
+
+Weaker local models (Gemma 4 12B and the like) can mangle the structured
+reply format in ways a strong model (Qwen) never would: appending the English
+translation to the Japanese (TTS) field, writing the whole `AmadeusPack` as
+plain text (field labels, a JSON block, markdown fences) instead of making
+the tool call, or degenerating into a run-on repetition of a short phrase.
+Because GPT-SoVITS reads exactly what is in the Japanese field, all of that
+was being spoken out loud after her Japanese line.
+
+### TTS-Field Sanitization
+
+The Japanese field is now sanitized in `_ensure_japanese` / `_clean_tts_text`
+(`backend/chat.py`) before it ever reaches the TTS, for every model:
+
+- Thinking and channel tokens are stripped (`_strip_thinking`), including
+  Qwen `<thinking>` blocks and Gemma-style `<|channel>thought` / `<channel|>`
+  markers.
+- Pack scaffolding is removed (`_strip_pack_scaffolding`): markdown fences,
+  bare JSON-structure lines, and the `assistant_reply_JPS:` /
+  `assistant_reply_ENG:` labels - whether on their own line or inline. A label
+  is stripped but the value after it is kept; a line that is only JSON
+  punctuation is dropped.
+- Whole-English lines (a leaked translation or field label) and pure-English
+  parentheticals are removed. A Japanese line that merely contains a Latin
+  token (a product name, a number, "AI") is left untouched.
+- Runaway repetition is truncated (`_collapse_runaway`) only when a short
+  phrase repeats 8+ times at the tail, so short stammers ("え、え、え") and
+  deliberate repetition ("それで、それで") survive, and a clean reply passes
+  through byte-identical.
+- If the field is left purely English after cleaning, one translation pass
+  rebuilds it as Japanese, so her voice never leaves Japanese.
+
+### Tighter Output Contract
+
+The pack rules and the `assistant_reply_JPS` field description now state
+explicitly that the English translation belongs only in `assistant_reply_ENG`
+and must never be appended to the Japanese field. The `<quotes>` section of
+`personality.txt` now presents each line as Japanese + a developer-only
+`gloss:` note instead of the paired `「JP」/（EN）` layout that weaker models
+were reproducing.
+
+The sanitization is model-agnostic and runs identically for Qwen, Gemma,
+DeepSeek, and cloud models. Verified with Qwen 3.8 27B and Gemma 4 12B:
+neither speaks English after the Japanese line anymore, and a degenerate
+channel-token loop surfaces as an honest "no usable reply" error instead of
+being read out.
+
+---
+
 ## Prompt Optimization and Model Compatibility — September 13, 2026
 
 The prompt Amadeus sends to the model on every message was measured and
