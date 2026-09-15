@@ -6,6 +6,7 @@ from chat_interactions import INTERACTION_EVENTS, INTERACTION_RESPONSES
 import random
 import re
 import threading
+import time
 import stats
 import ja_voice
 
@@ -155,23 +156,136 @@ PROACTIVE_SEARCH_BLOCK = {
 }
 
 
+NO_WEB_BLOCK = {
+    "role": "system",
+    "content": (
+        "WEB ACCESS IS CURRENTLY OFF in this session - you do NOT have the web_search tool. "
+        "If the user asks you to search the web, look something up online, check a website, or "
+        "verify something recent or current, be honest and tell them you cannot search the web "
+        "right now. Do NOT pretend you searched, looked it up, or read anything online. You may "
+        "still answer from your own knowledge, but be clear that you are not verifying it live."
+    ),
+}
+
+
+# --- Web-search resilience (DuckDuckGo via the `ddgs` library) ----------------
+# The free DuckDuckGo endpoint is flaky: the connection sometimes gets dropped
+# mid-request (the "peer closed without TLS close_notify" h2 errors), which makes
+# a single attempt fail while a repeat a second later succeeds. So:
+#   (1) we retry a couple of times (a FRESH connection on each retry, since
+#       retrying over the one that just dropped is pointless), and
+#   (2) we reuse one client across searches, so a follow-up search reuses the
+#       warm connection (a touch faster + fewer drops) instead of opening new.
+#
+# Every path is BOUNDED so a dead network can never stall a chat reply for long.
+# A search was ALWAYS part of the reply time (it runs before she answers); these
+# knobs just make it more likely to succeed within the SAME time it had before,
+# and guarantee it never meaningfully exceeds it.
+SEARCH_ATTEMPT_TIMEOUT = 8      # seconds, per attempt (passed to DDGS as its timeout)
+SEARCH_TOTAL_BUDGET = 15        # seconds, hard ceiling for the whole search (was 15)
+SEARCH_MIN_RETRY_BUDGET = 5     # seconds; don't start another attempt if less is left
+SEARCH_MAX_ATTEMPTS = 3         # absolute cap on attempts (belt-and-suspenders)
+SEARCH_BACKOFF_START = 0.6      # seconds, pause before the 1st retry
+SEARCH_BACKOFF_MAX = 1.2        # seconds, cap on the retry pause
+SEARCH_CLIENT_TTL = 60.0        # seconds; recreate the client after this much idle
+
+_SEARCH_CLIENT = None           # shared DDGS client (holds one warm connection pool)
+_SEARCH_CLIENT_TS = 0.0         # monotonic time the client was last created/used
+_SEARCH_CLIENT_LOCK = threading.Lock()
+
+
+def _get_search_client(force_fresh: bool = False):
+    """Return a DDGS client to run a search on, reusing a warm one when possible.
+
+    A fresh client (fresh connection) is created when `force_fresh` is True - i.e.
+    for a retry, so we never retry over the exact connection that just dropped - or
+    when the cached client has been idle longer than SEARCH_CLIENT_TTL (the server
+    has almost certainly closed that connection by then). Reusing the client reuses
+    its underlying connection pool, which is the actual "keep-alive" benefit.
+    """
+    global _SEARCH_CLIENT, _SEARCH_CLIENT_TS
+    now = time.monotonic()
+    if (
+        not force_fresh
+        and _SEARCH_CLIENT is not None
+        and (now - _SEARCH_CLIENT_TS) <= SEARCH_CLIENT_TTL
+    ):
+        _SEARCH_CLIENT_TS = now  # mark as recently used
+        return _SEARCH_CLIENT
+    from ddgs import DDGS
+    client = DDGS(timeout=SEARCH_ATTEMPT_TIMEOUT)
+    with _SEARCH_CLIENT_LOCK:
+        _SEARCH_CLIENT = client
+        _SEARCH_CLIENT_TS = now
+    return client
+
+
+def _invalidate_search_client(client):
+    """Drop a search client from the cache (e.g. right after it failed), so a dead
+    connection is never reused. No-op if it isn't the currently cached one."""
+    global _SEARCH_CLIENT
+    with _SEARCH_CLIENT_LOCK:
+        if _SEARCH_CLIENT is client:
+            _SEARCH_CLIENT = None
+
+
 def _run_web_search(query: str) -> str:
-    """Run a DuckDuckGo search and return compact results for the model."""
-    try:
-        from ddgs import DDGS
-        results = list(DDGS(timeout=15).text((query or "").strip(), max_results=5))
-    except Exception as exc:
-        return (f"Web search failed ({exc!r}). Answer from your own knowledge "
-                f"and tell the user you could not verify it online.")
-    if not results:
+    """Run a DuckDuckGo search (with a couple of bounded retries) and return
+    compact results for the model. See the SEARCH_* constants above for timing."""
+    q = (query or "").strip()
+    if not q:
         return "No web results were found for that query."
-    lines = []
-    for i, r in enumerate(results, 1):
-        title = (r.get("title") or "").strip()
-        body = (r.get("body") or "").strip()
-        href = (r.get("href") or "").strip()
-        lines.append(f"{i}. {title}\n{body}\nURL: {href}")
-    return "\n\n".join(lines)
+    try:
+        from ddgs import DDGS  # noqa: F401  - lazy check; fails fast + clearly
+    except Exception as exc:
+        print(f"[Amadeus] Web search unavailable (could not load the 'ddgs' library): {exc!r}")
+        return (
+            "Web search is not available on this machine right now. Answer from "
+            "your own knowledge and be honest that you could not verify it online."
+        )
+
+    deadline = time.monotonic() + SEARCH_TOTAL_BUDGET
+    backoff = SEARCH_BACKOFF_START
+    attempt = 0
+    last_err = None
+    while True:
+        attempt += 1
+        # Attempt 1 reuses the warm client (fast). Retries use a fresh connection.
+        client = _get_search_client(force_fresh=(attempt > 1))
+        try:
+            results = list(client.text(q, max_results=5))
+        except Exception as exc:
+            last_err = exc
+            print(f"[Amadeus] Web search attempt {attempt} failed: {exc!r}")
+            # Drop the failed client so we don't keep reusing a dead connection.
+            _invalidate_search_client(client)
+            if attempt >= SEARCH_MAX_ATTEMPTS:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining < SEARCH_MIN_RETRY_BUDGET:
+                break  # not enough time left for a meaningful retry
+            time.sleep(min(backoff, max(0.0, remaining - 0.5)))
+            backoff = min(backoff * 2, SEARCH_BACKOFF_MAX)
+            continue
+        # A result came back (possibly an empty list).
+        if not results:
+            return "No web results were found for that query."
+        lines = []
+        for i, r in enumerate(results, 1):
+            title = (r.get("title") or "").strip()
+            body = (r.get("body") or "").strip()
+            href = (r.get("href") or "").strip()
+            lines.append(f"{i}. {title}\n{body}\nURL: {href}")
+        return "\n\n".join(lines)
+
+    # Exhausted the budget without results. The raw error is logged above for
+    # debugging; the model only gets a clean, human instruction (no technical junk).
+    print(f"[Amadeus] Web search failed after {attempt} attempt(s): {last_err!r}")
+    return (
+        "The web search did not return anything this time. Answer from your own "
+        "knowledge and be honest that you could not verify it online right now. "
+        "Do not mention any technical details."
+    )
 
 
 def _pack_from_args(args) -> "AmadeusPack":
@@ -183,19 +297,108 @@ def _pack_from_args(args) -> "AmadeusPack":
     return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=eng)
 
 
+def _strip_tool_call_scaffolding(text: str) -> str:
+    """Remove tool-call 'scaffolding' a model may leak into plain text so it never
+    reaches TTS or the UI: Ling-style '< tool_call>...< /tool_call>' blocks (and
+    <tool>/<function>/<invoke> variants), stray unclosed tool tags, and lines that
+    are raw JSON describing a tool call. Complements _strip_pack_scaffolding, which
+    handles the AmadeusPack field labels. Returns the text with only clean prose."""
+    t = text or ""
+    tag = r"(?:tool_call|toolcall|tool|function|invoke|use_tool)"
+    # Whole tool-call blocks (an open tag up to its matching close tag).
+    t = re.sub(r"(?is)<\s*/?\s*" + tag + r"\b.*?<\s*/?\s*" + tag + r"\s*>", " ", t)
+    # Stray / unclosed tool tags left behind.
+    t = re.sub(r"(?is)<\s*/?\s*" + tag + r"\b[^<>]*>", " ", t)
+    # Lines that are a raw JSON object describing a tool call.
+    keep = []
+    for line in t.splitlines():
+        s = line.strip()
+        if s.startswith("{") and s.endswith("}") and (
+            '"arguments"' in s or '"parameters"' in s
+            or ('"name"' in s and '"query"' in s)
+        ):
+            continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
 def _strip_thinking(text: str) -> str:
     """Remove thinking/channel tokens a model may leak into its answer: Qwen
-    <thinking>...</thinking> and bare <think></think>, plus Gemma-style
+    <thinking>...</thinking>, Gemma-4 <thought>...</thought> and bare
+    <think></think>, plus Gemma-style
     <channel|>thought / <channel|> markers, which a degenerating local model
     can repeat into a run-on loop ("<|channel>thought<channel|>" xN)."""
     t = text or ""
     t = re.sub(r"(?is)<thinking>.*?</thinking>", "", t)
+    t = re.sub(r"(?is)<thought>.*?</thought>", "", t)        # Gemma 4: <thought>...</thought>
+    # An UNCLOSED thinking block means the model was still thinking (often
+    # degenerating into an endless draft loop) and no real answer followed -
+    # anything after the opener is reasoning, so cut it. This must run BEFORE
+    # the bare-tag strip below, which would otherwise remove the opener and
+    # orphan the reasoning text.
+    t = re.sub(r"(?s)\s*<thinking>.*", "", t)
+    t = re.sub(r"(?s)\s*<thought>.*", "", t)
     t = re.sub(r"(?is)</?think(ing)?>", "", t)
     t = re.sub(r"(?is)<\|channel>.*?</channel\|>", "", t)   # full channel block
     t = re.sub(r"(?s)\s*<\|channel>\s*thought\b", "", t)     # unclosed open token
     t = re.sub(r"(?s)<channel\|>\s*", "", t)                  # close token
     t = re.sub(r"(?m)^\s*thought\s*$", "", t)                 # bare 'thought' line
+    t = _strip_tool_call_scaffolding(t)
     return t.strip()
+
+
+def _parse_textual_tool_calls(text: str):
+    """Recognize a tool call a model wrote as PLAIN TEXT (in its reply body)
+    instead of in the native tool_calls array, and return it in the same shape
+    the web-search loop expects: [{"name": ..., "args": {...}, "id": ...}, ...].
+    Returns [] when no textual tool call is present (ordinary prose, or a native
+    tool call, which this function never sees).
+
+    Why this exists: some cloud models (e.g. InclusionAI's Ling on OpenRouter)
+    DO emit a search request, but as visible text like
+        < tool_call>web_search
+        <arg_key>query</arg_key>
+        <arg_value>some query</arg_value>
+        < /tool_call>
+    rather than a structured tool_calls entry. Without parsing this, the local
+    DuckDuckGo search never fires and the raw tags leak into her reply.
+
+    Handles the Ling / InclusionAI layout, tolerating the `argument_` spelling,
+    missing/extra whitespace, and either < ...> or < /...> closing tags.
+    """
+    if not text:
+        return []
+    calls = []
+    block_re = re.compile(r"<\s*/?\s*tool_call\s*>\s*(.*?)\s*<\s*/?\s*tool_call\s*>",
+                          re.DOTALL | re.IGNORECASE)
+    key_re = re.compile(r"<\s*arg(?:ument)?_key\s*>\s*(.*?)\s*<\s*/\s*arg(?:ument)?_key\s*>",
+                        re.DOTALL | re.IGNORECASE)
+    val_re = re.compile(r"<\s*arg(?:ument)?_value\s*>\s*(.*?)\s*<\s*/\s*arg(?:ument)?_value\s*>",
+                        re.DOTALL | re.IGNORECASE)
+    for bi, body in enumerate(block_re.findall(text)):
+        body = body.strip()
+        if not body:
+            continue
+        # Tool name = first token, cut at the first tag.
+        name = re.split(r"<", body, maxsplit=1)[0].strip().split()[0] if body else ""
+        keys = [k.strip() for k in key_re.findall(body)]
+        vals = [v.strip() for v in val_re.findall(body)]
+        args = dict(zip(keys, vals))
+        if not args and len(vals) == 1:
+            args = {"query": vals[0]}
+        calls.append({"name": name, "args": args, "id": f"txt_{bi}"})
+    if not calls:
+        # Fallback: the model may dump an OpenAI-style tool call as JSON/text
+        # (e.g. {"name": "web_search", "arguments": {"query": "..."}}) instead of
+        # the tag format above. Only fire when "web_search" is named AND a quoted
+        # query is present, so ordinary prose never triggers a search.
+        if re.search(r"web_search", text, re.IGNORECASE):
+            jm = re.search(r'(?:"|\b)query(?:"|\b)\s*[:=]\s*"([^"]+)"', text, re.IGNORECASE)
+            if jm:
+                q = jm.group(1).strip()
+                if q:
+                    calls.append({"name": "web_search", "args": {"query": q}, "id": "txt_json"})
+    return calls
 
 
 def _has_japanese(text: str) -> bool:
@@ -350,6 +553,97 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
     return pack
 
 
+def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
+    """Guarantee the UI (English) field is actually English.
+
+    A weaker model can put Japanese (or a mixed JP/EN blob) into assistant_reply_ENG,
+    or leave it empty - in which case the chat box shows Japanese instead of the
+    English translation. If the ENG field has no Latin script, run one quick
+    JPS -> English translation pass. If that fails, fall back to showing the
+    Japanese line rather than an empty box (her real words, just untranslated).
+    """
+    eng = (pack.assistant_reply_ENG or "").strip()
+    # Fast path: already English (has Latin letters and no Japanese script).
+    if _has_latin(eng) and not _has_japanese_script(eng):
+        return pack
+    try:
+        trans = llm.invoke([{
+            "role": "user",
+            "content": (
+                "Translate the following Japanese into natural spoken English. "
+                "Output ONLY the English text - no quotes, no commentary.\n\n"
+                + (pack.assistant_reply_JPS or eng)[:1500]
+            ),
+        }])
+        new_eng = _strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)).strip()
+        if _has_latin(new_eng):
+            print("[Amadeus] ENG was not English - repaired with a translation pass")
+            return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS, assistant_reply_ENG=new_eng)
+    except Exception as e:
+        print("[Amadeus] English repair failed:", repr(e))
+    # Fallback: show the Japanese line rather than an empty box.
+    return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS, assistant_reply_ENG=eng or (pack.assistant_reply_JPS or ""))
+
+
+# --- Web-off honesty net -------------------------------------------------------
+# When web access is OFF, the reply is supposed to rely on NO_WEB_BLOCK (the
+# prompt instruction "be honest, you can't search"). A weak model sometimes
+# ignores a buried instruction and claims it searched anyway. This net checks
+# the FINAL text for a false search claim and, only then, swaps in an honest
+# line. Zero cost on honest replies (plain substring scan, no model call).
+_WEB_OFF_CLAIM_EN = [
+    "searched the web", "searched online", "i searched", "i looked it up",
+    "looked it up online", "looked it up on the web", "checked online",
+    "i checked the web", "found it online", "i found it online",
+    "ran a web search", "ran an online search", "did a web search",
+    "from my search", "according to my search", "the search results",
+]
+_WEB_OFF_NEGATION_EN = [
+    "can't search", "cannot search", "couldn't search", "can't look it up",
+    "cannot look it up", "didn't search", "did not search", "haven't searched",
+    "without searching", "can't access the web", "no web access",
+]
+_WEB_OFF_CLAIM_JA = [
+    ("ウェブ", "検索した"), ("ウェブ", "調べた"),
+    ("ネット", "検索した"), ("ネット", "調べた"),
+    ("インターネット", "調べた"), ("オンライン", "調べた"), ("オンライン", "検索"),
+]
+_WEB_OFF_NEGATION_JA = ["できませんでした", "れなかった", "しなかった", "なかった"]
+
+
+def _web_off_honesty_net(pack: "AmadeusPack") -> "AmadeusPack":
+    """Web-OFF only: if the reply claims a web search actually happened (impossible
+    while the tool is off), replace it with an honest line. Fires only on an
+    explicit false claim, in either language field."""
+    eng = (pack.assistant_reply_ENG or "").lower()
+    jps = pack.assistant_reply_JPS or ""
+
+    eng_false = any(c in eng for c in _WEB_OFF_CLAIM_EN) and not any(n in eng for n in _WEB_OFF_NEGATION_EN)
+    jps_false = any(ctx in jps and v in jps for ctx, v in _WEB_OFF_CLAIM_JA) \
+        and not any(n in jps for n in _WEB_OFF_NEGATION_JA)
+
+    if not (eng_false or jps_false):
+        return pack
+
+    print("[Amadeus] Web is OFF but the reply claimed a search happened - swapped in the honest line.")
+    return AmadeusPack(
+        assistant_reply_JPS=(
+            "今はウェブがオフだから、検索はできなかったの。"
+            "オンラインで確認したとは言えないわね。"
+        ),
+        assistant_reply_ENG=(
+            "Web access is off right now, so I didn't search - I can't claim I "
+            "verified that online."
+        ),
+    )
+
+
+def _finalize(pack: "AmadeusPack", llm) -> "AmadeusPack":
+    """Apply every output guard in order on every reply path: keep the TTS field
+    clean Japanese, then make sure the UI field is actually English."""
+    return _ensure_english(_ensure_japanese(pack, llm), llm)
+
+
 def _salvage_plain_text(raw, llm) -> "AmadeusPack":
     """Last resort: turn whatever plain text the model actually produced into an
     AmadeusPack, so a flaky model/server still yields *an* answer instead of a hard
@@ -407,6 +701,62 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
     return AmadeusPack(assistant_reply_JPS=jps or eng, assistant_reply_ENG=eng)
 
 
+# --- Rate-limit patience -------------------------------------------------------
+# Free cloud tiers (Gemini free, OpenRouter free, ...) throttle bursts with
+# HTTP 429. The web loop makes several sequential calls per message, so a burst
+# of testing can 429 mid-turn. Instead of falling through to a degraded answer,
+# wait out the throttle window ONCE and retry. This code is DORMANT on local
+# servers and high-limit tiers - they don't return 429, so normal replies are
+# untouched. _RATE_LIMIT_STATE caps the waiting: once we have waited for a 429
+# within the last _RATE_LIMIT_REWAIT_AFTER seconds, further 429s raise at once
+# (the window has not reset, or the daily quota is gone - waiting again would
+# only pile on delay; the honesty net in the web loop then takes over).
+_RATE_LIMIT_STATE = {"last_wait": 0.0}
+_RATE_LIMIT_REWAIT_AFTER = 70.0
+_RATE_LIMIT_DEFAULT_WAIT = 45.0
+_RATE_LIMIT_MIN_WAIT = 5.0
+_RATE_LIMIT_MAX_WAIT = 60.0
+
+
+def _is_rate_limited(exc) -> bool:
+    """True when the API refused the call because of rate/quota limits (429)."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        code = getattr(exc, "code", None)
+        status = code if isinstance(code, int) else None
+    if status == 429:
+        return True
+    text = str(exc).lower()
+    return ("429" in text or "rate limit" in text or "too many requests" in text
+            or "resource_exhausted" in text or "resource exhausted" in text
+            or "quota" in text)
+
+
+def _rate_limit_wait_seconds(exc) -> float:
+    """How long to wait before retrying a 429. Honours the provider's
+    Retry-After hint when present; otherwise a bounded default."""
+    try:
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+        if headers is not None:
+            hint = headers.get("retry-after")
+            if hint:
+                return max(_RATE_LIMIT_MIN_WAIT, min(float(hint), _RATE_LIMIT_MAX_WAIT))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return _RATE_LIMIT_DEFAULT_WAIT
+
+
+def _is_daily_quota_exhausted(exc) -> bool:
+    """True when the 429 is a DAILY quota exhaustion (e.g. the Gemini free
+    tier's "PerDayPerProjectPerModel" quota, or explicit "daily quota/limit"
+    wording). Such a quota only resets with the daily reset, so waiting is
+    provably futile - raise at once and let the honesty net serve the honest
+    line. Short throttles (RPM/TPM bursts) are NOT daily quotas and keep the
+    full wait-and-retry."""
+    text = str(exc).lower()
+    return ("perday" in text or "per_day" in text
+            or "daily quota" in text or "daily limit" in text)
+
 def _forced_tool_choice_rejected(exc) -> bool:
     """True when a server refused a forced tool choice (tool_choice="required").
 
@@ -438,17 +788,31 @@ def _invoke_forced(bound_llm, convo):
     """Invoke a tool_choice="required" binding; if the server rejects the forced
     choice (see _forced_tool_choice_rejected), retry once with tool_choice="auto"
     - the same tools, no guarantee. Her system prompt still instructs the right
-    tool, and _salvage_plain_text covers a plain-text answer. Other exceptions
-    (timeouts, connection drops, real schema 400s) propagate unchanged.
+    tool, and _salvage_plain_text covers a plain-text answer. A rate limit
+    (429 - free cloud tiers) triggers ONE bounded wait and retry (see
+    _is_rate_limited). Other exceptions (timeouts, connection drops, real schema
+    400s) propagate unchanged.
     """
     try:
         return bound_llm.invoke(convo)
     except Exception as exc:
-        if not _forced_tool_choice_rejected(exc):
-            raise
-        print("[Amadeus] Server rejected forced tool choice; retrying with tool_choice=auto:",
-              type(exc).__name__)
-        return bound_llm.bind(tool_choice="auto").invoke(convo)
+        if _forced_tool_choice_rejected(exc):
+            print("[Amadeus] Server rejected forced tool choice; retrying with tool_choice=auto:",
+                  type(exc).__name__)
+            return bound_llm.bind(tool_choice="auto").invoke(convo)
+        if _is_rate_limited(exc):
+            if _is_daily_quota_exhausted(exc):
+                print("[Amadeus] API daily quota exhausted - waiting cannot "
+                      "help, skipping the wait.")
+                raise
+            now = time.monotonic()
+            if now - _RATE_LIMIT_STATE["last_wait"] >= _RATE_LIMIT_REWAIT_AFTER:
+                wait = _rate_limit_wait_seconds(exc)
+                _RATE_LIMIT_STATE["last_wait"] = now
+                print(f"[Amadeus] API rate limit (429); waiting {wait:.0f}s, then retrying once.")
+                time.sleep(wait)
+                return bound_llm.invoke(convo)  # a second 429 raises (no stacked waits)
+        raise
 
 
 
@@ -472,9 +836,316 @@ def _merge_leading_system_messages(messages):
     return [{"role": "system", "content": "\n\n".join(merged)}] + list(messages[start:])
 
 
+# --- Search-failure honesty net -------------------------------------------------
+# When a search turn cannot be completed - the final call failed (rate limit,
+# timeout, dropped connection) or came back empty with no search having run -
+# the only surviving text is her pre-search announcement ("I'll search... just a
+# moment"). Serving that as the reply would promise an action that never
+# happened. Return this fixed honest line instead: STATIC (no model call - the
+# failure may be quota/network related, so spending another API call on it would
+# be wrong), same idiom as the web-off honesty net.
+def _honest_search_failure_pack() -> "AmadeusPack":
+    return AmadeusPack(
+        assistant_reply_JPS=(
+            "今は検索を最後までできなかったの。たぶん一時的な不具合だと思うわ。"
+            "少し待ってから、もう一度聞いてくれる？"
+        ),
+        assistant_reply_ENG=(
+            "I couldn't actually finish the search this time. It's probably a "
+            "temporary glitch, could you ask me again in a moment?"
+        ),
+    )
+
+
+def _honest_plain_failure_pack() -> "AmadeusPack":
+    """STATIC honest line for a NON-search turn whose reply degenerated and
+    could not be salvaged (e.g. a repetition loop with no clean part). No
+    model call - the failure may be model/state related, so spending another
+    API call on the apology would be wrong. Same idiom as the search-failure
+    line above."""
+    return AmadeusPack(
+        assistant_reply_JPS=(
+            "先ほどうまく言葉がまとまらず、まわり道になってしまったみたい。"
+            "少し待ってから、もう一度言ってもらえる？"
+        ),
+        assistant_reply_ENG=(
+            "I got tangled up in my own words there. Could you give me a "
+            "moment and ask me again?"
+        ),
+    )
+
+
+# --- Repetition-loop guard ------------------------------------------------------
+# A weak (or throttled) model can DEGENERATE into a repetition loop: the same
+# ~5-word phrase (EN) or ~12-char span (JA) cycling 3+ times, usually cut off
+# mid-sentence by the token cap. A token-level repetition_penalty does not
+# reach this (it penalizes immediate token re-emission, not long-period phrase
+# cycling), so the guard lives here, on the final text: a pure string scan -
+# zero API calls, zero latency. Applied only at the web loop's phase-3
+# boundary and on the normal path's salvage, so happy-path replies are
+# untouched.
+#
+# Two shingle sizes per language: the strict one (long shingle, 3 hits) catches
+# exact cycling; the loose one (shorter shingle, 4 hits) still catches loops
+# with light variation - an occasional swapped word breaks every window that
+# covers it, but the windows beside it keep repeating.
+def _compact_index_to_char(text: str, idx: int):
+    """Map an index into the whitespace-stripped form of `text` back to the
+    character index in the original text."""
+    count = 0
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            continue
+        if count == idx:
+            return i
+        count += 1
+    return None
+
+
+def _repetition_cut(text: str):
+    """Return the character index where a repetition cycle begins, or None
+    when the text is clean."""
+    text = (text or "").strip()
+    if len(text) < 80:
+        return None
+
+    best = None  # (cut_index, hit_count)
+
+    # --- English: word shingles --------------------------------------------
+    toks = [(m.group(), m.start()) for m in re.finditer(r"\S+", text)]
+    if len(toks) >= 30:
+        for n, need, spread in ((5, 3, 20), (4, 4, 16)):
+            spans = {}
+            for i in range(len(toks) - n + 1):
+                sh = " ".join(w for w, _ in toks[i:i + n]).lower()
+                if sh.isascii():
+                    spans.setdefault(sh, []).append(i)
+            for pos in spans.values():
+                if len(pos) >= need and (pos[-1] - pos[0]) >= spread:
+                    cut = toks[pos[1]][1]
+                    if best is None or len(pos) > best[1]:
+                        best = (cut, len(pos))
+    if best is not None:
+        return best[0]
+
+    # --- Japanese: character shingles --------------------------------------
+    compact = "".join(ch for ch in text if not ch.isspace())
+    if len(compact) >= 48 and any("\u3040" <= ch <= "\u30ff" for ch in compact):
+        for n, need, spread in ((12, 3, 36), (10, 4, 30)):
+            spans = {}
+            for i in range(len(compact) - n + 1):
+                spans.setdefault(compact[i:i + n], []).append(i)
+            for pos in spans.values():
+                if len(pos) >= need and (pos[-1] - pos[0]) >= spread:
+                    cut = _compact_index_to_char(text, pos[1])
+                    if cut is not None and (best is None or len(pos) > best[1]):
+                        best = (cut, len(pos))
+        if best is not None:
+            return best[0]
+    return None
+
+
+def _de_loop(text: str) -> str:
+    """Cut a repetition loop out of `text`: keep everything before the cycle's
+    second occurrence, trimmed back to the last sentence end. Clean texts are
+    returned unchanged (stripped)."""
+    text = (text or "").strip()
+    cut = _repetition_cut(text)
+    if cut is None:
+        return text
+    seg = text[:cut]
+    m = max(seg.rfind(p) for p in ".!?。！？")
+    if m >= len(seg) // 2:
+        seg = seg[:m + 1]
+    return seg.strip()
+
+
+# --- Anti-anchoring nudge + refusal override ------------------------------------
+# A history full of "I can't search" refusals (the web-off era) can ANCHOR a
+# weak model: asked to search after web comes back ON, it completes the
+# pattern (refuse again) instead of re-reading the system prompt. A big model
+# breaks the pattern; a small one may not. Two layers for exactly that
+# situation:
+#   (a) a one-line internal note for the turn (prompt level - cheap, but a
+#       stubborn model can still ignore it);
+#   (b) a REFUSAL OVERRIDE the model cannot opt out of: when the turn is a
+#       recognizable retry of a just-refused search, the app runs the search
+#       itself and feeds the results back - the model then only has to write
+#       the answer from real data.
+# Every other turn is byte-identical: the note is static text added only in
+# that exact situation, and the override fires only on its triple condition
+# (recent refusal + retry phrasing + a search topic in the recent history).
+_SEARCH_REFUSAL_EN = (
+    "can't search", "cannot search", "couldn't search", "can't do a search",
+    "unable to search", "can't use web", "no web access",
+    "don't have access", "don't actually have the capability",
+    "can't access the web", "can't look it up", "couldn't look it up",
+    "couldn't actually finish the search", "without web access",
+)
+_SEARCH_REFUSAL_JA = (
+    "検索できない", "検索は使えない", "検索を使えない", "検索ができません",
+    "ウェブがオフ", "ウェブ検索は使えない", "ウェブ検索が使えない",
+    "検索を最後までできなかった", "アクセスできない",
+)
+
+
+def _recent_search_refusal(messages) -> bool:
+    """True when one of the last four assistant turns contains a search refusal
+    (the web-off-era pattern that anchors weak models)."""
+    recent = [m.get("content", "") for m in messages
+              if m.get("role") == "assistant"
+              and isinstance(m.get("content"), str)][-4:]
+    for a in recent:
+        al = a.lower()
+        if (any(p in al for p in _SEARCH_REFUSAL_EN)
+                or any(p in a for p in _SEARCH_REFUSAL_JA)):
+            return True
+    return False
+
+
+_RETRY_INTENT_RE = re.compile(
+    r"\btry again\b|\btry once more\b|\bone more time\b|\bretry\b"
+    r"|\bplease try\b|\bagain\b"
+    r"|\bnow (?:it|web) (?:is|was) on\b"
+    r"|turned (?:it|web|your web) (?:back )?on\b"
+    r"|もう一度|もう一回|もう試して|もう一回試して|再度|もう一回だけ",
+    re.IGNORECASE,
+)
+
+
+def _search_retry_intent(messages) -> bool:
+    """True when the latest user message is a retry of a search that the recent
+    history shows was just refused (retry phrasing + a recent refusal above)."""
+    if not _recent_search_refusal(messages):
+        return False
+    last_user = next(
+        (m.get("content", "") for m in reversed(messages)
+         if m.get("role") == "user"),
+        "",
+    )
+    return (isinstance(last_user, str)
+            and bool(_RETRY_INTENT_RE.search(last_user)))
+
+
+def _find_prior_search_query(messages, lookback=8) -> str:
+    """The most recent user message (within `lookback` user turns) that
+    explicitly asked for a search - the topic to use when the app runs a
+    refusal-override search itself. "" when there is none."""
+    user_msgs = [m.get("content", "") for m in reversed(messages)
+                 if m.get("role") == "user"
+                 and isinstance(m.get("content"), str)]
+    for c in user_msgs[:lookback]:
+        if _EXPLICIT_SEARCH_RE.search(c):
+            return c.strip()[:200]
+    return ""
+
+# --- Explicit-request fast path ---------------------------------------------------
+# With web access ON, every message normally goes through the phase-1 judgement
+# call ("does this need a search?"). When the user EXPLICITLY asks for a search
+# in their own message, that call can only answer "yes" - pure overhead (one API
+# call plus latency). Skip it and search directly on the user's own words; the
+# results then flow through the exact same handling code. Deliberately
+# conservative (search-verb phrases and 'online' only) so "I turned your web
+# access on" or an ordinary question never triggers the fast path - her
+# proactive judgement on normal chat is untouched.
+_EXPLICIT_SEARCH_RE = re.compile(
+    r"\bsearch(?:ing|ed|es)?\b"
+    r"|\blook(?:ing|ed)? (?:it |that |this )?up\b"
+    r"|\blook into\b"
+    r"|\bonline\b"
+    r"|\bgoogle\b",
+    re.IGNORECASE,
+)
+
+
+def _user_explicitly_asks_for_search(messages) -> str:
+    """Return the user's latest message when it explicitly asks for a web search
+    (it becomes the search query), else "" (run the normal judgement call)."""
+    last_user = next(
+        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+        "",
+    )
+    if isinstance(last_user, str) and _EXPLICIT_SEARCH_RE.search(last_user):
+        return last_user.strip()
+    return ""
+
+
+# --- Web-ON false-refusal net ---------------------------------------------------
+# Mirror of the web-off honesty net, for the OPPOSITE error: with web access
+# ON, a weak model anchored by a history of "I can't search" turns can still
+# claim in a perfectly ordinary reply (good night, small talk) that web
+# search is unavailable - a false statement about the current settings. The
+# anti-anchoring nudge attacks this at prompt level; this net is the
+# structural catch: when a finished web-ON reply contains a search refusal
+# but the user never asked for a search this turn, ONE bounded corrective
+# rewrite asks her to redo the reply without that statement. Dormant
+# otherwise (plain substring scan; the rewrite costs a call only in the bad
+# case). A refusal is never rewritten when the user actually asked for a
+# search - there it may be the honest outcome.
+def _web_on_false_refusal_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
+    eng = pack.assistant_reply_ENG or ""
+    eng_l = eng.lower()
+    jps = pack.assistant_reply_JPS or ""
+    refused = (any(p in eng_l for p in _SEARCH_REFUSAL_EN)
+               or any(p in jps for p in _SEARCH_REFUSAL_JA))
+    if not refused:
+        return pack
+    if (_user_explicitly_asks_for_search(messages)
+            or _search_retry_intent(messages)):
+        return pack  # a search WAS requested: the refusal may be honest
+    if eng_l.strip().startswith("i couldn't actually finish the search"):
+        return pack  # the static honest search-failure line (a search was
+                     # attempted and failed) is fine as-is
+    print("[Amadeus] Web ON: reply wrongly claims web search is unavailable - "
+          "one corrective rewrite.")
+    rewrite_llm = llm.bind_tools(
+        [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
+    convo = (list(messages)
+             + [{"role": "assistant", "content": eng}]
+             + [{"role": "user", "content": (
+                 "(Internal note: in your last reply you stated that you cannot "
+                 "use web search, but web access is ON in the settings and no "
+                 "search failed this turn - that statement is wrong. Rewrite the "
+                 "reply WITHOUT any statement about web search being unavailable, "
+                 "keeping everything else the same, using the AmadeusPack tool.)"
+             )}])
+    try:
+        reply = _invoke_forced(rewrite_llm, convo)
+    except Exception as exc:
+        print("[Amadeus] Web ON: corrective rewrite failed:", repr(exc))
+        return pack
+    calls = getattr(reply, "tool_calls", None) or []
+    if calls and calls[0].get("name") == "AmadeusPack":
+        new = _pack_from_args(calls[0].get("args"))
+        if not any(p in (new.assistant_reply_ENG or "").lower()
+                   for p in _SEARCH_REFUSAL_EN):
+            return new
+        print("[Amadeus] Web ON: rewrite still refuses - serving the original.")
+    return pack
+
 def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
+    """Web-search turn with a hard honesty guarantee.
+
+    Any failure inside the loop (rate limit, timeout, dropped connection,
+    unusable model output) returns _honest_search_failure_pack() instead of
+    propagating. Why not let the generic outer fallback retry? It retries with
+    the ORIGINAL messages - which lack any search results from this turn - so it
+    can at best reproduce her pre-search announcement as the "answer" (the exact
+    failure this guard exists to remove).
+    """
+    try:
+        pack = _web_search_loop(llm, messages)
+    except Exception as exc:
+        print("[Amadeus] Web loop: search turn could not be completed - honest fallback:", repr(exc))
+        return _honest_search_failure_pack()
+    return _web_on_false_refusal_net(pack, llm, messages)
+
+
+def _web_search_loop(llm, messages) -> "AmadeusPack":
     """Chat loop with the web_search tool available.
 
+    Fast path: an explicit "search for X" request skips the phase-1 judgement
+             call and searches directly on the user's words (one fewer call).
     Phase 1: she may search (up to twice) or answer immediately. Judgement calls
              run with Qwen3 thinking ON (selectively) so she can reason about
              whether the message references something worth verifying; if the
@@ -516,17 +1187,62 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
                 print("[Amadeus] Web loop: thinking call failed, switching to non-thinking:", repr(exc))
         return _invoke_forced(tool_llm, convo_)
 
-    # ---- Phase 1: search (or answer) loop -------------------------------
     last_plain = ""
-    for _ in range(3):  # hard cap: at most two searches before we force an answer
+    search_ran = False
+
+    # ---- Explicit-request fast path: search straight away ----------------
+    explicit_query = _user_explicitly_asks_for_search(messages)
+    if explicit_query:
+        query = explicit_query[:200]
+        search_ran = True
+        convo.append({
+            "role": "assistant",
+            "content": "I searched the web for: " + query,
+        })
+        convo.append({
+            "role": "user",
+            "content": (
+                f"Web search results for '{query}':\n{_run_web_search(query)}\n\n"
+                "Now answer the user's original request using the AmadeusPack tool, "
+                "based on these results."
+            ),
+        })
+
+    # ---- Anti-anchoring nudge -----------------------------------------------
+    # Web is ON but her recent history contains "I can't search" refusals:
+    # layer (a) - a one-line note for THIS turn only, telling her the refusals
+    # are outdated. Static text, zero API calls; every other turn is
+    # byte-identical.
+    if not search_ran and _recent_search_refusal(messages):
+        convo.append({
+            "role": "user",
+            "content": (
+                "(Internal note: web access has just been turned ON by the "
+                "user. Your earlier statements that you cannot search or lack "
+                "web access are OUTDATED - the web_search tool is available "
+                "right now and works. If the user wants something looked up, "
+                "searched, or verified, use web_search now. Do not repeat "
+                "earlier refusals.)"
+            ),
+        })
+
+    # ---- Phase 1: search (or answer) loop -------------------------------
+    # Runs only when the fast path above did not already search: on an explicit
+    # request there is no point re-asking "do I need to search?".
+    for _ in range(0 if search_ran else 3):  # hard cap: at most two searches before we force an answer
         reply = _phase1_invoke(convo)
         calls = getattr(reply, "tool_calls", None) or []
 
         if not calls:
-            # She answered with plain text instead of a tool call.
-            raw = reply.content if isinstance(reply.content, str) else str(reply.content)
-            last_plain = _strip_thinking(raw)
-            break
+            # Some models (e.g. Ling on OpenRouter) write the tool call as
+            # PLAIN TEXT in the reply body instead of the native tool_calls
+            # array. Parse it so the local search still fires. Only when
+            # nothing parseable is found do we treat it as a plain answer.
+            raw_text = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+            calls = _parse_textual_tool_calls(raw_text)
+            if not calls:
+                last_plain = _strip_thinking(raw_text)
+                break
 
         first = calls[0]
         if first.get("name") == "AmadeusPack":
@@ -549,6 +1265,7 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
         for call in calls:
             query = (call.get("args") or {}).get("query", "")
             if call.get("name") == "web_search":
+                search_ran = True
                 searches.append((query, _run_web_search(query)))
             else:
                 searches.append((query, "Unknown tool."))
@@ -568,9 +1285,70 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
                     ),
                 })
 
+    # ---- Refusal override (structural backstop) -----------------------------
+    # Layer (b): even the nudge above is prompt text a stubborn small model can
+    # ignore - it may answer the retry in plain prose (another refusal) without
+    # calling web_search. When the turn is a recognizable retry of a
+    # just-refused search, the app runs the search itself and feeds the results
+    # back; the model then only has to write the answer from real data. The
+    # stale refusal is dropped from the context so the pattern cannot persist.
+    if not search_ran and last_plain and _search_retry_intent(messages):
+        query = _find_prior_search_query(messages)
+        if query:
+            print("[Amadeus] Web loop: model refused to search on a retry "
+                  "turn - running the search ourselves.")
+            search_ran = True
+            last_plain = ""
+            convo.append({
+                "role": "assistant",
+                "content": "I searched the web for: " + query,
+            })
+            convo.append({
+                "role": "user",
+                "content": (
+                    f"Web search results for '{query}':\n{_run_web_search(query)}\n\n"
+                    "Now answer the user's original request using the AmadeusPack tool, "
+                    "based on these results."
+                ),
+            })
+
     # ---- Phase 2: force the final structured answer ----------------------
+    # A phase-1 prose answer may itself be a repetition-loop degeneration
+    # (a weak model cycling one sentence until the token cap). Feeding that
+    # garbage back into the context would prime the final call to degenerate
+    # the same way - cut the loop out first, and drop the turn entirely when
+    # nothing usable survives. Clean answers (however short) pass through
+    # untouched.
+    if last_plain and _repetition_cut(last_plain) is not None:
+        cleaned = _de_loop(last_plain)
+        if len(cleaned) >= 40 and _repetition_cut(cleaned) is None:
+            print("[Amadeus] Web loop: phase-1 answer looped - feeding back "
+                  "only the clean part.")
+            last_plain = cleaned
+        else:
+            print("[Amadeus] Web loop: phase-1 answer looped with no usable "
+                  "part - not feeding it back into the context.")
+            last_plain = ""
     if last_plain:
         convo.append({"role": "assistant", "content": last_plain})
+    # ---- Safety net: no search actually ran this turn --------------------
+    # If the model could not produce a usable search request (whatever its text
+    # format), do not let her pretend one happened. The wording is conditional so
+    # ordinary turns that needed no search are unaffected - it only bites when the
+    # user asked her to look something up online. This guarantees the honest
+    # "I could not verify it" outcome for ANY model, regardless of format.
+    if not search_ran:
+        convo.append({
+            "role": "user",
+            "content": (
+                "(Internal note: no web search was actually run for this reply.) "
+                "If the user asked you to look something up online, check the web, or "
+                "verify something recent, be honest that you could not search the web or "
+                "confirm it right now, and answer from your own knowledge instead. If no "
+                "search was needed, simply answer normally."
+            ),
+        })
+    
     final_llm = llm.bind_tools([pack_tool], tool_choice="required")
     reply = _invoke_forced(final_llm, convo)
     calls = getattr(reply, "tool_calls", None) or []
@@ -584,7 +1362,42 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     # call and fall back to any plain answer captured during the search loop.
     # _salvage_plain_text only raises if there is literally no text at all.
     raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+    if not search_ran and not _strip_thinking(raw).strip():
+        # The final call produced nothing usable and no search ran: the only
+        # surviving text is her pre-search announcement, which must not become
+        # the reply (it promises an action that never happened).
+        print("[Amadeus] Web loop: final answer was empty and no search ran - honest fallback.")
+        return _honest_search_failure_pack()
     candidate = _strip_thinking(raw) or last_plain
+    if _repetition_cut(candidate) is not None:
+        # The final answer degenerated into a repetition loop (weak-model
+        # cycling, usually cut mid-sentence by the token cap). Cut the loop
+        # out of the text; if that leaves no usable sentence, one bounded
+        # retry of the final call, then the honest line.
+        print("[Amadeus] Web loop: repetition loop in final answer - "
+              "cutting it out.")
+        candidate = _de_loop(candidate)
+        if len(candidate) < 40 or _repetition_cut(candidate) is not None:
+            print("[Amadeus] Web loop: no clean text before the loop - one "
+                  "bounded retry of the final call.")
+            try:
+                reply2 = _invoke_forced(final_llm, convo)
+                calls2 = getattr(reply2, "tool_calls", None) or []
+                if calls2 and calls2[0].get("name") == "AmadeusPack":
+                    return _pack_from_args(calls2[0].get("args"))
+                raw2 = (reply2.content if isinstance(reply2.content, str)
+                        else str(reply2.content or ""))
+                cand2 = _de_loop(_strip_thinking(raw2))
+                if len(cand2) >= 40 and _repetition_cut(cand2) is None:
+                    candidate = cand2
+                else:
+                    print("[Amadeus] Web loop: retry still degenerate - "
+                          "honest fallback.")
+                    return _honest_search_failure_pack()
+            except Exception:
+                print("[Amadeus] Web loop: bounded retry failed - honest "
+                      "fallback.")
+                return _honest_search_failure_pack()
     print("[Amadeus] Web loop: no AmadeusPack; salvaging plain text.")
     return _salvage_plain_text(candidate, llm)
 
@@ -626,18 +1439,34 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         + [internal_context if internal_context is not None else store.load_internal_context()]
         + [pack_rules]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-        + ([PROACTIVE_SEARCH_BLOCK] if web_on else [])
+        + ([PROACTIVE_SEARCH_BLOCK] if web_on else [NO_WEB_BLOCK])
         + message_context
     )
 
+    def _out(p: "AmadeusPack") -> "AmadeusPack":
+        # Every reply goes through the output guards; the web-off honesty net
+        # applies only when the search tool really is off this turn.
+        p = _finalize(p, llm)
+        return _web_off_honesty_net(p) if not web_on else p
+
     try:
         if web_on:
-            return _ensure_japanese(_getResponsePackedWithWebSearch(llm, messages), llm)
+            return _out(_getResponsePackedWithWebSearch(llm, messages))
 
         # Web access OFF: original single-call path (no search tool offered).
+        # Deep-thinking ON: the reply is generated by the thinking client -
+        # ONE extra-considered call, still the same forced AmadeusPack format.
+        # The client is bounded (token cap + timeout) in llm.py, and on
+        # providers that reject thinking parameters the existing fallback
+        # below takes over unchanged. OFF (default): exactly the original path.
+        if store.load_deep_thinking():
+            think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True)
+            structured = think_llm.with_structured_output(AmadeusPack, method="function_calling")
+            out: AmadeusPack = structured.invoke(messages)
+            return _out(out)
         structured = llm.with_structured_output(AmadeusPack, method="function_calling")
         out: AmadeusPack = structured.invoke(messages)
-        return _ensure_japanese(out, llm)
+        return _out(out)
     except Exception as e:
         # Fallback: if structured output fails, degrade gracefully
         print("[Amadeus] Packed response parse failed:", repr(e))
@@ -661,15 +1490,27 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             raise
         calls = getattr(reply, "tool_calls", None) or []
         if calls and calls[0].get("name") == "AmadeusPack":
-            return _ensure_japanese(_pack_from_args(calls[0].get("args")), llm)
+            return _out(_pack_from_args(calls[0].get("args")))
 
         # The call returned but not as an AmadeusPack (she answered in plain text).
         # Rather than erroring out, salvage whatever she said into a pack so the user
         # still gets an answer. _salvage_plain_text only raises if there is literally
         # no text at all - the honest "nothing came back" case.
         raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+        if _repetition_cut(raw) is not None:
+            # The forced call degenerated into a repetition loop. Cut the loop
+            # out; if that leaves no usable sentence, serve the static honest
+            # line (one more model call would likely just loop again).
+            cleaned = _de_loop(raw)
+            if len(cleaned) >= 40 and _repetition_cut(cleaned) is None:
+                print("[Amadeus] Forced pack call returned a repetition loop - "
+                      "cut out, salvaging the clean part.")
+                return _out(_salvage_plain_text(cleaned, llm))
+            print("[Amadeus] Forced pack call returned a repetition loop - "
+                  "no clean part; honest fallback.")
+            return _honest_plain_failure_pack()
         print("[Amadeus] Forced pack call returned no AmadeusPack; salvaging plain text.")
-        return _ensure_japanese(_salvage_plain_text(raw, llm), llm)
+        return _out(_salvage_plain_text(raw, llm))
 
 
 # pre:

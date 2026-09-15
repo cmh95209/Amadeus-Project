@@ -90,6 +90,11 @@ def _is_local_host(base_url: str) -> bool:
     )
 
 
+def _is_gemini_host(base_url: str) -> bool:
+    """True for Google's Gemini API (the OpenAI-compat layer)."""
+    return "generativelanguage.googleapis.com" in base_url
+
+
 def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
     """Probe an OpenAI-compatible server's standard /models endpoint.
 
@@ -165,7 +170,18 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             "max_tokens": 4096,
         }
         if local:
+            # Qwen3/llama.cpp chat-template flag for local servers.
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+        elif _is_gemini_host(base_url):
+            # Gemini 3 models take thinking level via the compat layer's
+            # reasoning_effort field (verified live 2026-09-14: "high" runs
+            # ~1000 internal reasoning tokens, "low" ~270; the google-scoped
+            # thinking_config shape now 400s). The reasoning happens
+            # server-side and stays INTERNAL - content (and therefore her
+            # UI/voice output) comes back clean. Models that don't support
+            # the parameter (e.g. Gemma on the Gemini API) get an HTTP 400,
+            # which the caller's existing fallback already handles.
+            kwargs["extra_body"] = {"reasoning_effort": "high"}
     else:
         kwargs = {
             "model": model,
@@ -182,13 +198,14 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # a shorter/longer ceiling (e.g. 300 = 5 minutes).
             "timeout": 600,
             "max_retries": 0,
-            # Bound the OUTPUT length. Without a cap, a local model that gets stuck
-            # in a repetition loop (a known Gemma failure mode when it cannot satisfy
-            # a forced tool call) would generate until the full timeout - i.e. appear
-            # to hang for ~10 minutes. Capping at 4096 tokens (far more than any reply
-            # she actually gives) means a runaway/stuck generation stops quickly and
-            # chat.py surfaces a clean error instead of an endless spin.
-            "max_tokens": 4096,
+            # Bound the OUTPUT length. Without a cap, a model stuck in a
+            # repetition loop (a known Gemma failure mode when it cannot satisfy
+            # a forced tool call) would generate until the full timeout - i.e.
+            # appear to hang for ~10 minutes. Real replies are 150-300 tokens,
+            # so 1024 is far more than she needs, and a runaway/stuck
+            # generation now stops at a quarter of the old worst case instead
+            # of an endless spin.
+            "max_tokens": 1024,
         }
         if local:
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
