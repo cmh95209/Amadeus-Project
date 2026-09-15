@@ -94,7 +94,7 @@ The current development version includes:
 - Reply regeneration with saved versions, plus edit / delete / undo
 - Per-message voice replay and on-demand re-voice
 - Voice retention cap (keep the last N recordings)
-- Optional local web search, with optional deep thinking for the search decision
+- Optional local web search (now also reads the top result's page for real content, not just one-line snippets), with optional deep thinking for the search decision
 - Backend connection/status display
 - Conversation memory reset controls
 
