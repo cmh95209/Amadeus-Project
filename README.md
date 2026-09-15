@@ -937,7 +937,8 @@ parameters Unsloth Desktop exposes:
 
 - Temperature, Top P, Top K, Min P, Repetition Penalty, Presence Penalty,
   and Output Max Tokens (this last one replaces the built-in 1024-token
-  reply cap when enabled).
+  reply cap when enabled; values are clamped to sane ranges - e.g.
+  Output Max Tokens is 64-8192, mirroring Unsloth Desktop's own UI).
 - Each setting has its own on/off toggle (off = use your model server's own
   default, the previous behaviour), a slider for scaling, a number box for
   exact values, and a "?" tooltip explaining what it does.
@@ -950,6 +951,10 @@ parameters Unsloth Desktop exposes:
   connection without it, and retries the message once - and the tab notes
   which settings the server refused. With everything off (the default),
   requests are byte-for-byte identical to before.
+- **Follow-up UI fix (same day).** The tab's first rows and the "?"
+  tooltips were clipped by the settings modal's generic input/label CSS;
+  the tab's styles are now scoped under `.settings-modal`, so rows align
+  and tooltips render fully.
 
 Covered by a new offline test file (`backend/tests/test_sampling.py`, 16
 tests: persistence, validation, the local/cloud split, the 4096-token
