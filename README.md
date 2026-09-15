@@ -929,6 +929,40 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Web-Search Guardrails and Model Compatibility — September 15, 2026
+
+The web access toggle is now reliable across model sizes and providers:
+smaller models can no longer ignore it, and cloud models that write tool
+calls as plain text (e.g. Ling on OpenRouter) are handled instead of leaking
+raw tags into her reply.
+
+- **Toggle honesty, both directions.** With web OFF, a prompt block plus a
+  final-text net stop false "I searched" claims. With web ON, an
+  anti-anchoring nudge and one bounded corrective rewrite remove stale
+  "I can't search" refusals carried over from earlier turns; explicit
+  "search for X" requests skip the judgement call and search directly.
+- **Textual tool-call parsing.** Ling-style `<tool_call>` blocks (and a
+  JSON fallback) written in the reply body are parsed so the local search
+  still fires; tool scaffolding is stripped before TTS/UI.
+- **Resilient search.** DuckDuckGo failures retry up to twice on fresh
+  connections with a warm client in between, all inside a hard 15-second
+  budget. API rate limits (429) wait once (honouring Retry-After) instead of
+  failing; daily-quota exhaustion skips the wait. Any turn that cannot be
+  completed returns a fixed honest line — never her pre-search announcement.
+- **Output guards.** A repetition-loop guard cuts degenerate cycling out of
+  final text, and an English-repair pass guarantees the UI field is English
+  (falling back to her Japanese line rather than an empty box).
+- **`llm.py`.** Gemini thinking level via the OpenAI-compat
+  `reasoning_effort` field; output cap lowered to 1024 tokens so a stuck
+  local model fails fast instead of hanging for minutes.
+- **Launcher.** Child processes run with `PYTHONUNBUFFERED` so logs update
+  live.
+
+Covered by a new offline test suite (`backend/tests/test_web_search_resilience.py`,
+30 tests, no network); full backend suite passes.
+
+---
+
 ## Voice Sanitization for Weaker Local Models — September 14, 2026
 
 Weaker local models (Gemma 4 12B and the like) can mangle the structured
