@@ -929,6 +929,30 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Live Weather & Air Quality — September 16, 2026
+
+Weather questions now get real numbers instead of search-engine snippets
+(which for a small town's live weather are usually empty or bot-walled) or
+plausible-sounding guesses. This closes the limitation noted in the
+September 15 entry below.
+
+- When web access is ON and you ask something clearly about the weather -
+  the forecast, the temperature, whether it will rain, humidity, air
+  quality - she pulls it straight from the keyless Open-Meteo service:
+  right now, today, tomorrow, and the US AQI with PM2.5.
+- The report names the place she looked up ("Lenggong, Perak, Malaysia").
+  If you didn't give one, she asks which town you mean - she never guesses.
+- The lookup is time-boxed (about fifteen seconds at most) and degrades to
+  one honest line if the service is unreachable or the place is unknown,
+  so a slow or dead service can never stall a reply.
+- An explicit "try a search for the weather in X" takes this live path too -
+  the numbers beat any search snippet.
+- With web access OFF she behaves exactly as before - no weather lookup.
+- 22 new offline tests cover the report, the intent detection, the place
+  extraction, and the wiring.
+
+---
+
 ## Web Search: Explicit Requests Now Search the Actual Topic — September 15, 2026
 
 With web access ON, an explicit request ("...try a search for the weather in
