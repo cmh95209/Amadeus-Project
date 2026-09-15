@@ -10,6 +10,7 @@ import time
 import stats
 import ja_voice
 import webfetch
+import weather
 
 default_LLM_Model = store.DEFAULT_LLM_MODEL
 API_KEY = store.load_api_key()
@@ -151,6 +152,8 @@ PROACTIVE_SEARCH_BLOCK = {
         "not vague generalities. "
         "- If NO (timeless facts, small talk, or something you already know well): just answer. "
         "Do not search. "
+        "Weather and air-quality questions are answered automatically from live data - "
+        "never use web_search for them. "
         "Treat search results as hints, not gospel: if a result seems wrong or you are more "
         "confident in your own knowledge, say so honestly."
     ),
@@ -164,7 +167,9 @@ NO_WEB_BLOCK = {
         "If the user asks you to search the web, look something up online, check a website, or "
         "verify something recent or current, be honest and tell them you cannot search the web "
         "right now. Do NOT pretend you searched, looked it up, or read anything online. You may "
-        "still answer from your own knowledge, but be clear that you are not verifying it live."
+        "still answer from your own knowledge, but be clear that you are not verifying it live. "
+        "If they ask for current weather or air quality, be honest that you cannot check it "
+        "live while web access is off."
     ),
 }
 
@@ -204,6 +209,89 @@ _SEARCH_CLIENT_LOCK = threading.Lock()
 FETCH_TIMEOUT = 8            # seconds, per page (passed to webfetch)
 FETCH_TOTAL_BUDGET = 12      # seconds, hard ceiling for the whole fetch step
 FETCH_MAX_URLS = 2           # try the top result, then the next if it is walled
+
+# --- Weather fast path (live Open-Meteo data beats search) ------------------
+# A clear weather question is pulled DIRECTLY from the keyless Open-Meteo API
+# (weather.fetch_weather_report) and fed to her as a plain-text data block -
+# the same load-bearing pattern the search uses, so a small model can neither
+# stall on a tool round-trip nor "improve" the numbers with invention.
+# Detection is a deterministic keyword check (never the model's judgement),
+# which is what makes the API win over web_search BY DESIGN: an explicit
+# weather question always takes this path, including over the explicit
+# "search for X" fast path. The whole thing runs only on the web-ON path
+# (the search loop is never entered when web access is off).
+_WEATHER_INTENT_RE = re.compile(
+    r"\b(weather|forecast|temperature|temperatures|humidity|humid|"
+    r"air\s+quality|aqi|uv\s+index|barometric\s+pressure)\b"
+    r"|\bwill\s+it\s+(rain|snow|hail|freeze)\b"
+    r"|\bis\s+it\s+(raining|snowing|freezing|hot|cold|warm|chilly|sunny|windy)\b"
+    r"|\bhow\s+(hot|cold|warm|chilly)\s+is\s+it\b"
+    r"|\bchance\s+of\s+(rain|snow|precipitation)\b"
+    r"|天気|気温|降水確率|降水量|湿度|大気污染|空気質|台風|熱帯低気圧",
+    re.IGNORECASE,
+)
+
+# Tokens stripped when isolating a place name from a weather question: the
+# question scaffolding, the weather words themselves, time words, and words
+# that point at "somewhere I already am" (which means: she asks, never guesses).
+_PLACE_STOPWORDS = {
+    # scaffolding
+    "what", "whats", "what's", "how", "hows", "how's", "it", "it's", "its",
+    "is", "are", "was", "were", "isn't", "wasn't", "will", "would", "can",
+    "could", "should", "do", "does", "did", "don't", "doesn't", "the", "a",
+    "an", "of", "for", "in", "at", "on", "to", "me", "you", "please", "tell",
+    "give", "show", "check", "about", "like", "any", "some", "there", "this",
+    "that", "these", "those", "be", "going", "feel", "feels", "feeling",
+    "look", "looking", "next", "my", "your", "our", "near", "around", "trip",
+    "travel", "travelling", "traveling",
+    "search", "searches", "searched", "searching", "find", "finds", "found",
+    "finding", "google", "googled", "web", "internet", "online", "lookup",
+    "looked",
+    # time words
+    "today", "tomorrow", "tonight", "now", "currently", "right", "morning",
+    "afternoon", "evening", "night", "week", "weekend", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday", "day", "days",
+    # weather words
+    "weather", "forecast", "temperature", "temperatures", "humidity",
+    "humid", "air", "quality", "aqi", "uv", "index", "rain", "raining",
+    "snow", "snowing", "hail", "hailing", "freeze", "freezing", "hot",
+    "cold", "warm", "chilly", "sunny", "windy", "wind", "breeze", "gale",
+    "storm", "storms", "precipitation", "chance", "expect", "expected",
+    "expecting", "degrees", "celsius", "fahrenheit", "outlook", "report",
+    "conditions", "s",
+    # non-places: "somewhere I already am" -> she asks, never guesses
+    "here", "outside", "inside", "area", "vicinity", "home", "house",
+    "hometown", "town", "city", "local",
+}
+
+
+def _weather_intent(message: str) -> bool:
+    """True when the message is a clear weather question (deterministic)."""
+    return bool(_WEATHER_INTENT_RE.search(message or ""))
+
+
+def _extract_place(message: str) -> str:
+    """Pull a place name out of a weather question, original casing kept.
+
+    Strips the scaffolding / weather / time words (case-insensitive); the
+    alphabetic tokens that survive (max 4) are the place candidate. Returns
+    "" when nothing plausible survives (bare "weather", "the weather in my
+    area") - the caller then has her ASK which town, never guess. Unspaced
+    scripts (e.g. Japanese) carry no extractable Latin place -> "".
+    """
+    if not message or not _has_latin(message):
+        return ""
+    kept = []
+    for tok in re.findall(r"[\w'\u2019\-]+", message, re.UNICODE):
+        low = tok.lower()
+        if low in _PLACE_STOPWORDS:
+            continue
+        if not any(c.isalpha() for c in low):
+            continue
+        kept.append(tok)
+        if len(kept) == 4:
+            break
+    return " ".join(kept).strip()
 
 
 def _get_search_client(force_fresh: bool = False):
@@ -1341,13 +1429,62 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     last_plain = ""
     search_ran = False
 
+    # ---- Weather fast path: live data beats search ------------------------
+    # A clear weather question is answered from the keyless Open-Meteo API
+    # instead of web search: the search coin-flip for a small town's live
+    # weather usually returns no numbers at all, while the API returns exact
+    # ones in ~1-2 s. The numbers are fed as a PLAIN-TEXT turn (the search's
+    # load-bearing pattern), then she answers straight from them in one forced
+    # call - no tool round-trip for a small model to stall on.
+    weather_handled = False
+    last_user = next(
+        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+        "",
+    )
+    if isinstance(last_user, str) and _weather_intent(last_user):
+        weather_handled = True
+        place = _extract_place(last_user)
+        if place:
+            search_ran = True
+            report = weather.fetch_weather_report(place)
+            convo.append({
+                "role": "assistant",
+                "content": "I checked the live weather service for: " + place,
+            })
+            convo.append({
+                "role": "user",
+                "content": (
+                    "Live weather data for '" + place + "' (fetched from the "
+                    "Open-Meteo service just now, times in the place's local "
+                    "time):\n" + report + "\n\n"
+                    "Now answer the user's original request using the "
+                    "AmadeusPack tool. Use ONLY these live numbers for any "
+                    "weather fact - do not invent figures, and do not use "
+                    "web_search for weather."
+                ),
+            })
+        else:
+            # No place in the message: she asks which town - never guesses.
+            convo.append({
+                "role": "user",
+                "content": (
+                    "(Internal note: the user asked about the weather but did "
+                    "not say where. Do not guess their location and do not "
+                    "search - ask which town or region they mean, in your "
+                    "normal voice.)"
+                ),
+            })
+
     # ---- Explicit-request fast path: search straight away ----------------
     # Query = the extracted TOPIC, never the raw message (a keyword-soup query
     # brings back unrelated pages the model papers over with invention). A
     # bare retry ("try to search again?") has no topic of its own -> reuse the
     # previous explicit topic. No topic anywhere -> the fast path does not
     # fire; phase 1 runs and she writes her own query.
-    explicit_message = _user_explicitly_asks_for_search(messages)
+    # Skipped entirely when the weather fast path above already handled the
+    # message (weather wins).
+    explicit_message = ("" if weather_handled
+                        else _user_explicitly_asks_for_search(messages))
     if explicit_message:
         query = _extract_search_topic(explicit_message)
         if not query:
