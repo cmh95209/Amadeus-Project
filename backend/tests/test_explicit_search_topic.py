@@ -138,11 +138,12 @@ class FastPathQueryTests(unittest.TestCase):
             {"role": "system", "content": "persona"},
             {"role": "user",
              "content": "Good afternoon. Is your web access module working "
-                        "well? Try a search for the weather and air quality "
-                        "in Lenggong please."},
+                        "well? Try a search for the latest MRT one-way "
+                        "ticket prices in Kuala Lumpur please."},
         ]
         pack, log, ms = self._run(messages)
-        ms.assert_called_once_with("the weather and air quality in Lenggong")
+        ms.assert_called_once_with(
+            "the latest MRT one-way ticket prices in Kuala Lumpur")
         self.assertEqual(len(log), 1)  # judgement call skipped (fast path)
 
     def test_bare_retry_with_no_prior_topic_does_not_search(self):
