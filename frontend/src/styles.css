@@ -1188,92 +1188,84 @@ button {
   background: #eafff5;
 }
 
-/* ---- Model sampling tab ---- */
-.sampling-row {
-  margin-bottom: 22px;
-}
-
-.sampling-head {
+/* ---- Model Sampling tab ----
+   Scoped under .settings-modal on purpose: the generic ".modal input" and
+   ".modal label" rules (width:100%, display:grid, 12px padding) have higher
+   specificity than plain single-class selectors and would wreck these rows. */
+.settings-modal .sampling-row { margin-bottom: 24px; }
+.settings-modal .sampling-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.settings-modal label.sampling-name {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.sampling-name {
-  display: inline-flex;
+  flex: 1;
   align-items: center;
   gap: 8px;
-  flex: 1;
+  min-width: 0;
   font-size: 14px;
   color: #cdd7e4;
   cursor: pointer;
 }
-
-.sampling-name input[type="checkbox"] {
-  accent-color: #d8b97b;
-}
-
-.sampling-value {
-  width: 96px;
-  flex-shrink: 0;
-}
-
-.sampling-slider {
+.settings-modal .sampling-value { flex: 0 0 auto; width: 96px; padding: 8px 10px; }
+.settings-modal .sampling-slider {
   width: 100%;
-  margin: 2px 0 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   accent-color: #d8b97b;
 }
-
-.sampling-note {
-  margin: 6px 0 0;
+.settings-modal .sampling-note { margin-top: 6px; }
+.settings-modal .sampling-note-warn { color: #d8b97b; }
+.settings-modal .sampling-name input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #d8b97b;
+  cursor: pointer;
 }
 
-.sampling-actions {
-  margin-top: 26px;
-}
-
-/* Tooltip: hover or keyboard-focus the round "?" next to a setting name. */
-.info-tip {
+/* Tooltip: opens to the RIGHT of the "?" so it can never be clipped by the
+   modal's left edge or scrollbar (the previous below-centre position ran
+   outside the modal because the icons sit near the left edge). */
+.settings-modal .info-tip {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   width: 16px;
   height: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 50%;
   color: #8fa0b8;
   font-size: 11px;
   line-height: 1;
   cursor: help;
-  outline-offset: 2px;
 }
-
-.info-tip-text {
+.settings-modal .info-tip-text {
   visibility: hidden;
   opacity: 0;
   transition: opacity 0.12s ease;
   position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  width: 260px;
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
+  left: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: min(300px, 40vw);
   background: #101826;
-  color: #cdd7e4;
+  color: #d7dfeb;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 9px 11px;
   font-size: 12px;
-  line-height: 1.45;
+  font-weight: 400;
+  line-height: 1.5;
   text-align: left;
-  z-index: 30;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  z-index: 60;
   pointer-events: none;
+  white-space: normal;
 }
-
-.info-tip:hover .info-tip-text,
-.info-tip:focus .info-tip-text,
-.info-tip:focus-within .info-tip-text {
+.settings-modal .info-tip:hover .info-tip-text,
+.settings-modal .info-tip:focus .info-tip-text,
+.settings-modal .info-tip:focus-within .info-tip-text {
   visibility: visible;
   opacity: 1;
 }
