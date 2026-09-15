@@ -78,4 +78,6 @@ Thumbs.db
 # =====================
 UsefulInfo/
 .runtime/
+# Manual .bak_* snapshots made while editing (never commit these)
+*.bak_*
 ```

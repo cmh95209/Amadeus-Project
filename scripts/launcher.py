@@ -230,11 +230,14 @@ def open_log(name: str) -> IO[str]:
 def start_process(name: str, command: list[str], cwd: Path) -> subprocess.Popen:
     log = open_log(name)
 
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"  # print() reaches the log live, not on exit
     kwargs: dict = {
         "cwd": str(cwd),
         "stdout": log,
         "stderr": subprocess.STDOUT,
         "text": True,
+        "env": env,
     }
 
     if os.name == "nt":
