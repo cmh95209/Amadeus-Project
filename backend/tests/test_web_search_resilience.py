@@ -270,8 +270,8 @@ class WebLoopFlowTests(unittest.TestCase):
 
         self.assertEqual(pack.assistant_reply_ENG, "Here is what I found.")
         self.assertEqual(len(log), 1)  # judgement call skipped entirely
-        ms.assert_called_once_with(
-            "Can you search the web about the character Alyosha?")
+        # the query is the extracted TOPIC, not the raw message
+        ms.assert_called_once_with("the character Alyosha")
         self.assertEqual(llm.last_tools, ["AmadeusPack"])  # phase 2 only
 
     def test_explicit_request_with_failed_final_call_returns_honest_pack(self):
