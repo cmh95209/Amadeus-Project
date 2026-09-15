@@ -467,6 +467,34 @@ def set_context_budget():
     return jsonify({"status": "ok", "budget": saved})
 
 
+@application.route("/getSampling", methods=["GET"])
+def get_sampling():
+    """The user's Model Sampling settings. Each parameter is
+    {"enabled": bool, "value": number|null}; disabled = the server's own
+    default applies. 'params' carries the allowed ranges for the UI and
+    'rejected' lists params the current server refused this app session."""
+    return jsonify({
+        "sampling": memory.load_sampling(),
+        "params": memory.SAMPLING_PARAMS,
+        "local_only": list(memory.SAMPLING_LOCAL_ONLY),
+        "rejected": llm.rejected_sampling_params(llm._server_url()),
+    })
+
+
+@application.route("/setSampling", methods=["POST"])
+def set_sampling():
+    """Persist the Model Sampling settings (validated + clamped server-side).
+    The LLM client cache includes the settings, so the new values apply to
+    the next message - no app restart needed."""
+    data = request.get_json(silent=True)
+    try:
+        saved = memory.save_sampling(data)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    reset_llm()
+    return jsonify({"status": "ok", "sampling": saved})
+
+
 @application.route("/getLLMServer", methods=["GET"])
 def get_llm_server():
     """The saved model-server address ('' = auto-detect local ports)."""

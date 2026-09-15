@@ -4,6 +4,8 @@ from pathlib import Path
 import requests
 from langchain_openai import ChatOpenAI
 
+import memory
+
 # =============================================================================
 #  Amadeus -> YOUR local model (Unsloth Desktop)
 #
@@ -73,12 +75,19 @@ def _server_url() -> str:
 # hangs until its timeout (the "first message stalls, restart fixes it" bug).
 _LLM_CACHE = {}
 _LLM_CACHE_URL = {}
+_LLM_CACHE_PARAMS = {}   # cache key -> list of user sampling params that client sends
+
+# (base_url, param) -> True: this server proved it rejects that sampling
+# parameter with HTTP 400. In-memory only (session-scoped), so switching to a
+# different server later starts with a clean slate.
+_REJECTED = {}
 
 
 def reset_llm():
     """Force Amadeus to rebuild its connections (e.g. after a model/key change)."""
     _LLM_CACHE.clear()
     _LLM_CACHE_URL.clear()
+    _LLM_CACHE_PARAMS.clear()
 
 
 def _is_local_host(base_url: str) -> bool:
@@ -127,8 +136,89 @@ def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
     return {"reachable": True, "models": models, "error": None}
 
 
+def _effective_sampling(base_url: str, enable_thinking: bool):
+    """(standard_kwargs, extra_body_kwargs, sent_param_names) for this server,
+    from the user's Model Sampling settings.
+
+    - Disabled parameters (the default) are NOT sent: the server's own default
+      applies, which is exactly what Amadeus did before this feature existed.
+    - top_k / min_p / repetition_penalty are local-server-only: strict cloud
+      compat layers (notably Gemini's) answer HTTP 400 to unknown fields.
+    - Parameters this host has proven it rejects (see
+      maybe_strip_rejected_params) are skipped for the rest of the app session.
+    - The thinking client keeps a 4096 max_tokens floor: reasoning tokens count
+      against the output cap, so a smaller user cap would clip every
+      deep-thinking reply mid-reason.
+    """
+    local = _is_local_host(base_url)
+    standard, extra = {}, {}
+    for name, entry in memory.load_sampling().items():
+        if not entry.get("enabled") or entry.get("value") is None:
+            continue
+        if name in memory.SAMPLING_LOCAL_ONLY and not local:
+            continue
+        if _REJECTED.get((base_url, name)):
+            continue
+        value = entry["value"]
+        if name == "max_tokens":
+            if enable_thinking and int(value) < 4096:
+                continue  # keep the built-in 4096 floor for reasoning
+            standard["max_tokens"] = int(value)
+        elif name in memory.SAMPLING_LOCAL_ONLY:
+            extra[name] = value
+        else:
+            standard[name] = value
+    return standard, extra, list(standard) + list(extra)
+
+
+def rejected_sampling_params(base_url: str) -> list:
+    """Sampling params this host rejected during this app session (the
+    Settings UI notes them so the user is never flying blind)."""
+    return sorted(name for (url, name) in _REJECTED if url == base_url)
+
+
+_PARAM_REJECT_WORDS = ("unrecognized", "unexpected", "unknown", "invalid",
+                       "unsupported", "not supported")
+_PARAM_FIELD_WORDS = ("field", "parameter", "property", "argument")
+
+
+def maybe_strip_rejected_params(exc, model: str) -> bool:
+    """Called from chat.py when an LLM call fails.
+
+    If the server rejected one of the sampling parameters we sent (HTTP 400/422
+    naming the field, or a generic "unknown field" complaint), remember the
+    rejection for this host, force a client rebuild without it, and return
+    True so the caller can retry cleanly once. Any other error returns False
+    and the caller continues its normal fallback ladder.
+    """
+    base_url, sent = None, set()
+    for key, params in _LLM_CACHE_PARAMS.items():
+        if key[0] == model:
+            base_url = _LLM_CACHE_URL.get(key) or base_url
+            sent.update(params)
+    if not base_url or not sent:
+        return False
+    status = getattr(exc, "status_code", None)
+    if status not in (400, 422):
+        return False
+    text = str(exc).lower()
+    if not any(w in text for w in _PARAM_REJECT_WORDS):
+        return False
+    named = {n for n in sent if n in text}
+    if not named and not any(w in text for w in _PARAM_FIELD_WORDS):
+        return False  # a 400 about something else; the normal ladder handles it
+    victims = named if named else set(sent)
+    for name in victims:
+        _REJECTED[(base_url, name)] = True
+    print(f"[Amadeus] {base_url} rejected sampling parameter(s) {sorted(victims)}; "
+          f"disabling them for this app session.")
+    reset_llm()
+    return True
+
+
 def get_llm(api_key: str, model: str, enable_thinking: bool = False):
-    """Build (once per model + thinking setting) and return a client that talks
+    """Build (once per model + thinking + sampling settings) and return a
+    client that talks
     to your local Unsloth model.
 
     enable_thinking=True turns Qwen3's internal reasoning ON for that client.
@@ -136,13 +226,20 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
     message references something she should verify); the final reply always
     comes from the normal thinking-off client to stay fast and reliable.
     """
-    key = (model, bool(enable_thinking))
-
     # Re-probe the local server on every call. When the saved port is alive
     # this is a single fast localhost check; it only matters when the port
     # has changed. If the address moved since we built the client, rebuild it
     # so we never keep talking to a dead port.
     base_url = _server_url()
+
+    # The user's Model Sampling settings are part of the client identity:
+    # changing them rebuilds the client, so new values apply to the next
+    # message without an app restart.
+    sampling_standard, sampling_extra, sent_params = _effective_sampling(base_url, enable_thinking)
+    key = (model, bool(enable_thinking),
+           tuple(sorted(sampling_standard.items())),
+           tuple(sorted(sampling_extra.items())))
+
     cached = _LLM_CACHE.get(key)
     if cached is not None and _LLM_CACHE_URL.get(key) == base_url:
         return cached
@@ -169,9 +266,10 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             "max_retries": 1,
             "max_tokens": 4096,
         }
+        extra_body = dict(sampling_extra)
         if local:
             # Qwen3/llama.cpp chat-template flag for local servers.
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+            extra_body["chat_template_kwargs"] = {"enable_thinking": True}
         elif _is_gemini_host(base_url):
             # Gemini 3 models take thinking level via the compat layer's
             # reasoning_effort field (verified live 2026-09-14: "high" runs
@@ -181,7 +279,9 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # UI/voice output) comes back clean. Models that don't support
             # the parameter (e.g. Gemma on the Gemini API) get an HTTP 400,
             # which the caller's existing fallback already handles.
-            kwargs["extra_body"] = {"reasoning_effort": "high"}
+            extra_body["reasoning_effort"] = "high"
+        if extra_body:
+            kwargs["extra_body"] = extra_body
     else:
         kwargs = {
             "model": model,
@@ -207,9 +307,17 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # of an endless spin.
             "max_tokens": 1024,
         }
+        extra_body = dict(sampling_extra)
         if local:
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+    # User sampling settings (temperature / top_p / presence_penalty, and the
+    # user's own output cap when set) override the built-in defaults above.
+    kwargs.update(sampling_standard)
 
     _LLM_CACHE[key] = ChatOpenAI(**kwargs)
     _LLM_CACHE_URL[key] = base_url
+    _LLM_CACHE_PARAMS[key] = sent_params
     return _LLM_CACHE[key]

@@ -1,5 +1,6 @@
 import os
 import json
+import math
 from typing import List, Dict
 import re
 import sqlite3
@@ -16,6 +17,7 @@ PATH_TO_WEB_ACCESS = os.path.join(DATA_DIR, "web_access.txt")
 PATH_TO_ACTIVE_CONV = os.path.join(DATA_DIR, "active_conversation.txt")
 PATH_TO_VOICE_RETENTION = os.path.join(DATA_DIR, "voice_retention.txt")
 PATH_TO_CONTEXT_BUDGET = os.path.join(DATA_DIR, "context_budget.txt")
+PATH_TO_SAMPLING = os.path.join(DATA_DIR, "sampling.txt")
 # Lives in the backend folder (not data/) - llm.py reads the same file.
 PATH_TO_LLM_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_server.txt")
 #PATH_TO_TRANSLATION_INSTRUCTIONS = os.path.join(TXT_DIR, "translation_instructions.txt")
@@ -393,6 +395,95 @@ def save_context_budget(budget: int) -> int:
     with open(PATH_TO_CONTEXT_BUDGET, "w", encoding="utf-8") as f:
         f.write(str(value))
     return value
+
+# ---------- SAMPLING (per-parameter generation settings) ----------
+# The user's optional per-request overrides for the model server (temperature,
+# top_p, ...). "Disabled" = do NOT send the parameter: the server's own default
+# applies, which is exactly what Amadeus did before this setting existed, so a
+# fresh install behaves byte-for-byte like before.
+SAMPLING_PARAMS = {
+    # name -> allowed range. "integer" params are whole numbers. Ranges mirror
+    # what Unsloth Desktop's UI offers.
+    "temperature":        {"min": 0.0,  "max": 2.0,  "step": 0.05, "integer": False},
+    "top_p":              {"min": 0.0,  "max": 1.0,  "step": 0.01, "integer": False},
+    "top_k":              {"min": 1,    "max": 200,  "step": 1,    "integer": True},
+    "min_p":              {"min": 0.0,  "max": 1.0,  "step": 0.01, "integer": False},
+    "repetition_penalty": {"min": 1.0,  "max": 2.0,  "step": 0.01, "integer": False},
+    "presence_penalty":   {"min": -2.0, "max": 2.0,  "step": 0.05, "integer": False},
+    "max_tokens":         {"min": 64,   "max": 8192, "step": 64,   "integer": True},
+}
+
+# NOT part of the standard OpenAI API: only local/LAN servers (Unsloth,
+# llama.cpp, LM Studio, vLLM) understand these. Strict cloud compat layers
+# (notably Gemini's) answer HTTP 400 to unknown fields, so they are never
+# sent to cloud hosts (same rule as the chat_template_kwargs thinking flag).
+SAMPLING_LOCAL_ONLY = ("top_k", "min_p", "repetition_penalty")
+
+
+def default_sampling() -> Dict[str, Dict]:
+    """Every parameter disabled, every value None (server defaults apply)."""
+    return {name: {"enabled": False, "value": None} for name in SAMPLING_PARAMS}
+
+
+def _coerce_sampling_value(spec: Dict, raw):
+    """Return `raw` clamped into the spec's range, or None if not numeric."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = int(raw) if spec["integer"] else float(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    value = max(spec["min"], min(spec["max"], value))
+    return int(round(value)) if spec["integer"] else value
+
+
+def load_sampling() -> Dict[str, Dict]:
+    """The saved sampling settings. Missing/corrupt file = all disabled."""
+    _ensure_file(PATH_TO_SAMPLING, default_text="{}")
+    try:
+        with open(PATH_TO_SAMPLING, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (ValueError, OSError):
+        return default_sampling()
+    if not isinstance(raw, dict):
+        return default_sampling()
+    saved = default_sampling()
+    for name, spec in SAMPLING_PARAMS.items():
+        entry = raw.get(name)
+        if not isinstance(entry, dict) or not entry.get("enabled"):
+            continue
+        value = _coerce_sampling_value(spec, entry.get("value"))
+        if value is not None:
+            saved[name] = {"enabled": True, "value": value}
+    return saved
+
+
+def save_sampling(settings: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Validate + clamp + persist the sampling settings and return what was
+    saved. Expects the FULL settings object; an absent entry means disabled.
+    Raises ValueError for malformed entries so the API can answer 400."""
+    if not isinstance(settings, dict):
+        raise ValueError("Sampling settings must be a JSON object")
+    saved = default_sampling()
+    for name, spec in SAMPLING_PARAMS.items():
+        entry = settings.get(name)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError(f"'{name}' must be an object with 'enabled' and 'value'")
+        if not entry.get("enabled"):
+            continue
+        value = _coerce_sampling_value(spec, entry.get("value"))
+        if value is None:
+            raise ValueError(f"'{name}' value must be a number between {spec['min']} and {spec['max']}")
+        saved[name] = {"enabled": True, "value": value}
+    _ensure_file(PATH_TO_SAMPLING, default_text="{}")
+    with open(PATH_TO_SAMPLING, "w", encoding="utf-8") as f:
+        f.write(json.dumps(saved, indent=2))
+    return saved
+
 
 # Always keep at least this many of the newest messages, even if the budget is
 # tight (guards against a long stretch of tiny messages being over-trimmed).

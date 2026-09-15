@@ -294,6 +294,41 @@ export async function setContextBudget(budget: number): Promise<number> {
   return typeof data.budget === "number" ? data.budget : budget;
 }
 
+// ---- Model sampling settings ------------------------------------------------
+export type SamplingEntry = { enabled: boolean; value: number | null };
+export type SamplingSettings = Record<string, SamplingEntry>;
+export type SamplingParamSpec = { min: number; max: number; step: number; integer: boolean };
+
+export type SamplingConfig = {
+  sampling: SamplingSettings;
+  params: Record<string, SamplingParamSpec>;
+  local_only: string[];
+  rejected: string[];
+};
+
+export async function getSampling(): Promise<SamplingConfig> {
+  const data = await parseResponse(await fetch(`${API_BASE}/getSampling`, { cache: "no-store" }));
+  if (typeof data?.sampling !== "object" || data.sampling === null) {
+    throw new Error("Backend returned invalid sampling settings");
+  }
+  return {
+    sampling: data.sampling as SamplingSettings,
+    params: typeof data.params === "object" && data.params !== null ? (data.params as Record<string, SamplingParamSpec>) : {},
+    local_only: Array.isArray(data.local_only) ? data.local_only : [],
+    rejected: Array.isArray(data.rejected) ? data.rejected : [],
+  };
+}
+
+export async function setSampling(sampling: SamplingSettings): Promise<void> {
+  await parseResponse(
+    await fetch(`${API_BASE}/setSampling`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sampling),
+    })
+  );
+}
+
 export type ConnectionStatus = {
   address: string;
   configured: boolean;

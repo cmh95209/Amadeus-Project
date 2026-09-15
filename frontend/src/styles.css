@@ -1187,3 +1187,93 @@ button {
   transform: translateX(14px);
   background: #eafff5;
 }
+
+/* ---- Model sampling tab ---- */
+.sampling-row {
+  margin-bottom: 22px;
+}
+
+.sampling-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.sampling-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  font-size: 14px;
+  color: #cdd7e4;
+  cursor: pointer;
+}
+
+.sampling-name input[type="checkbox"] {
+  accent-color: #d8b97b;
+}
+
+.sampling-value {
+  width: 96px;
+  flex-shrink: 0;
+}
+
+.sampling-slider {
+  width: 100%;
+  margin: 2px 0 0;
+  accent-color: #d8b97b;
+}
+
+.sampling-note {
+  margin: 6px 0 0;
+}
+
+.sampling-actions {
+  margin-top: 26px;
+}
+
+/* Tooltip: hover or keyboard-focus the round "?" next to a setting name. */
+.info-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+  color: #8fa0b8;
+  font-size: 11px;
+  line-height: 1;
+  cursor: help;
+  outline-offset: 2px;
+}
+
+.info-tip-text {
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 260px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #101826;
+  color: #cdd7e4;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.info-tip:hover .info-tip-text,
+.info-tip:focus .info-tip-text,
+.info-tip:focus-within .info-tip-text {
+  visibility: visible;
+  opacity: 1;
+}

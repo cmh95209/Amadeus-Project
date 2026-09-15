@@ -29,6 +29,7 @@ backend/data/active_conversation.txt
 backend/data/web_access.txt
 backend/data/deep_thinking.txt
 backend/data/voice_retention.txt
+backend/data/sampling.txt
 backend/data/voice_ja.txt
 backend/generated/
 backend/ttsout/generated.wav
