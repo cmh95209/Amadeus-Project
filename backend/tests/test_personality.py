@@ -20,7 +20,11 @@ class PersonalityTests(unittest.TestCase):
         sys.path.insert(0, backend)
         self.addCleanup(sys.path.remove, backend)
         modules = patch.dict(sys.modules, {
-            'llm': SimpleNamespace(get_llm=lambda *args: None, reset_llm=lambda: None),
+            'llm': SimpleNamespace(
+                get_llm=lambda *args: None,
+                reset_llm=lambda: None,
+                maybe_strip_rejected_params=lambda *args, **kwargs: False,
+            ),
             'tts': SimpleNamespace(
                 streamVoiceChunks=lambda text, save_path=None: iter(()),
                 renderVoiceToPath=lambda text, path: False,

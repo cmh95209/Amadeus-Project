@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
+import SamplingSettings from "./components/SamplingSettings";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
 import {
   API_BASE,
@@ -80,7 +81,7 @@ export default function App() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
-  const [settingsSection, setSettingsSection] = useState<"connection" | "personality">("connection");
+  const [settingsSection, setSettingsSection] = useState<"connection" | "personality" | "sampling">("connection");
   const [statsInfo, setStatsInfo] = useState<StatInfo[]>([]);
   const [personality, setPersonalityText] = useState("");
   const [savedPersonality, setSavedPersonality] = useState("");
@@ -1193,6 +1194,10 @@ export default function App() {
                 onClick={() => setSettingsSection("personality")}>
                 Personality{personalityDirty && <span className="unsaved-dot" aria-label="Unsaved changes" />}
               </button>
+              <button type="button" aria-pressed={settingsSection === "sampling"}
+                onClick={() => setSettingsSection("sampling")}>
+                Model Sampling
+              </button>
             </nav>
 
             <div hidden={settingsSection !== "connection"}>
@@ -1456,6 +1461,10 @@ export default function App() {
                   </div>
                 </>
               )}
+            </section>
+
+            <section hidden={settingsSection !== "sampling"} aria-label="Model sampling">
+              <SamplingSettings busy={settingsBusy || loading} />
             </section>
           </div>
         </div>

@@ -929,6 +929,35 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Model Sampling Settings — September 15, 2026
+
+A new **Model Sampling** tab in Settings (next to Connection and Personality)
+lets you fine-tune how her model generates replies - the same seven
+parameters Unsloth Desktop exposes:
+
+- Temperature, Top P, Top K, Min P, Repetition Penalty, Presence Penalty,
+  and Output Max Tokens (this last one replaces the built-in 1024-token
+  reply cap when enabled).
+- Each setting has its own on/off toggle (off = use your model server's own
+  default, the previous behaviour), a slider for scaling, a number box for
+  exact values, and a "?" tooltip explaining what it does.
+- Changes apply to the next message - no app restart needed.
+- Top K, Min P and Repetition Penalty are sent to local servers only
+  (Unsloth, llama.cpp, LM Studio, vLLM); cloud APIs never receive them, so
+  strict providers (e.g. Gemini's compat layer) keep working.
+- **Server safeguard.** If a server rejects a sampling parameter (HTTP 400
+  naming the field), Amadeus remembers it for that host, rebuilds the
+  connection without it, and retries the message once - and the tab notes
+  which settings the server refused. With everything off (the default),
+  requests are byte-for-byte identical to before.
+
+Covered by a new offline test file (`backend/tests/test_sampling.py`, 16
+tests: persistence, validation, the local/cloud split, the 4096-token
+deep-thinking floor, the rejection safeguard, and the API routes); full
+backend suite passes (57 tests).
+
+---
+
 ## Web-Search Guardrails and Model Compatibility — September 15, 2026
 
 The web access toggle is now reliable across model sizes and providers:
