@@ -9,6 +9,7 @@ import threading
 import time
 import stats
 import ja_voice
+import webfetch
 
 default_LLM_Model = store.DEFAULT_LLM_MODEL
 API_KEY = store.load_api_key()
@@ -193,6 +194,17 @@ _SEARCH_CLIENT = None           # shared DDGS client (holds one warm connection 
 _SEARCH_CLIENT_TS = 0.0         # monotonic time the client was last created/used
 _SEARCH_CLIENT_LOCK = threading.Lock()
 
+# --- Page-fetch: the readable-content step on top of web search ----------------
+# After a search, the top result's page is fetched and its readable content is
+# appended, so she reads real data (numbers, details) instead of one-line
+# snippets. Bounded like the search itself: the fetch draws from its own small
+# time budget, and each page is capped to a fraction of the context window
+# (webfetch.char_budget). Any fetch problem degrades to the plain snippets, so
+# it can never break or hang a reply.
+FETCH_TIMEOUT = 8            # seconds, per page (passed to webfetch)
+FETCH_TOTAL_BUDGET = 12      # seconds, hard ceiling for the whole fetch step
+FETCH_MAX_URLS = 2           # try the top result, then the next if it is walled
+
 
 def _get_search_client(force_fresh: bool = False):
     """Return a DDGS client to run a search on, reusing a warm one when possible.
@@ -286,6 +298,43 @@ def _run_web_search(query: str) -> str:
         "knowledge and be honest that you could not verify it online right now. "
         "Do not mention any technical details."
     )
+
+
+def _extract_search_urls(result_text) -> list:
+    """Pull result URLs (in rank order) out of _run_web_search output."""
+    if not isinstance(result_text, str):
+        return []
+    return re.findall(r"^URL:\s*(\S+)\s*$", result_text, re.MULTILINE)
+
+
+def _web_search_with_content(query: str) -> str:
+    """web_search plus an automatic read of the top result page.
+
+    Returns the search results with the readable content of the best result
+    appended when it can be fetched - the numbers, the details - instead of a
+    one-line snippet. Bounded (time + size) and fully defensive: if nothing can
+    be read, the plain snippets come back unchanged, so a fetch problem can
+    never break or hang the reply.
+    """
+    text = _run_web_search(query)
+    urls = _extract_search_urls(text)
+    if not urls:
+        return text
+    try:
+        budget = webfetch.char_budget(store.load_context_budget())
+        deadline = time.monotonic() + FETCH_TOTAL_BUDGET
+        for url in urls[:FETCH_MAX_URLS]:
+            if time.monotonic() >= deadline:
+                break
+            per = max(1, int(min(FETCH_TIMEOUT, deadline - time.monotonic())))
+            status, page = webfetch.fetch_page_text(url, max_chars=budget, timeout=per)
+            if status == "ok":
+                return (text + "\n\n---\n\n"
+                        "Full readable content of the top result:\n" + page)
+            # blocked / empty / error / unsafe -> try the next result
+    except Exception as exc:
+        print(f"[Amadeus] Page fetch for '{query}' failed: {exc!r}")
+    return text
 
 
 def _pack_from_args(args) -> "AmadeusPack":
@@ -1312,7 +1361,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
             convo.append({
                 "role": "user",
                 "content": (
-                    f"Web search results for '{query}':\n{_run_web_search(query)}\n\n"
+                    f"Web search results for '{query}':\n{_web_search_with_content(query)}\n\n"
                     "Now answer the user's original request using the AmadeusPack tool, "
                     "based on these results."
                 ),
@@ -1376,7 +1425,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
             query = (call.get("args") or {}).get("query", "")
             if call.get("name") == "web_search":
                 search_ran = True
-                searches.append((query, _run_web_search(query)))
+                searches.append((query, _web_search_with_content(query)))
             else:
                 searches.append((query, "Unknown tool."))
 
@@ -1416,7 +1465,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
             convo.append({
                 "role": "user",
                 "content": (
-                    f"Web search results for '{query}':\n{_run_web_search(query)}\n\n"
+                    f"Web search results for '{query}':\n{_web_search_with_content(query)}\n\n"
                     "Now answer the user's original request using the AmadeusPack tool, "
                     "based on these results."
                 ),
