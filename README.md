@@ -929,6 +929,27 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Web Search: Explicit Requests Now Search the Actual Topic — September 15, 2026
+
+With web access ON, an explicit request ("...try a search for the weather in
+Lenggong") now searches only the **topic** of the request - not your whole
+message. Before, the small talk in the same message (greetings, context) was
+part of the search too, so DuckDuckGo came back with unrelated pages
+(greeting-card quotes, tech articles about broken search engines), and she
+filled the gaps with plausible-sounding guesses.
+
+- A retry like "could you try to search again?" no longer searches that
+  sentence itself: it re-runs the topic of your previous explicit request.
+- When no topic can be identified at all, she decides for herself (the normal
+  judgement pass) and writes the search query herself - the raw message is
+  never searched.
+- 22 new offline tests cover the extraction and the fast path.
+
+Note: DuckDuckGo's text search still carries no live weather / air-quality
+data for small towns - a known limitation to be addressed separately.
+
+---
+
 ## Model Sampling Settings — September 15, 2026
 
 A new **Model Sampling** tab in Settings (next to Connection and Personality)

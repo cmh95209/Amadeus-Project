@@ -1028,15 +1028,20 @@ def _search_retry_intent(messages) -> bool:
 
 
 def _find_prior_search_query(messages, lookback=8) -> str:
-    """The most recent user message (within `lookback` user turns) that
-    explicitly asked for a search - the topic to use when the app runs a
-    refusal-override search itself. "" when there is none."""
+    """The searchable topic of the most recent explicit search request (within
+    `lookback` user turns) - the query to use when the app runs a
+    refusal-override search itself, or when the latest message is a bare retry
+    ("try to search again?") with no topic of its own. Extracted the same way
+    as the fast path's query, so it is a clean topic, never a full message.
+    "" when there is none."""
     user_msgs = [m.get("content", "") for m in reversed(messages)
                  if m.get("role") == "user"
                  and isinstance(m.get("content"), str)]
     for c in user_msgs[:lookback]:
         if _EXPLICIT_SEARCH_RE.search(c):
-            return c.strip()[:200]
+            topic = _extract_search_topic(c)
+            if topic:
+                return topic
     return ""
 
 # --- Explicit-request fast path ---------------------------------------------------
@@ -1060,13 +1065,98 @@ _EXPLICIT_SEARCH_RE = re.compile(
 
 def _user_explicitly_asks_for_search(messages) -> str:
     """Return the user's latest message when it explicitly asks for a web search
-    (it becomes the search query), else "" (run the normal judgement call)."""
+    (its topic - see _extract_search_topic - becomes the search query), else
+    "" (run the normal judgement call)."""
     last_user = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
         "",
     )
     if isinstance(last_user, str) and _EXPLICIT_SEARCH_RE.search(last_user):
         return last_user.strip()
+    return ""
+
+
+# --- Explicit-request topic extraction -----------------------------------------
+# The fast path's query used to be the user's ENTIRE message. Real messages
+# carry small talk around the actual request ("Good afternoon, just had
+# breakfast... try a search for the weather in Lenggong please"), and a
+# keyword-soup query like that gets back unrelated pages - greeting-card
+# quotes for the small talk, tech-support articles for a bare "try to search
+# again?" - which her model then papers over with plausible-sounding
+# invention. So the query is the extracted TOPIC only. When no topic can be
+# pulled out (bare retries, "search for it"), the caller falls back to the
+# previous explicit topic from history, and if there is none the fast path
+# does not fire at all and phase 1 runs (she writes her own clean query).
+
+_TOPIC_TRAILING_PLEASE_RE = re.compile(r"\s*[,.]?\s*please\s*$", re.IGNORECASE)
+_TOPIC_TRAILING_FOR_ME_RE = re.compile(r"\s+for\s+(?:me|you)\s*$", re.IGNORECASE)
+_TOPIC_LEADING_FILLER_RE = re.compile(
+    r"^(?:(?:the\s+)?(?:web|internet)(?:\s+(?:about|on|for))?\s+"
+    r"|about\s+|for\s+|on\s+|up\s+)", re.IGNORECASE)
+# Captured "topics" that are not topics: pronouns and retry/noise words.
+_TOPIC_STOPWORDS = {
+    "it", "me", "you", "this", "that", "these", "those", "again", "more",
+    "once", "anything", "something", "the web", "web", "online",
+    "the internet", "internet", "search", "up", "down", "working",
+}
+# Phrasal request patterns: verb + preposition + topic. The phrasing itself
+# marks a request, so no context check is needed.
+_TOPIC_PATTERNS = (
+    re.compile(r"\bsearch\s+for\s+([^.!?]+?)(?:\s*[.!?]|\s*\Z)", re.IGNORECASE),
+    re.compile(r"\blook(?:ing|ed)?\s+into\s+([^.!?]+?)(?:\s*[.!?]|\s*\Z)", re.IGNORECASE),
+    re.compile(r"\blook(?:ing|ed)?\s+(?:it\s+|that\s+|this\s+)?up\s+([^.!?]+?)(?:\s*[.!?]|\s*\Z)", re.IGNORECASE),
+    re.compile(r"\bgoogle\s+([^.!?]+?)(?:\s*[.!?]|\s*\Z)", re.IGNORECASE),
+)
+# Bare "search X": "search" is also a common NOUN ("is web search working?"),
+# so this pattern needs a request context: the word right before "search"
+# must not be one that marks a noun use.
+_BARE_SEARCH_TOPIC_RE = re.compile(r"\bsearch\s+([^.!?]+?)(?:\s*[.!?]|\s*\Z)", re.IGNORECASE)
+_BARE_SEARCH_NOUN_PREV = {
+    "web", "the", "your", "our", "their", "my", "his", "her", "its",
+    "this", "that", "a", "an",
+}
+
+
+def _clean_search_topic(raw) -> str:
+    """Trim a captured topic into a usable query: collapse whitespace, drop
+    trailing sentence punctuation, a closing "please" and a trailing
+    "for me/you", drop leading filler ("the web about X" -> "X"), and reject
+    pronoun/noise "topics"."""
+    topic = re.sub(r"\s+", " ", raw or "").strip()
+    topic = topic.rstrip(" .!,?")
+    topic = _TOPIC_TRAILING_PLEASE_RE.sub("", topic)
+    topic = _TOPIC_TRAILING_FOR_ME_RE.sub("", topic)
+    topic = topic.rstrip(" .!,?")
+    topic = _TOPIC_LEADING_FILLER_RE.sub("", topic).strip(" ,;")
+    if not topic or topic.lower() in _TOPIC_STOPWORDS:
+        return ""
+    return topic[:200]
+
+
+def _extract_search_topic(message) -> str:
+    """The searchable topic inside an explicit search request, or "".
+
+    Only the part of the message AFTER the request verb becomes the query;
+    the last matching verb wins (the request is what the message ends on).
+    Returns "" when the message carries a search trigger but no usable topic
+    - the caller then falls back; the raw message is never searched.
+    """
+    msg = (message or "").strip()
+    if not msg:
+        return ""
+    for pattern in _TOPIC_PATTERNS:
+        matches = pattern.findall(msg)
+        if matches:
+            topic = _clean_search_topic(matches[-1])
+            if topic:
+                return topic
+    for m in reversed(list(_BARE_SEARCH_TOPIC_RE.finditer(msg))):
+        before = re.findall(r"[A-Za-z']+", msg[:m.start()])
+        if before and before[-1].lower() in _BARE_SEARCH_NOUN_PREV:
+            continue  # noun use ("web search ..."), not a request
+        topic = _clean_search_topic(m.group(1))
+        if topic:
+            return topic
     return ""
 
 
@@ -1203,22 +1293,30 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     search_ran = False
 
     # ---- Explicit-request fast path: search straight away ----------------
-    explicit_query = _user_explicitly_asks_for_search(messages)
-    if explicit_query:
-        query = explicit_query[:200]
-        search_ran = True
-        convo.append({
-            "role": "assistant",
-            "content": "I searched the web for: " + query,
-        })
-        convo.append({
-            "role": "user",
-            "content": (
-                f"Web search results for '{query}':\n{_run_web_search(query)}\n\n"
-                "Now answer the user's original request using the AmadeusPack tool, "
-                "based on these results."
-            ),
-        })
+    # Query = the extracted TOPIC, never the raw message (a keyword-soup query
+    # brings back unrelated pages the model papers over with invention). A
+    # bare retry ("try to search again?") has no topic of its own -> reuse the
+    # previous explicit topic. No topic anywhere -> the fast path does not
+    # fire; phase 1 runs and she writes her own query.
+    explicit_message = _user_explicitly_asks_for_search(messages)
+    if explicit_message:
+        query = _extract_search_topic(explicit_message)
+        if not query:
+            query = _find_prior_search_query(messages)
+        if query:
+            search_ran = True
+            convo.append({
+                "role": "assistant",
+                "content": "I searched the web for: " + query,
+            })
+            convo.append({
+                "role": "user",
+                "content": (
+                    f"Web search results for '{query}':\n{_run_web_search(query)}\n\n"
+                    "Now answer the user's original request using the AmadeusPack tool, "
+                    "based on these results."
+                ),
+            })
 
     # ---- Anti-anchoring nudge -----------------------------------------------
     # Web is ON but her recent history contains "I can't search" refusals:
