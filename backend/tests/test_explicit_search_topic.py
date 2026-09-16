@@ -144,7 +144,7 @@ class FastPathQueryTests(unittest.TestCase):
         pack, log, ms = self._run(messages)
         ms.assert_called_once_with(
             "the latest MRT one-way ticket prices in Kuala Lumpur")
-        self.assertEqual(len(log), 1)  # judgement call skipped (fast path)
+        self.assertEqual(len(log), 2)  # triage + the real call; judgement skipped
 
     def test_bare_retry_with_no_prior_topic_does_not_search(self):
         messages = [
@@ -155,7 +155,7 @@ class FastPathQueryTests(unittest.TestCase):
         ]
         pack, log, ms = self._run(messages)
         ms.assert_not_called()
-        self.assertEqual(len(log), 1)  # phase 1 answered directly (faked)
+        self.assertEqual(len(log), 2)  # triage + phase 1 (answered directly)
 
     def test_bare_retry_reuses_prior_topic(self):
         messages = [
@@ -168,7 +168,7 @@ class FastPathQueryTests(unittest.TestCase):
         ]
         pack, log, ms = self._run(messages)
         ms.assert_called_once_with("the weather and air quality in Lenggong")
-        self.assertEqual(len(log), 1)
+        self.assertEqual(len(log), 2)  # triage + the real call
 
 
 if __name__ == "__main__":

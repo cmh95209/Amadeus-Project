@@ -1,12 +1,14 @@
 import memory as store
 from llm import get_llm, reset_llm, maybe_strip_rejected_params
 from pydantic import BaseModel, Field
+from typing import Optional
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from chat_interactions import INTERACTION_EVENTS, INTERACTION_RESPONSES
 import random
 import re
 import threading
 import time
+import concurrent.futures
 import stats
 import ja_voice
 import webfetch
@@ -1236,6 +1238,14 @@ _TOPIC_STOPWORDS = {
     "once", "anything", "something", "the web", "web", "online",
     "the internet", "internet", "search", "up", "down", "working",
 }
+# Per-token noise set: a captured topic made up ONLY of these is request
+# debris ("me again", "it now"), never a search topic. Finite by nature -
+# pronouns and deictics - so it does not grow with new domains.
+_TOPIC_NOISE_TOKENS = {
+    "i", "me", "my", "you", "your", "we", "us", "he", "him", "she", "her",
+    "it", "its", "they", "them", "again", "that", "this", "something",
+    "anything", "one", "now", "today",
+}
 # Phrasal request patterns: verb + preposition + topic. The phrasing itself
 # marks a request, so no context check is needed.
 _TOPIC_PATTERNS = (
@@ -1266,6 +1276,12 @@ def _clean_search_topic(raw) -> str:
     topic = topic.rstrip(" .!,?")
     topic = _TOPIC_LEADING_FILLER_RE.sub("", topic).strip(" ,;")
     if not topic or topic.lower() in _TOPIC_STOPWORDS:
+        return ""
+    # All-noise topics ("me again") are request debris: reject them so the
+    # caller falls back to the previous search query instead of feeding the
+    # debris to the search engine.
+    tokens = re.findall(r"[A-Za-z']+", topic)
+    if tokens and all(t.lower() in _TOPIC_NOISE_TOKENS for t in tokens):
         return ""
     return topic[:200]
 
@@ -1380,6 +1396,196 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     return _web_on_false_refusal_net(pack, llm, messages)
 
 
+# =============================================================================
+#  WEB TRIAGE - model-judged routing for the web-ON fast paths
+#
+#  One small structured call reads the user's LATEST message (plus the recent
+#  conversation) and decides how to route it: weather question (which place),
+#  explicit search request (which topic), or neither. This replaces the old
+#  per-phrase keyword routing - intent and place are UNDERSTOOD from context,
+#  not pattern-matched, so unseen phrasings route the same as seen ones.
+#
+#  Bounded by construction:
+#   * a broad keyword prefilter decides whether the call is worth making
+#     (a miss is harmless - the message falls through to the normal tool
+#     loop, where she can still search on her own judgement);
+#   * when the call itself fails, _deterministic_route runs instead, so the
+#     old keyword behaviour remains as the safety net.
+# =============================================================================
+
+
+class WebTriagePack(BaseModel):
+    # PLAIN REQUIRED STRINGS ONLY - the exact shape of AmadeusPack, which is
+    # proven to decode cleanly on the local Unsloth/llama.cpp server. Optional /
+    # anyOf / null / boolean fields make constrained decoding HANG the
+    # single-threaded server (verified 2026-09-16: an anyOf schema request
+    # wedged it until restart). So the router speaks "yes"/"no" and "none".
+    wants_weather: str = Field(..., description=(
+        "\"yes\" or \"no\". \"yes\" when the user's LATEST message asks about "
+        "weather or air quality - current conditions, forecast, chance of rain "
+        "or snow, temperature, humidity, AQI, UV index, or whether they need "
+        "an umbrella - in ANY phrasing. A request to search for the weather is "
+        "a weather question, not a search."))
+    weather_place: str = Field(..., description=(
+        "The place the weather question is about, as one short proper name "
+        "(town, city, region or country). Use the place named in the latest "
+        "message; if none is named, use the one the recent conversation makes "
+        "unambiguous (e.g. 'my hometown' or 'here' when exactly one place has "
+        "clearly been the subject). Write \"none\" when no place can be "
+        "determined without guessing - never invent or assume one."))
+    wants_search: str = Field(..., description=(
+        "\"yes\" or \"no\". \"yes\" when the user's LATEST message explicitly "
+        "asks to search, look up, check or verify something on the web (and it "
+        "is not a weather question)."))
+    search_topic: str = Field(..., description=(
+        "A short, specific web-search query for what they want looked up - the "
+        "actual topic, never the request wording. Write \"none\" when the "
+        "message only asks to try the previous search again with no new topic, "
+        "or when wants_search is \"no\"."))
+
+
+WEB_TRIAGE_TOOL = convert_to_openai_tool(WebTriagePack)
+
+_TRIAGE_SYSTEM = (
+    "You are the intent router for a personal assistant's web features. "
+    "Read the conversation and classify ONLY the user's LATEST message. "
+    "Call the web_triage tool exactly once, with the fields set as described. "
+    "Set wants_weather and wants_search to no and the other fields to none "
+    "when the latest message asks for nothing that needs the web - small talk, "
+    "timeless facts, or follow-up comments are NOT search requests. "
+    "Never put a place in weather_place unless the message or the recent "
+    "conversation clearly identifies one."
+)
+
+# Broad, HIGH-RECALL prefilter: decides whether a message is a CANDIDATE for
+# the triage call. Deliberately a superset of the keyword intent check - plain
+# words, no cleverness, and NEVER the decider: a miss just means the message
+# goes to the normal tool loop (harmless), a hit costs one small triage call.
+_WEB_TRIAGE_HINT_RE = re.compile(
+    r"\b(umbrella|raincoat|sunscreen|parasol|jacket)\b"
+    r"|\bdo\s+i\s+need\b"
+    r"|\bbring\s+(an?\s+)?(umbrella|jacket)\b"
+    r"|傘|雨|天気|気温|湿度|検索|調べて|ニュース",
+    re.IGNORECASE,
+)
+
+
+def _web_triage_candidate(last_user, messages) -> bool:
+    """Cheap prefilter: is this message worth a triage call?"""
+    if not isinstance(last_user, str) or not last_user:
+        return False
+    if _weather_intent(last_user) or _user_explicitly_asks_for_search(messages):
+        return True
+    return bool(_WEB_TRIAGE_HINT_RE.search(last_user))
+
+
+_TRIAGE_TIMEOUT = 25  # seconds - hard client-side deadline for the triage call
+
+
+def _invoke_with_timeout(fn, *args, timeout, **kwargs):
+    """Run fn(*args) with a HARD client-side deadline.
+
+    A local server that stalls on one request must never stall the reply: the
+    caller gets a TimeoutError after `timeout` seconds and falls back to
+    keyword routing. The abandoned thread is let go (it cannot block the
+    reply further); the real defence against a wedged server is the safe
+    all-string triage schema (see WebTriagePack).
+    """
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        raise TimeoutError("web triage call exceeded %ss" % timeout) from exc
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
+def _web_triage(llm, messages):
+    """One small LLM call deciding how a web-ON message is routed.
+
+    Returns {"weather": bool, "place": str|None, "search": bool,
+    "topic": str|None} (weather outranks search by design), or None when the
+    call fails - the caller then uses the keyword fallback, so a dead or slow
+    triage call can only cost bounded time, never the reply.
+    """
+    convo = [{"role": "system", "content": _TRIAGE_SYSTEM}]
+    # A wide-enough window that a place discussed a while ago ("I drove to
+    # my hometown" + the Lenggong search yesterday) is still visible to the
+    # router, without feeding the whole chat into a call that should stay
+    # small. Each message is truncated to keep the call cheap.
+    recent = [m for m in messages
+              if m.get("role") in ("user", "assistant")
+              and isinstance(m.get("content"), str)][-12:]
+    for m in recent:
+        convo.append({"role": m["role"], "content": m["content"][:600]})
+    convo.append({
+        "role": "user",
+        "content": "Classify the user's latest message. Call the web_triage tool.",
+    })
+    try:
+        bound = llm.bind_tools([WEB_TRIAGE_TOOL], tool_choice="required")
+        reply = _invoke_with_timeout(_invoke_forced, bound, convo, timeout=_TRIAGE_TIMEOUT)
+        calls = getattr(reply, "tool_calls", None) or []
+        if not calls and isinstance(reply.content, str):
+            calls = _parse_textual_tool_calls(reply.content)
+        triage_name = WEB_TRIAGE_TOOL["function"]["name"]  # "WebTriagePack"
+        for call in calls:
+            if call.get("name") != triage_name:
+                continue
+            args = call.get("args") or {}
+            def _flag(v):
+                return str(v or "").strip().lower() in ("yes", "y", "true", "1")
+            def _opt(v):
+                s = str(v or "").strip()
+                return None if s.lower() in ("", "none", "null", "n/a", "na") else s
+            def _topic(v):
+                # Same debris guard as the keyword extraction: a pronoun-only
+                # "topic" ("me again") becomes None so the search route reuses
+                # the previous query instead of feeding junk to the engine.
+                t = _opt(v)
+                if t is None:
+                    return None
+                return _clean_search_topic(t) or None
+            weather = _flag(args.get("wants_weather"))
+            route = {
+                "weather": weather,
+                "place": _opt(args.get("weather_place")),
+                "search": _flag(args.get("wants_search")) and not weather,
+                "topic": None if weather else _topic(args.get("search_topic")),
+            }
+            print("[Amadeus] Web triage: weather=%s place=%r search=%s topic=%r"
+                  % (route["weather"], route["place"],
+                     route["search"], route["topic"]))
+            return route
+    except Exception as exc:
+        print("[Amadeus] Web triage call failed - falling back to keyword routing:",
+              repr(exc))
+        return None
+    print("[Amadeus] Web triage: no tool call in the reply - falling back "
+          "to keyword routing.")
+    return None
+
+
+def _deterministic_route(last_user, messages):
+    """Keyword routing - the FALLBACK when the triage call is unavailable.
+
+    Returns {"weather": True, "place": str|None} or
+    {"search": True, "topic": str|None}, or None when nothing fast-routes
+    (the normal tool loop handles the message). Weather outranks search.
+    """
+    if isinstance(last_user, str) and _weather_intent(last_user):
+        return {"weather": True, "place": _extract_place(last_user) or None}
+    explicit_message = _user_explicitly_asks_for_search(messages)
+    if explicit_message:
+        query = _extract_search_topic(explicit_message)
+        if not query:
+            query = _find_prior_search_query(messages)
+        if query:
+            return {"search": True, "topic": query}
+    return None
+
+
 def _web_search_loop(llm, messages) -> "AmadeusPack":
     """Chat loop with the web_search tool available.
 
@@ -1429,21 +1635,53 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     last_plain = ""
     search_ran = False
 
-    # ---- Weather fast path: live data beats search ------------------------
-    # A clear weather question is answered from the keyless Open-Meteo API
-    # instead of web search: the search coin-flip for a small town's live
-    # weather usually returns no numbers at all, while the API returns exact
-    # ones in ~1-2 s. The numbers are fed as a PLAIN-TEXT turn (the search's
-    # load-bearing pattern), then she answers straight from them in one forced
-    # call - no tool round-trip for a small model to stall on.
-    weather_handled = False
+    # ---- Route the message: LLM triage, keyword fallback -----------------
+    # The triage call decides what the user's latest message wants: a
+    # WEATHER/air-quality question (-> live Open-Meteo data, fed as a
+    # plain-text turn, so a small model can neither stall on a tool round-trip
+    # nor "improve" the numbers with invention), an EXPLICIT SEARCH request
+    # (-> the search runs straight away on the extracted topic), or neither
+    # (-> the normal tool loop below, where she can still search on her own
+    # judgement).
+    #
+    # Why a model call at all: keyword matching routes by PHRASE, and every
+    # phrasing it has not seen routes wrong - "whether it will rain in
+    # Lenggong" missed the weather gate, and "I have to wash my blanket... will
+    # it rain later?" geocoded the place "I have wash blanket". The model
+    # reads the message AND the recent context, so "will it rain later?" right
+    # after a long talk about Lenggong routes to Lenggong, while a genuinely
+    # ambiguous question still makes her ask which town - never guess.
+    # Cost/safety: a broad keyword prefilter decides whether the call is worth
+    # making (a miss is harmless); if the call fails, the keyword routing
+    # below runs instead. This step can only cost bounded time, never the
+    # reply. The whole thing runs only on the web-ON path (the search loop is
+    # never entered when web access is off).
     last_user = next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
         "",
     )
-    if isinstance(last_user, str) and _weather_intent(last_user):
+    route = None
+    if _web_triage_candidate(last_user, messages):
+        try:
+            triaged = _web_triage(llm, messages)
+        except Exception:
+            triaged = None
+        # Triage wins only when it AFFIRMATIVELY routes (weather or search).
+        # A "no/no" answer or a failed call defers to the keyword safety net
+        # below, which still catches the classic phrasings.
+        if triaged and (triaged.get("weather") or triaged.get("search")):
+            route = triaged
+    if route is None:
+        route = _deterministic_route(last_user, messages)
+
+    # ---- Weather: live data beats search ----------------------------------
+    # Weather outranks the explicit-search route BY DESIGN: text search for a
+    # small town's live weather usually returns no numbers at all, while the
+    # API returns exact ones in ~1-2 s.
+    weather_handled = False
+    if route and route.get("weather"):
         weather_handled = True
-        place = _extract_place(last_user)
+        place = route.get("place")
         if place:
             search_ran = True
             report = weather.fetch_weather_report(place)
@@ -1464,31 +1702,27 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
                 ),
             })
         else:
-            # No place in the message: she asks which town - never guesses.
+            # No place determinable from the message OR the conversation:
+            # she asks which town - never guesses.
             convo.append({
                 "role": "user",
                 "content": (
-                    "(Internal note: the user asked about the weather but did "
-                    "not say where. Do not guess their location and do not "
+                    "(Internal note: the user asked about the weather but the "
+                    "place is not clear from their message or the recent "
+                    "conversation. Do not guess their location and do not "
                     "search - ask which town or region they mean, in your "
                     "normal voice.)"
                 ),
             })
 
-    # ---- Explicit-request fast path: search straight away ----------------
+    # ---- Explicit search: run straight away --------------------------------
     # Query = the extracted TOPIC, never the raw message (a keyword-soup query
     # brings back unrelated pages the model papers over with invention). A
-    # bare retry ("try to search again?") has no topic of its own -> reuse the
-    # previous explicit topic. No topic anywhere -> the fast path does not
-    # fire; phase 1 runs and she writes her own query.
-    # Skipped entirely when the weather fast path above already handled the
+    # bare retry has no topic of its own -> reuse the previous explicit topic.
+    # Skipped entirely when the weather route above already handled the
     # message (weather wins).
-    explicit_message = ("" if weather_handled
-                        else _user_explicitly_asks_for_search(messages))
-    if explicit_message:
-        query = _extract_search_topic(explicit_message)
-        if not query:
-            query = _find_prior_search_query(messages)
+    if not weather_handled and route and route.get("search"):
+        query = route.get("topic") or _find_prior_search_query(messages)
         if query:
             search_ran = True
             convo.append({
