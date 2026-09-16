@@ -65,9 +65,10 @@ def fake_get_json(url, params, timeout):
 
 # --- the faked LLM (same pattern as test_web_search_resilience.py) -----------
 class FakeReply:
-    def __init__(self, content="", tool_calls=None):
+    def __init__(self, content="", tool_calls=None, tool_call_chunks=None):
         self.content = content
         self.tool_calls = tool_calls
+        self.tool_call_chunks = tool_call_chunks
 
 
 class FakeBound:
@@ -491,6 +492,59 @@ class TriageRoutingTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             chat._invoke_with_timeout(slow, timeout=0.05)
         self.assertEqual(chat._invoke_with_timeout(lambda: 7, timeout=1), 7)
+
+
+class FinalCallRobustnessTests(unittest.TestCase):
+    """The final structured call can come back empty (transient) or clipped
+    mid-JSON (a low max-output-tokens cap) - one bounded retry, then an
+    honest line that says what ACTUALLY failed (no invented 'search')."""
+
+    def _weather_run(self, llm):
+        with patch.object(chat.store, "load_deep_thinking", return_value=False), \
+             patch.object(chat.weather, "fetch_weather_report",
+                          return_value="FAKE LIVE BLOCK"):
+            return chat._getResponsePackedWithWebSearch(llm, MESSAGES_WEATHER)
+
+    def test_empty_final_call_gets_one_bounded_retry(self):
+        n = 0
+
+        def handler(convo):
+            nonlocal n
+            n += 1
+            if n == 1:
+                return FakeReply(content="")
+            return FakeReply(tool_calls=pack_call(eng="AQI 160, unhealthy."))
+
+        pack = self._weather_run(FakeLLM(handler, []))
+        self.assertEqual(pack.assistant_reply_ENG, "AQI 160, unhealthy.")
+        self.assertEqual(n, 2)  # the empty call + the retry
+
+    def test_clipped_tool_call_retries_and_recovers(self):
+        n = 0
+
+        def handler(convo):
+            nonlocal n
+            n += 1
+            if n == 1:
+                # a max-tokens cap cut the AmadeusPack JSON mid-stream:
+                # unparseable tool call, no content
+                return FakeReply(content="",
+                                 tool_call_chunks=[{"name": "AmadeusPack",
+                                                    "args": '{"assistant_reply'}])
+            return FakeReply(tool_calls=pack_call(eng="Recovered."))
+
+        pack = self._weather_run(FakeLLM(handler, []))
+        self.assertEqual(pack.assistant_reply_ENG, "Recovered.")
+        self.assertEqual(n, 2)
+
+    def test_empty_final_call_twice_says_the_truth_not_a_search(self):
+        def handler(convo):
+            return FakeReply(content="")
+
+        pack = self._weather_run(FakeLLM(handler, []))
+        # honest AND weather-accurate: the data WAS fetched, no search involved
+        self.assertIn("live weather data", pack.assistant_reply_ENG)
+        self.assertNotIn("search", pack.assistant_reply_ENG.lower())
 
 
 if __name__ == "__main__":

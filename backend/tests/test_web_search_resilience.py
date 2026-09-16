@@ -28,9 +28,10 @@ class _Fake429(Exception):
 
 
 class FakeReply:
-    def __init__(self, content="", tool_calls=None):
+    def __init__(self, content="", tool_calls=None, tool_call_chunks=None):
         self.content = content
         self.tool_calls = tool_calls
+        self.tool_call_chunks = tool_call_chunks
 
 
 class FakeBound:
