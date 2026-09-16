@@ -983,7 +983,24 @@ def _merge_leading_system_messages(messages):
 # happened. Return this fixed honest line instead: STATIC (no model call - the
 # failure may be quota/network related, so spending another API call on it would
 # be wrong), same idiom as the web-off honesty net.
-def _honest_search_failure_pack() -> "AmadeusPack":
+def _honest_search_failure_pack(weather: bool = False) -> "AmadeusPack":
+    """STATIC honest line for a web-ON turn whose reply could not be
+    completed. When the live weather data WAS fetched and only the final
+    packaging call failed, saying 'I couldn't finish the search' would be a
+    lie (no search was involved) - the weather variant says the truth."""
+    if weather:
+        return AmadeusPack(
+            assistant_reply_JPS=(
+                "天気データはきちんと取れたんだけど、返事をまとめるところで"
+                "途中で止まってしまったみたい。一時的な不具合だと思うの。"
+                "もう一度聞いてもらえない？"
+            ),
+            assistant_reply_ENG=(
+                "I did get the live weather data, but my reply got cut off "
+                "on my side. It's probably a temporary glitch - could you ask "
+                "me again?"
+            ),
+        )
     return AmadeusPack(
         assistant_reply_JPS=(
             "今は検索を最後までできなかったの。たぶん一時的な不具合だと思うわ。"
@@ -1885,20 +1902,56 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     if calls and calls[0].get("name") == "AmadeusPack":
         return _pack_from_args(calls[0].get("args"))
 
+    raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+    if not _strip_thinking(raw).strip() and not last_plain:
+        # The final call produced neither a tool call nor a word. Two known
+        # causes: a transient empty generation, or a MAX-OUTPUT-TOKENS cap
+        # that clipped the forced AmadeusPack mid-JSON (the server then hands
+        # back a malformed tool call that decodes to nothing - her data and
+        # phrasing were fine, only the packaging got cut, verified live
+        # 2026-09-16 with a 200-token cap). The raw chunks, when present,
+        # show the clipped call so a low token cap is visible in the log.
+        # Either way: one bounded retry before the honest fallback.
+        chunks = getattr(reply, "tool_call_chunks", None)
+        if chunks:
+            print("[Amadeus] Web loop: final tool call came back unparseable - "
+                  "clipped mid-JSON? check the max-output-tokens setting: "
+                  + repr(str(chunks)[:200]))
+        else:
+            print("[Amadeus] Web loop: final answer was empty - one bounded "
+                  "retry.")
+        try:
+            reply = _invoke_forced(final_llm, convo)
+            calls = getattr(reply, "tool_calls", None) or []
+            if calls and calls[0].get("name") == "AmadeusPack":
+                return _pack_from_args(calls[0].get("args"))
+            raw = (reply.content if isinstance(reply.content, str)
+                   else str(reply.content or ""))
+        except Exception as exc:
+            print("[Amadeus] Web loop: final-answer retry failed - honest "
+                  "fallback:", repr(exc))
+            return _honest_search_failure_pack(weather=weather_handled)
+
     # ---- Phase 3 (last resort): salvage plain text -----------------------
     # The structured AmadeusPack never came through, but she may have said
     # something usable in prose. Rather than erroring out, turn that into a pack
     # so the user still gets an answer. We prefer the text from the last (phase 2)
     # call and fall back to any plain answer captured during the search loop.
     # _salvage_plain_text only raises if there is literally no text at all.
-    raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
     if not search_ran and not _strip_thinking(raw).strip():
         # The final call produced nothing usable and no search ran: the only
         # surviving text is her pre-search announcement, which must not become
         # the reply (it promises an action that never happened).
         print("[Amadeus] Web loop: final answer was empty and no search ran - honest fallback.")
-        return _honest_search_failure_pack()
+        return _honest_search_failure_pack(weather=weather_handled)
     candidate = _strip_thinking(raw) or last_plain
+    if not candidate.strip():
+        # Live data (weather/search) was in the context, the fast path never
+        # captured plain text, and the final call produced nothing even after
+        # the retry - say what ACTUALLY failed, not an invented search failure.
+        print("[Amadeus] Web loop: final answer empty even after retry - "
+              "honest fallback.")
+        return _honest_search_failure_pack(weather=weather_handled)
     if _repetition_cut(candidate) is not None:
         # The final answer degenerated into a repetition loop (weak-model
         # cycling, usually cut mid-sentence by the token cap). Cut the loop
@@ -1923,11 +1976,11 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
                 else:
                     print("[Amadeus] Web loop: retry still degenerate - "
                           "honest fallback.")
-                    return _honest_search_failure_pack()
+                    return _honest_search_failure_pack(weather=weather_handled)
             except Exception:
                 print("[Amadeus] Web loop: bounded retry failed - honest "
                       "fallback.")
-                return _honest_search_failure_pack()
+                return _honest_search_failure_pack(weather=weather_handled)
     print("[Amadeus] Web loop: no AmadeusPack; salvaging plain text.")
     return _salvage_plain_text(candidate, llm)
 
