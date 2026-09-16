@@ -24,16 +24,17 @@ import chat  # noqa: E402
 # --- faked Open-Meteo payloads (shapes verified live, 2026-09-15) ------------
 GEO = {
     "results": [
-        {"id": 1767492, "name": "Springfield", "latitude": 5.10633,
-         "longitude": 100.96792, "country_code": "MY", "admin1": "Testland",
-         "admin2": "Springfield County", "country": "Testland",
-         "timezone": "Etc/UTC", "population": 12722},
+        {"id": 1767492, "name": "Springfield", "latitude": 42.1,
+         "longitude": -72.6, "country_code": "TL",
+         "admin1": "Springfield County",
+         "admin2": "Springfield", "country": "Testland",
+         "timezone": "Testland/Springfield", "population": 12722},
         {"id": 999, "name": "Springfieldi", "latitude": 45.0, "longitude": 18.0,
          "country": "Poland", "admin1": None},
     ]
 }
 FC = {
-    "timezone": "Etc/UTC",
+    "timezone": "Testland/Springfield",
     "current": {
         "time": "2026-09-15T23:45", "temperature_2m": 25.5,
         "relative_humidity_2m": 100, "apparent_temperature": 32.2,
@@ -128,7 +129,7 @@ class GeocodeTests(unittest.TestCase):
         with patch.object(weather, "_get_json", return_value=GEO):
             loc = weather.geocode("Springfield")
         self.assertEqual(loc["name"], "Springfield")
-        self.assertEqual(loc["admin1"], "Testland")
+        self.assertEqual(loc["admin1"], "Springfield County")
         self.assertEqual(loc["country"], "Testland")
 
     def test_empty_results_gives_none(self):
@@ -169,7 +170,7 @@ class ReportTests(unittest.TestCase):
     def test_full_report(self):
         with patch.object(weather, "_get_json", side_effect=fake_get_json):
             r = weather.fetch_weather_report("Springfield")
-        self.assertIn("Springfield, Testland, Testland", r)
+        self.assertIn("Springfield, Springfield County, Testland", r)
         self.assertIn("Now (23:45 local): 25.5\u00b0C", r)
         self.assertIn("feels like 32.2\u00b0C", r)
         self.assertIn("overcast", r)
@@ -281,7 +282,7 @@ class PlaceExtractionTests(unittest.TestCase):
             "What's the forecast for Tokyo?": "Tokyo",
             "will it rain in Osaka tonight?": "Osaka",
             "how hot is it in Bangkok?": "Bangkok",
-            "what's the weather like in Riverton tomorrow?": "Riverton",
+            "what's the weather like in Springfield tomorrow?": "Springfield",
             "air quality in Springfield": "Springfield",
             "check the weather for my trip to Tokyo": "Tokyo",
             "will it be hot in Oslo tomorrow?": "Oslo",
@@ -468,11 +469,11 @@ class TriageRoutingTests(unittest.TestCase):
             chat._getResponsePackedWithWebSearch(llm, [
                 {"role": "system", "content": "persona"},
                 {"role": "user",
-                 "content": "Try a search for the MRT ticket prices please."},
+                 "content": "Try a search for the metro ticket prices please."},
                 {"role": "assistant", "content": "They cost 2 ringgit."},
                 {"role": "user", "content": "Could you try to search again?"},
             ])
-        ms.assert_called_once_with("the MRT ticket prices")
+        ms.assert_called_once_with("the metro ticket prices")
 
     def test_dead_triage_call_never_blocks_reply(self):
         llm = FakeLLM(lambda convo: FakeReply(tool_calls=pack_call(eng="ok")),
