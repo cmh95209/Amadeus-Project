@@ -14,13 +14,19 @@ setlocal
 rem Find this folder (wherever the project is on this computer).
 set "BACKEND_DIR=%~dp0backend"
 
-rem Locate Amadeus's Python (its conda environment).
-set "PY=C:\Users\xlhhm\miniconda3\envs\amadeus\python.exe"
-if not exist "%PY%" (
-  echo [PROBLEM] Could not find the Amadeus Python at:
-  echo           %PY%
-  echo           Check the PY line in check_amadeus.bat and point it at
-  echo           your Amadeus conda environment's python.exe.
+rem Locate Amadeus's Python (its conda environment) without hardcoding a
+rem user profile: try the usual install roots, then the active env.
+set "PY="
+if exist "%USERPROFILE%\miniconda3\envs\amadeus\python.exe" set "PY=%USERPROFILE%\miniconda3\envs\amadeus\python.exe"
+if not defined PY if exist "%USERPROFILE%\anaconda3\envs\amadeus\python.exe" set "PY=%USERPROFILE%\anaconda3\envs\amadeus\python.exe"
+if not defined PY if exist "%LOCALAPPDATA%\miniconda3\envs\amadeus\python.exe" set "PY=%LOCALAPPDATA%\miniconda3\envs\amadeus\python.exe"
+if not defined PY if exist "%LOCALAPPDATA%\anaconda3\envs\amadeus\python.exe" set "PY=%LOCALAPPDATA%\anaconda3\envs\amadeus\python.exe"
+if not defined PY if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "PY=%CONDA_PREFIX%\python.exe"
+if not defined PY (
+  echo [PROBLEM] Could not find a Python environment named "amadeus" in the
+  echo           usual conda install locations.
+  echo           Edit the detection block in check_amadeus.bat and point
+  echo           PY at your Amadeus conda environment's python.exe.
   pause
   exit /b 1
 )

@@ -1275,7 +1275,7 @@ def _user_explicitly_asks_for_search(messages) -> str:
 # --- Explicit-request topic extraction -----------------------------------------
 # The fast path's query used to be the user's ENTIRE message. Real messages
 # carry small talk around the actual request ("Good afternoon, just had
-# breakfast... try a search for the weather in Lenggong please"), and a
+# breakfast... try a search for the weather in Springfield please"), and a
 # keyword-soup query like that gets back unrelated pages - greeting-card
 # quotes for the small talk, tech-support articles for a bare "try to search
 # again?" - which her model then papers over with plausible-sounding
@@ -1568,7 +1568,7 @@ def _web_triage(llm, messages):
     """
     convo = [{"role": "system", "content": _TRIAGE_SYSTEM}]
     # A wide-enough window that a place discussed a while ago ("I drove to
-    # my hometown" + the Lenggong search yesterday) is still visible to the
+    # my hometown" + the Springfield search yesterday) is still visible to the
     # router, without feeding the whole chat into a call that should stay
     # small. Each message is truncated to keep the call cheap.
     recent = [m for m in messages
@@ -1703,10 +1703,10 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     #
     # Why a model call at all: keyword matching routes by PHRASE, and every
     # phrasing it has not seen routes wrong - "whether it will rain in
-    # Lenggong" missed the weather gate, and "I have to wash my blanket... will
+    # Springfield" missed the weather gate, and "I have to wash my blanket... will
     # it rain later?" geocoded the place "I have wash blanket". The model
     # reads the message AND the recent context, so "will it rain later?" right
-    # after a long talk about Lenggong routes to Lenggong, while a genuinely
+    # after a long talk about Springfield routes to Springfield, while a genuinely
     # ambiguous question still makes her ask which town - never guess.
     # Cost/safety: a broad keyword prefilter decides whether the call is worth
     # making (a miss is harmless); if the call fails, the keyword routing

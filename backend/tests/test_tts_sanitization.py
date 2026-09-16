@@ -25,7 +25,7 @@ import chat  # noqa: E402
 class CleanTtsTextTests(unittest.TestCase):
     def test_whole_english_line_under_japanese_is_dropped(self):
         text = ("今日はレングングの天気は晴れよ。\n"
-                "The weather in Lenggong is clear today.")
+                "The weather in Springfield is clear today.")
         out = chat._clean_tts_text(text)
         self.assertNotIn("The weather", out)
         self.assertIn("晴れ", out)

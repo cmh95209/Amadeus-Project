@@ -965,7 +965,7 @@ September 15 entry below.
   the forecast, the temperature, whether it will rain, humidity, air
   quality - she pulls it straight from the keyless Open-Meteo service:
   right now, today, tomorrow, and the US AQI with PM2.5.
-- The report names the place she looked up ("Lenggong, Perak, Malaysia").
+- The report names the place she looked up ("Springfield, Springfield County, Testland").
   If you didn't give one, she asks which town you mean - she never guesses.
 - The lookup is time-boxed (about fifteen seconds at most) and degrades to
   one honest line if the service is unreachable or the place is unknown,
@@ -981,7 +981,7 @@ September 15 entry below.
 ## Web Search: Explicit Requests Now Search the Actual Topic — September 15, 2026
 
 With web access ON, an explicit request ("...try a search for the weather in
-Lenggong") now searches only the **topic** of the request - not your whole
+Springfield") now searches only the **topic** of the request - not your whole
 message. Before, the small talk in the same message (greetings, context) was
 part of the search too, so DuckDuckGo came back with unrelated pages
 (greeting-card quotes, tech articles about broken search engines), and she

@@ -101,7 +101,7 @@ class BotWallTests(unittest.TestCase):
 
     def test_normal_page_not_walled(self):
         self.assertFalse(webfetch.looks_bot_walled(
-            "Lenggong is a town in Perak. The weather today is warm and humid."))
+            "Springfield is a town in Testland. The weather today is warm and humid."))
 
 
 class FetchStatusTests(unittest.TestCase):
@@ -159,14 +159,14 @@ class WiringTests(unittest.TestCase):
         with patch.object(chat, "_run_web_search", return_value=self.RESULTS), \
              patch.object(webfetch, "fetch_page_text",
                           return_value=("ok", "The real numbers: 31.7 C, AQI 142.")):
-            out = chat._web_search_with_content("Lenggong weather")
+            out = chat._web_search_with_content("Springfield weather")
         self.assertIn("Top page", out)                 # snippets preserved
         self.assertIn("The real numbers: 31.7 C", out)  # fetched content appended
 
     def test_falls_back_to_snippets_when_walled(self):
         with patch.object(chat, "_run_web_search", return_value=self.RESULTS), \
              patch.object(webfetch, "fetch_page_text", return_value=("blocked", "")):
-            out = chat._web_search_with_content("Lenggong weather")
+            out = chat._web_search_with_content("Springfield weather")
         self.assertEqual(out, self.RESULTS)  # plain snippets, unchanged
 
     def test_no_urls_returns_search_unchanged(self):

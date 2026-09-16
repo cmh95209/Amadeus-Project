@@ -24,16 +24,17 @@ import chat  # noqa: E402
 # --- faked Open-Meteo payloads (shapes verified live, 2026-09-15) ------------
 GEO = {
     "results": [
-        {"id": 1767492, "name": "Lenggong", "latitude": 5.10633,
-         "longitude": 100.96792, "country_code": "MY", "admin1": "Perak",
-         "admin2": "Ulu Perak", "country": "Malaysia",
-         "timezone": "Asia/Kuala_Lumpur", "population": 12722},
+        {"id": 1767492, "name": "Springfield", "latitude": 42.1,
+         "longitude": -72.6, "country_code": "TL",
+         "admin1": "Springfield County",
+         "admin2": "Springfield", "country": "Testland",
+         "timezone": "Testland/Springfield", "population": 12722},
         {"id": 999, "name": "Lenggongi", "latitude": 45.0, "longitude": 18.0,
          "country": "Poland", "admin1": None},
     ]
 }
 FC = {
-    "timezone": "Asia/Kuala_Lumpur",
+    "timezone": "Testland/Springfield",
     "current": {
         "time": "2026-09-15T23:45", "temperature_2m": 25.5,
         "relative_humidity_2m": 100, "apparent_temperature": 32.2,
@@ -126,10 +127,10 @@ def triage_call(weather="no", place="none", search="no", topic="none"):
 class GeocodeTests(unittest.TestCase):
     def test_picks_first_result(self):
         with patch.object(weather, "_get_json", return_value=GEO):
-            loc = weather.geocode("Lenggong")
-        self.assertEqual(loc["name"], "Lenggong")
-        self.assertEqual(loc["admin1"], "Perak")
-        self.assertEqual(loc["country"], "Malaysia")
+            loc = weather.geocode("Springfield")
+        self.assertEqual(loc["name"], "Springfield")
+        self.assertEqual(loc["admin1"], "Springfield County")
+        self.assertEqual(loc["country"], "Testland")
 
     def test_empty_results_gives_none(self):
         with patch.object(weather, "_get_json", return_value={"results": []}):
@@ -168,8 +169,8 @@ class FormatTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     def test_full_report(self):
         with patch.object(weather, "_get_json", side_effect=fake_get_json):
-            r = weather.fetch_weather_report("Lenggong")
-        self.assertIn("Lenggong, Perak, Malaysia", r)
+            r = weather.fetch_weather_report("Springfield")
+        self.assertIn("Springfield, Springfield County, Testland", r)
         self.assertIn("Now (23:45 local): 25.5\u00b0C", r)
         self.assertIn("feels like 32.2\u00b0C", r)
         self.assertIn("overcast", r)
@@ -197,7 +198,7 @@ class ReportTests(unittest.TestCase):
             return fc
 
         with patch.object(weather, "_get_json", side_effect=gj):
-            r = weather.fetch_weather_report("Lenggong")
+            r = weather.fetch_weather_report("Springfield")
         self.assertIn("rain right now", r)
         self.assertNotIn("no rain right now", r)
 
@@ -209,7 +210,7 @@ class ReportTests(unittest.TestCase):
     def test_service_down_is_honest(self):
         with patch.object(weather, "_get_json",
                           side_effect=OSError("connection reset")):
-            self.assertEqual(weather.fetch_weather_report("Lenggong"),
+            self.assertEqual(weather.fetch_weather_report("Springfield"),
                              weather.SERVICE_DOWN_LINE)
 
     def test_forecast_down_after_geocode_is_honest(self):
@@ -219,7 +220,7 @@ class ReportTests(unittest.TestCase):
             raise OSError("down")
 
         with patch.object(weather, "_get_json", side_effect=gj):
-            self.assertEqual(weather.fetch_weather_report("Lenggong"),
+            self.assertEqual(weather.fetch_weather_report("Springfield"),
                              weather.SERVICE_DOWN_LINE)
 
     def test_air_failure_only_drops_the_air_line(self):
@@ -231,7 +232,7 @@ class ReportTests(unittest.TestCase):
             return FC
 
         with patch.object(weather, "_get_json", side_effect=gj):
-            r = weather.fetch_weather_report("Lenggong")
+            r = weather.fetch_weather_report("Springfield")
         self.assertNotIn("Air quality", r)
         self.assertIn("Today:", r)
         self.assertIn("Open-Meteo", r)
@@ -249,13 +250,13 @@ class WeatherIntentTests(unittest.TestCase):
             "What's the forecast for Tokyo?",
             "will it rain in Penang tonight?",
             "how hot is it in Bangkok?",
-            "air quality in Lenggong",
+            "air quality in Springfield",
             "what's the humidity in KL?",
             "what's the AQI here?",
             "is it raining?",
             "will it snow this weekend?",
             "check the weather for my trip to Tokyo",
-            "can you search the weather in Lenggong?",
+            "can you search the weather in Springfield?",
             "\u4eca\u65e5\u306e\u5929\u6c17\u306f\u3069\u3046?",
             "\u660e\u65e5\u306e\u6c17\u6e29\u306f\uff1f",
         ]:
@@ -277,12 +278,12 @@ class WeatherIntentTests(unittest.TestCase):
 class PlaceExtractionTests(unittest.TestCase):
     def test_places_extracted_with_casing(self):
         cases = {
-            "weather in Lenggong": "Lenggong",
+            "weather in Springfield": "Springfield",
             "What's the forecast for Tokyo?": "Tokyo",
             "will it rain in Penang tonight?": "Penang",
             "how hot is it in Bangkok?": "Bangkok",
-            "what's the weather like in Kuala Lumpur tomorrow?": "Kuala Lumpur",
-            "air quality in Lenggong": "Lenggong",
+            "what's the weather like in Springfield tomorrow?": "Springfield",
+            "air quality in Springfield": "Springfield",
             "check the weather for my trip to Tokyo": "Tokyo",
             "will it be hot in Singapore tomorrow?": "Singapore",
         }
@@ -305,7 +306,7 @@ class PlaceExtractionTests(unittest.TestCase):
 # --- chat.py: the wiring inside the web loop ---------------------------------
 MESSAGES_WEATHER = [
     {"role": "system", "content": "persona"},
-    {"role": "user", "content": "how's the weather in Lenggong?"},
+    {"role": "user", "content": "how's the weather in Springfield?"},
 ]
 
 
@@ -329,7 +330,7 @@ class WeatherWiringTests(unittest.TestCase):
             pack.assistant_reply_ENG, "25.5 degrees, overcast, rain likely.")
         self.assertEqual(len(log), 2)  # triage + phase 2 - no judgement call
         fed = log[1][-1]["content"]
-        self.assertIn("Live weather data for 'Lenggong'", fed)
+        self.assertIn("Live weather data for 'Springfield'", fed)
         self.assertIn("FAKE LIVE BLOCK", fed)
         self.assertIn("AmadeusPack", fed)
 
@@ -413,7 +414,7 @@ class WebOffWeatherTests(unittest.TestCase):
                           side_effect=AssertionError("web off: no weather")):
             pack = chat.getResponsePacked(
                 [{"role": "user",
-                  "content": "how's the weather in Lenggong?"}])
+                  "content": "how's the weather in Springfield?"}])
 
         self.assertEqual(pack.assistant_reply_ENG, "ok")
 
@@ -451,7 +452,7 @@ class TriageRoutingTests(unittest.TestCase):
              patch.object(chat.weather, "fetch_weather_report",
                           return_value="FAKE") as fw:
             chat._getResponsePackedWithWebSearch(llm, MESSAGES_WEATHER)
-        fw.assert_called_once_with("Lenggong")  # the keyword route did it
+        fw.assert_called_once_with("Springfield")  # the keyword route did it
         self.assertEqual(len(log), 2)
 
     def test_debris_topic_reuses_prior_query(self):
@@ -468,11 +469,11 @@ class TriageRoutingTests(unittest.TestCase):
             chat._getResponsePackedWithWebSearch(llm, [
                 {"role": "system", "content": "persona"},
                 {"role": "user",
-                 "content": "Try a search for the MRT ticket prices please."},
+                 "content": "Try a search for the metro ticket prices please."},
                 {"role": "assistant", "content": "They cost 2 ringgit."},
                 {"role": "user", "content": "Could you try to search again?"},
             ])
-        ms.assert_called_once_with("the MRT ticket prices")
+        ms.assert_called_once_with("the metro ticket prices")
 
     def test_dead_triage_call_never_blocks_reply(self):
         llm = FakeLLM(lambda convo: FakeReply(tool_calls=pack_call(eng="ok")),
@@ -483,7 +484,7 @@ class TriageRoutingTests(unittest.TestCase):
              patch.object(chat.weather, "fetch_weather_report",
                           return_value="FAKE") as fw:
             chat._getResponsePackedWithWebSearch(llm, MESSAGES_WEATHER)
-        fw.assert_called_once_with("Lenggong")  # the keyword fallback did it
+        fw.assert_called_once_with("Springfield")  # the keyword fallback did it
 
     def test_timeout_guard(self):
         def slow():

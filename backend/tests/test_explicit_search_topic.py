@@ -3,7 +3,7 @@
 
 The fast path used to hand the user's ENTIRE message to DuckDuckGo as the
 query - small talk included - so "Good afternoon... try a search for the
-weather in Lenggong" searched the small talk (back: greeting-card quotes),
+weather in Springfield" searched the small talk (back: greeting-card quotes),
 and "Could you try to search again?" searched the retry sentence (back:
 tech-support articles about broken search). The query must be the extracted
 TOPIC only; when there is no topic, the fast path reuses the previous
@@ -30,8 +30,8 @@ class ExtractSearchTopicTests(unittest.TestCase):
             "Good afternoon. I just had my breakfast and wanted to check in "
             "with you before i drive to hometown. Is your web access module "
             "working well? Try a search for the weather and air quality in "
-            "Lenggong please."),
-            "the weather and air quality in Lenggong")
+            "Springfield please."),
+            "the weather and air quality in Springfield")
 
     def test_plain_search_for(self):
         self.assertEqual(self.t("Search for the latest Genshin banner"),
@@ -65,7 +65,7 @@ class ExtractSearchTopicTests(unittest.TestCase):
         self.assertEqual(self.t("can you google that for me?"), "")
 
     def test_bare_search(self):
-        self.assertEqual(self.t("search Lenggong weather"), "Lenggong weather")
+        self.assertEqual(self.t("search Springfield weather"), "Springfield weather")
 
     def test_bare_retry_sentence_has_no_topic(self):
         self.assertEqual(self.t("Could you try to search again?"), "")
@@ -100,19 +100,19 @@ class PriorSearchQueryTests(unittest.TestCase):
 
     def test_returns_clean_topic_not_full_message(self):
         messages = self.msgs(
-            "Try a search for the weather and air quality in Lenggong please.")
+            "Try a search for the weather and air quality in Springfield please.")
         self.assertEqual(
             chat._find_prior_search_query(messages),
-            "the weather and air quality in Lenggong")
+            "the weather and air quality in Springfield")
 
     def test_bare_retry_skipped_and_prior_topic_used(self):
         messages = self.msgs(
-            "Try a search for the weather and air quality in Lenggong please.",
+            "Try a search for the weather and air quality in Springfield please.",
             "Could you try to search again?",
         )
         self.assertEqual(
             chat._find_prior_search_query(messages),
-            "the weather and air quality in Lenggong")
+            "the weather and air quality in Springfield")
 
     def test_no_explicit_message_gives_empty(self):
         self.assertEqual(
@@ -138,18 +138,18 @@ class FastPathQueryTests(unittest.TestCase):
             {"role": "system", "content": "persona"},
             {"role": "user",
              "content": "Good afternoon. Is your web access module working "
-                        "well? Try a search for the latest MRT one-way "
-                        "ticket prices in Kuala Lumpur please."},
+                        "well? Try a search for the latest metro one-way "
+                        "ticket prices in Riverton please."},
         ]
         pack, log, ms = self._run(messages)
         ms.assert_called_once_with(
-            "the latest MRT one-way ticket prices in Kuala Lumpur")
+            "the latest metro one-way ticket prices in Riverton")
         self.assertEqual(len(log), 2)  # triage + the real call; judgement skipped
 
     def test_bare_retry_with_no_prior_topic_does_not_search(self):
         messages = [
             {"role": "system", "content": "persona"},
-            {"role": "user", "content": "how\u2019s the weather in Lenggong?"},
+            {"role": "user", "content": "how\u2019s the weather in Springfield?"},
             {"role": "assistant", "content": "It looks cloudy."},
             {"role": "user", "content": "Could you try to search again?"},
         ]
@@ -162,12 +162,12 @@ class FastPathQueryTests(unittest.TestCase):
             {"role": "system", "content": "persona"},
             {"role": "user",
              "content": "Try a search for the weather and air quality in "
-                        "Lenggong please."},
+                        "Springfield please."},
             {"role": "assistant", "content": "Cloudy, rain in the evening."},
             {"role": "user", "content": "Could you try to search again?"},
         ]
         pack, log, ms = self._run(messages)
-        ms.assert_called_once_with("the weather and air quality in Lenggong")
+        ms.assert_called_once_with("the weather and air quality in Springfield")
         self.assertEqual(len(log), 2)  # triage + the real call
 
 
