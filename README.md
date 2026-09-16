@@ -951,6 +951,9 @@ this shape slipped through.
 ---
 
 
+<details>
+<summary><strong>Earlier entries</strong> (click to expand)</summary>
+
 ## Live Weather & Air Quality — September 16, 2026
 
 Weather questions now get real numbers instead of search-engine snippets
@@ -1463,6 +1466,7 @@ Implemented:
 
 These endpoints provide the interface between the frontend and the Python backend for runtime model selection.
 
+</details>
 ---
 
 # Notes
