@@ -613,6 +613,44 @@ def _strip_pack_scaffolding(text: str) -> str:
     return "\n".join(kept)
 
 
+# A maximal contiguous Latin run: starts and ends with a letter/digit, only
+# letters, digits and ordinary word punctuation / single spaces in between.
+_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 .,!?'&;:%/-]*[A-Za-z0-9])?")
+
+
+def _strip_inline_english(text: str) -> str:
+    """Strip inline English phrases glued ONTO Japanese lines.
+
+    The line-level cleaning above drops whole-English LINES, but a
+    degenerating model can collapse the bilingual reply into ONE line -
+    Japanese first, then the English paragraph inline, no line break - so the
+    line "contains Japanese" and nothing gets dropped, and TTS reads the
+    English out loud (observed 2026-09-16: a ~600-word English tail on a
+    single 941-char line). Each contiguous Latin run that forms an actual
+    phrase (3+ words, or 24+ Latin letters) is therefore removed; short
+    legitimate tokens (her name, "AI", "AQI", "PM2.5", numbers) survive.
+    Runs never cross line breaks, so normal multi-line text is unaffected.
+    """
+    def _kill(match):
+        run = match.group(0)
+        words = sum(1 for part in run.split() if any(c.isalpha() for c in part))
+        letters = sum(1 for c in run if "a" <= c.lower() <= "z")
+        if words >= 3 or letters >= 24:
+            return " "
+        return run
+    t = _INLINE_RUN_RE.sub(_kill, text)
+    if t != text:
+        print("[Amadeus] JPS had inline English - stripped before TTS")
+    t = re.sub(r" +", " ", t)
+    # drop punctuation left orphaned where a phrase was removed
+    t = re.sub(r"(?<= )[!?,.;:]{1,3}(?= )", "", t)
+    t = re.sub(r"[!?,.;:]{1,3} +$", "", t)
+    # glue any leftover spaces back onto CJK punctuation
+    t = re.sub(r"\s+([、。，！？；：])", r"\1", t)
+    t = re.sub(r"([、。，！？；：])\s+", r"\1", t)
+    return t
+
+
 def _clean_tts_text(text: str) -> str:
     """Sanitize the Japanese (TTS) field before it reaches GPT-SoVITS.
 
@@ -628,7 +666,8 @@ def _clean_tts_text(text: str) -> str:
       - for a field that DOES have Japanese: strip the pack scaffolding, drop any
         line that has Latin letters but no Japanese (a whole-English gloss line -
         not a Japanese line that merely names a product), drop pure-English
-        parentheticals, and truncate runaway repetition.
+        parentheticals, strip inline English phrases glued onto a Japanese
+        line (no line break to key on), and truncate runaway repetition.
     Japanese lines that merely contain a few Latin tokens (a product name, "AI", a
     number) are left untouched, so a legitimate mixed line is never broken.
     """
@@ -651,6 +690,7 @@ def _clean_tts_text(text: str) -> str:
         t = re.sub(r"[（(][^（）()]*[）)]",
                    lambda m: m.group(0) if _has_japanese_script(m.group(0)) else "", t)
         t = re.sub(r"\n{3,}", "\n\n", t)
+        t = _strip_inline_english(t)
     return _collapse_runaway(t).strip()
 
 
@@ -2051,6 +2091,14 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 
     try:
         out: AmadeusPack = _attempt(llm)
+        if out is None:
+            # A clipped or malformed forced tool call can decode to NOTHING -
+            # the structured-output layer hands back None instead of a pack
+            # (observed 2026-09-16, web-off path). Raise a specific error so
+            # the log carries the same actionable "check the max-output-tokens
+            # setting" signal the web path has, not a cryptic AttributeError.
+            raise ValueError("structured reply came back empty - clipped "
+                             "mid-JSON? check the max-output-tokens setting")
         return _out(out)
     except Exception as e:
         # The server may REJECT a sampling parameter (strict cloud compat
