@@ -36,12 +36,24 @@ class FakeReply:
 class FakeBound:
     """Stands in for a langchain bind_tools() result."""
 
-    def __init__(self, handler, log):
+    def __init__(self, handler, log, triage=None):
         self.handler = handler  # fn(convo) -> FakeReply (or raises)
         self.log = log          # one entry per invoke: the convo that was sent
+        self.triage = triage    # canned answer for the web-triage router call
 
     def invoke(self, convo):
         self.log.append(list(convo))
+        # The web-triage router call is answered with a canned tool call
+        # (default: "no/no" - defer to the keyword routing), never with the
+        # test's own handler. Tests opt in to an affirmative triage by
+        # passing triage=... to FakeLLM.
+        last = convo[-1] if convo else {}
+        if (last.get("role") == "user"
+                and isinstance(last.get("content"), str)
+                and last["content"].startswith("Classify the user's latest")):
+            return FakeReply(tool_calls=self.triage
+                                        if self.triage is not None
+                                        else triage_call())
         return self.handler(convo)
 
     def bind(self, **kwargs):
@@ -49,14 +61,15 @@ class FakeBound:
 
 
 class FakeLLM:
-    def __init__(self, handler, log):
+    def __init__(self, handler, log, triage=None):
         self.handler = handler
         self.log = log
         self.last_tools = None
+        self.triage = triage if triage is not None else triage_call()
 
     def bind_tools(self, tools, tool_choice=None):
         self.last_tools = [t.get("function", {}).get("name") for t in tools]
-        return FakeBound(self.handler, self.log)
+        return FakeBound(self.handler, self.log, self.triage)
 
     def invoke(self, messages):
         return self.handler(messages)
@@ -65,6 +78,13 @@ class FakeLLM:
 def pack_call(eng="ok", jps="\u3057\u3083\u3088"):
     return [{"name": "AmadeusPack",
              "args": {"assistant_reply_JPS": jps, "assistant_reply_ENG": eng}}]
+
+
+def triage_call(weather="no", place="none", search="no", topic="none"):
+    """A canned web_triage tool call (the router speaks yes/no/none)."""
+    return [{"name": "WebTriagePack",
+             "args": {"wants_weather": weather, "weather_place": place,
+                      "wants_search": search, "search_topic": topic}}]
 
 
 # The captured incident: web toggled on, follow-up "try again" (NOT an explicit
@@ -269,10 +289,10 @@ class WebLoopFlowTests(unittest.TestCase):
             pack = chat._getResponsePackedWithWebSearch(llm, messages)
 
         self.assertEqual(pack.assistant_reply_ENG, "Here is what I found.")
-        self.assertEqual(len(log), 1)  # judgement call skipped entirely
+        self.assertEqual(len(log), 2)  # triage + phase 2 - judgement call skipped
         # the query is the extracted TOPIC, not the raw message
         ms.assert_called_once_with("the character Alyosha")
-        self.assertEqual(llm.last_tools, ["AmadeusPack"])  # phase 2 only
+        self.assertEqual(llm.last_tools, ["AmadeusPack"])  # phase 2 last
 
     def test_explicit_request_with_failed_final_call_returns_honest_pack(self):
         def handler(convo):
