@@ -929,6 +929,28 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Voice: Leaked English No Longer Read Out Loud — September 16, 2026
+
+When the model misbehaves and her reply comes out in a broken shape, the
+English translation could end up glued onto the same line as her Japanese -
+and the voice reads whatever is in that line, so she read the English aloud.
+The existing protection only cleaned up English sitting on its own line, so
+this shape slipped through.
+
+- The voice-line cleaner now spots an English phrase written INLINE in a
+  Japanese line (there is no line break to key on) and removes it before the
+  audio. Legitimate tokens stay: numbers, "AQI", "AI", "PM2.5", product
+  names, her own name.
+- When the first reply attempt comes back completely empty - usually because
+  the answer got clipped mid-way (if that starts happening often, check the
+  max-output-tokens value in the Model Sampling tab) - the log now carries a
+  clear, actionable note instead of a cryptic error.
+- 7 new offline tests cover the old line-by-line leak and this new inline
+  one.
+
+---
+
+
 ## Live Weather & Air Quality — September 16, 2026
 
 Weather questions now get real numbers instead of search-engine snippets
