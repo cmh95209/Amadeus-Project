@@ -2167,9 +2167,8 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 # - builds recent conversation context from memory
 # - calls getResponsePacked(...) exactly once
 # - appends assistant_reply_ENG to memory
-# - returns an AmadeusPack containing:
-#     - assistant_reply_JPS (native Japanese dialogue, for TTS)
-#     - assistant_reply_ENG (English translation, for the UI)
+# - returns the pack, both message ids, and the conversation id the turn
+#   was stored in
 def getOutputPacked(user_message: str):
     # Snapshot the previous turn before the new message becomes the latest one.
     internal_context = store.load_internal_context()
@@ -2191,7 +2190,10 @@ def getOutputPacked(user_message: str):
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )
     maybe_schedule_trust_rescore()
-    return pack, user_id, assistant_id
+    # The session this turn actually landed in, so the UI can verify it is
+    # showing the conversation the turn was written to.
+    conv_id = store.load_active_conversation()
+    return pack, user_id, assistant_id, conv_id
 
 
 # pre:
