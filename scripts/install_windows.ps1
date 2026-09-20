@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 #  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v2  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
@@ -31,9 +31,9 @@ $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faste
 
 $InstallDir = Join-Path $env:USERPROFILE "Amadeus"
 $LogPath    = Join-Path $InstallDir "install_log.txt"
-# Your fork holds all the new features; this is the branch to install.
+# Your fork's main branch holds all the features; this is the branch to install.
 $ForkUrl   = "https://github.com/cmh95209/Amadeus-Project.git"
-$Branch    = "cmh95-local-llm-and-features"
+$Branch    = "main"
 
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
@@ -160,7 +160,7 @@ try {
     & git lfs install 2>$null
     Log "  Git + LFS ready." "Green"
 
-    # ---------- STEP 3: Amadeus project (your fork, feature branch) ----------
+    # ---------- STEP 3: Amadeus project (your fork, main branch) ----------
     Step 3 "Downloading the Amadeus project (your fork, with all new features)"
     $proj = Join-Path $InstallDir "Amadeus-Project"
     if (Test-Complete $proj @("backend\main.py","start_windows.bat")) {
@@ -174,7 +174,7 @@ try {
                 $status  = & git status --porcelain
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
-                    if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version of your feature branch." "Green" }
+                    if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version of your fork's main branch." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
                 } elseif ($current -ne $Branch) {
                     Log ("  This folder is on branch '" + $current + "', so I did NOT touch it.") "Yellow"
