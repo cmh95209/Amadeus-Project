@@ -929,6 +929,37 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Conversation Sessions: the Window and the Backend Stay in Step — September 20, 2026
+
+Two quiet slips cost a confused afternoon: after a week's gap she called a
+week-old thread "yesterday" (her conversation context carries no dates, so
+the *when* was always a guess), and the chat window could keep showing one
+conversation while a new message was actually filed under another - an
+unnoticed reset of the active-conversation pointer that the logs did not
+mention either.
+
+- The window now says which conversation you are in: the session's title
+  sits in the chat header, so the active tab is no longer a matter of
+  inference.
+- The window re-checks the backend's active conversation after every reply
+  and roughly every 30 seconds, and reloads itself if they disagree - the
+  pane and the place your messages are filed can no longer drift apart
+  silently.
+- When the active-conversation pointer is found empty or corrupt and must be
+  reset, the backend now writes a clear line to its log instead of doing it
+  silently, and the pointer file is written crash-safely so a shutdown can
+  no longer leave it half-empty.
+- Messages in her context that start a two-hour-or-longer gap now carry a
+  short time note ("about 2 days have passed since the previous message"),
+  so she can place when things happened instead of guessing.
+- 140 offline tests pass.
+
+---
+
+
+<details>
+<summary><strong>Earlier entries</strong> (click to expand)</summary>
+
 ## Voice: Leaked English No Longer Read Out Loud — September 16, 2026
 
 When the model misbehaves and her reply comes out in a broken shape, the
@@ -949,10 +980,6 @@ this shape slipped through.
   one.
 
 ---
-
-
-<details>
-<summary><strong>Earlier entries</strong> (click to expand)</summary>
 
 ## Live Weather & Air Quality — September 16, 2026
 
