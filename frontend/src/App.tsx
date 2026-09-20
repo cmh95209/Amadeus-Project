@@ -59,6 +59,11 @@ export default function App() {
   const [editDraft, setEditDraft] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<number | null>(null);
+  // The conversation the MESSAGE PANE is actually showing. If it ever
+  // diverges from the backend's active conversation, the pane reloads.
+  const [displayedConvId, setDisplayedConvId] = useState<number | null>(null);
+  const displayedConvIdRef = useRef<number | null>(null);
+  displayedConvIdRef.current = displayedConvId;
   const [renamingConvId, setRenamingConvId] = useState<number | null>(null);
   const [convDraft, setConvDraft] = useState("");
   const [sessionsBusy, setSessionsBusy] = useState(false);
@@ -206,9 +211,15 @@ export default function App() {
 
   // Gentle background probe so the footer dot reflects the model server's
   // real state (a dead server shows red without waiting for a failed message).
+  // It also re-syncs the conversation list, so if the active conversation
+  // ever changes outside the UI the pane catches up within ~30 seconds.
   useEffect(() => {
     void refreshConnection();
-    const id = window.setInterval(() => { void refreshConnection(); }, 30000);
+    void refreshConversations();
+    const id = window.setInterval(() => {
+      void refreshConnection();
+      void refreshConversations();
+    }, 30000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -254,6 +265,9 @@ export default function App() {
       if (convs) {
         setConversations(convs.conversations);
         setActiveConvId(convs.active_id);
+        // The startup /getMemory and /conversations come from the same
+        // backend state, so the pane is showing the active conversation.
+        setDisplayedConvId(convs.active_id);
       }
       setStatus("Online");
     } catch (error) {
@@ -300,6 +314,18 @@ export default function App() {
 
     try {
       const reply = await sendMessage(text);
+
+      // The reply tells us which conversation the turn was stored in. If the
+      // pane is showing a different one, the pane went stale - reload it.
+      if (
+        reply.conversationId != null &&
+        displayedConvIdRef.current !== null &&
+        reply.conversationId !== displayedConvIdRef.current
+      ) {
+        const fresh = await getMemory();
+        setMessages(fresh);
+        setDisplayedConvId(reply.conversationId);
+      }
 
       setMessages((current) => {
         const next = [...current];
@@ -534,6 +560,13 @@ export default function App() {
       const convs = await listConversations();
       setConversations(convs.conversations);
       setActiveConvId(convs.active_id);
+      // If the backend's active conversation no longer matches what the
+      // pane is showing, the pane is stale - reload it from the backend.
+      if (displayedConvIdRef.current != null && convs.active_id !== displayedConvIdRef.current) {
+        const fresh = await getMemory();
+        setMessages(fresh);
+        setDisplayedConvId(convs.active_id);
+      }
     } catch {
       // The rail simply keeps showing the previous list.
     }
@@ -547,6 +580,7 @@ export default function App() {
       const id = await createConversation();
       setActiveConvId(id);
       setMessages([]);
+      setDisplayedConvId(id);
       setStatus("New conversation started");
       void refreshConversations();
     } catch (error) {
@@ -566,6 +600,7 @@ export default function App() {
       setActiveConvId(id);
       setEditingId(null);
       setMessages(await getMemory());
+      setDisplayedConvId(id);
       setStatus("Online");
       void refreshConversations();
     } catch (error) {
@@ -614,6 +649,7 @@ export default function App() {
         // The session we were in was deleted; move to the one that took over.
         setActiveConvId(newActive);
         setMessages(await getMemory());
+        setDisplayedConvId(newActive);
       }
       setStatus("Conversation deleted");
       void refreshConversations();
@@ -881,13 +917,13 @@ export default function App() {
       {/* Chat Panel */}
       <section className="chat-panel">
         <div className="chat-toolbar">
-          <div>
+          <div className="chat-toolbar-id">
             <span className="eyebrow">
               LAB MEMBER 004
             </span>
 
             <h2>
-              Conversation
+              {conversations.find((c) => c.id === activeConvId)?.title ?? "Conversation"}
             </h2>
           </div>
 

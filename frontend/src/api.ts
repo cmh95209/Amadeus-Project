@@ -10,6 +10,7 @@ export type MemoryMessage = {
   role: string;
   content: string;
   created_at?: string;
+  conversation_id?: number;
   audio_url?: string;
   has_japanese?: boolean;
   active?: boolean;
@@ -24,6 +25,7 @@ export type MessageReply = {
   userId?: number;
   assistantId?: number;
   audioRelUrl?: string;
+  conversationId?: number;
 };
 
 export const API_BASE = "http://127.0.0.1:5050";
@@ -95,6 +97,8 @@ export async function sendMessage(userInput: string): Promise<MessageReply> {
         : undefined,
     userId: typeof data.user_id === "number" ? data.user_id : undefined,
     assistantId: typeof data.assistant_id === "number" ? data.assistant_id : undefined,
+    conversationId:
+      typeof data.conversation_id === "number" ? data.conversation_id : undefined,
   };
 }
 
@@ -193,6 +197,8 @@ export async function sendInteraction(interactionValue: number): Promise<Message
         : undefined,
     userId: typeof data.event_id === "number" ? data.event_id : undefined,
     assistantId: typeof data.response_id === "number" ? data.response_id : undefined,
+    conversationId:
+      typeof data.conversation_id === "number" ? data.conversation_id : undefined,
     audioRelUrl:
       typeof data.audio_url === "string" && data.audio_url.startsWith("/")
         ? data.audio_url

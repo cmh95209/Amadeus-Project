@@ -272,6 +272,19 @@ button {
   font-weight: 500;
 }
 
+.chat-toolbar-id {
+  /* The conversation title can be long (auto-titled from the first user
+     message) - keep it inside the toolbar instead of pushing the buttons. */
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-toolbar-id h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbar-actions {
   display: flex;
   gap: 8px;

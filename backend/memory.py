@@ -533,6 +533,35 @@ def build_prompt_messages(token_budget: int | None = None, exclude_ids=None) -> 
     return kept
 
 
+# pre: created_at / prev_created_at are the stored "YYYY-MM-DD HH:MM" strings
+#      (or anything unparseable); a missing side means "no note"
+# post: a short bracketed time note when this message starts a real gap
+#       (2+ hours) after the previous one, else None. Her prompt otherwise
+#       carries no dates at all, so without these notes she can only GUESS
+#       when an old message happened (observed 2026-09-20: a week-old thread
+#       answered as "yesterday").
+def _time_note(created_at, prev_created_at):
+    if not created_at or not prev_created_at:
+        return None
+    try:
+        then = datetime.fromisoformat(prev_created_at).astimezone()
+        now_ = datetime.fromisoformat(created_at).astimezone()
+    except (TypeError, ValueError):
+        return None
+    seconds = (now_ - then).total_seconds()
+    if seconds < 2 * 3600:
+        return None
+    hours = int(seconds // 3600)
+    if hours >= 48:
+        amount, unit = hours // 24, "day"
+    else:
+        amount, unit = hours, "hour"
+    verb = "has" if amount == 1 else "have"
+    plural = "" if amount == 1 else "s"
+    return (f"[Time note: about {amount} {unit}{plural} {verb} "
+            f"passed since the previous message.]")
+
+
 # pre: rows is a list of (id, role) tuples in ascending id order for one conversation
 # post: ids grouped into "reply turns" - a user message is its own turn, and a
 #       consecutive run of assistant messages (all regenerations of one reply)
@@ -553,12 +582,13 @@ def _group_reply_turns(rows) -> List[List[int]]:
     return groups
 
 
-# pre: row is one (id, role, content, created_at, audio, japanese, active) tuple
+# pre: row is one (id, role, content, created_at, audio, japanese, active, conversation_id) tuple
 # post: the plain dict shape the UI expects (audio_url / has_japanese when present)
 def _message_item(row) -> Dict[str, str]:
-    mid, role, content, created_at, audio, japanese, active = row
+    mid, role, content, created_at, audio, japanese, active, conv_id = row
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
-            "active": bool((active if active is not None else 1))}
+            "active": bool((active if active is not None else 1)),
+            "conversation_id": conv_id}
     if audio:
         item["audio_url"] = "/message_audio/" + audio
     if role == "assistant" and (japanese or "").strip():
@@ -583,8 +613,8 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
 
     c.execute(
-        "SELECT id, role, content, created_at, audio, japanese, active FROM messages "
-        "WHERE conversation_id = ? ORDER BY id ASC",
+        "SELECT id, role, content, created_at, audio, japanese, active, conversation_id "
+        "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         (conv,),
     )
     rows = c.fetchall()
@@ -862,13 +892,26 @@ def _active_conv_id_from_conn(c: sqlite3.Cursor) -> int:
         conv_id: int = c.lastrowid
     else:
         conv_id = row[0]
+    raw = (load_active_conversation_raw() or "").strip()
     try:
-        stored = int((load_active_conversation_raw() or "").strip())
+        stored = int(raw)
     except ValueError:
         stored = -1
     if stored != conv_id:
         saved = c.execute("SELECT id FROM conversations WHERE id = ?", (stored,)).fetchone()
         if saved is None:
+            # The stored pointer was empty, corrupt, or names a session that no
+            # longer exists. Reset to the first session - and LEAVE A TRACE: a
+            # silent reset here is how the chat pane and the backend can drift
+            # apart on which conversation is active (observed 2026-09-20).
+            title_row = c.execute(
+                "SELECT title FROM conversations WHERE id = ?", (conv_id,)
+            ).fetchone()
+            print(
+                f"[Amadeus] Active-conversation pointer unusable "
+                f"(file held {raw!r}); reset to session {conv_id} "
+                f"({title_row[0] if title_row else 'unknown'})."
+            )
             save_active_conversation(conv_id)
         else:
             conv_id = stored
@@ -892,10 +935,18 @@ def load_active_conversation() -> int:
     return conv_id
 
 
+# pre: conversation_id is a session id (the file only stores the pointer)
+# post: data/active_conversation.txt holds that id; written via a temp file +
+#       os.replace so a crash mid-write can never leave the file empty or
+#       half-written (an unusable pointer triggers the logged reset in
+#       _active_conv_id_from_conn)
 def save_active_conversation(conversation_id: int) -> None:
     _ensure_file(PATH_TO_ACTIVE_CONV, default_text="")
-    with open(PATH_TO_ACTIVE_CONV, "w", encoding="utf-8") as f:
+    tmp_path = PATH_TO_ACTIVE_CONV + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(str(int(conversation_id)))
+        f.flush()
+    os.replace(tmp_path, PATH_TO_ACTIVE_CONV)
 
 
 def list_conversations() -> List[Dict]:
@@ -996,7 +1047,9 @@ def delete_conversation(conversation_id: int) -> bool:
 # pre: None; post: model-facing history of the given (or active) conversation.
 #       Assistant lines use their saved Japanese voice line when one exists,
 #       so the model hears HER OWN PAST VOICE instead of an English shadow.
-#       User lines stay in the language the user wrote them in.
+#       User lines stay in the language the user wrote them in. Older messages
+#       after a gap of 2+ hours carry a short bracketed time note (her prompt
+#       otherwise has no dates); the latest user message stays clean.
 def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[str, str]]:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
     conn = sqlite3.connect(PATH_TO_MEMORY)
@@ -1007,24 +1060,32 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
     if exclude_ids:
         ph = ",".join("?" * len(exclude_ids))
         rows = c.execute(
-            "SELECT role, content, japanese FROM messages "
+            "SELECT role, content, japanese, created_at FROM messages "
             "WHERE conversation_id = ? AND (role = 'user' OR active = 1) "
             "AND id NOT IN (" + ph + ") ORDER BY id ASC",
             [conv, *exclude_ids],
         ).fetchall()
     else:
         rows = c.execute(
-            "SELECT role, content, japanese FROM messages "
+            "SELECT role, content, japanese, created_at FROM messages "
             "WHERE conversation_id = ? AND (role = 'user' OR active = 1) "
             "ORDER BY id ASC", (conv,)
         ).fetchall()
     conn.close()
     out = []
-    for role, content, japanese in rows:
-        if role == "assistant" and japanese:
-            out.append({"role": role, "content": japanese})
-        else:
-            out.append({"role": role, "content": content})
+    prev_created_at = None
+    # The latest user message is the one being answered right now: its timing
+    # is already covered by the internal timing context, and downstream
+    # helpers (search-topic extraction, character-book check) read that exact
+    # message - so it stays clean. Older messages after real gaps get the note.
+    last_user_index = max(
+        (i for i, row in enumerate(rows) if row[0] == "user"), default=-1
+    )
+    for i, (role, content, japanese, created_at) in enumerate(rows):
+        base = japanese if (role == "assistant" and japanese) else content
+        note = None if i == last_user_index else _time_note(created_at, prev_created_at)
+        out.append({"role": role, "content": note + " " + base if note else base})
+        prev_created_at = created_at
     return out
 
 

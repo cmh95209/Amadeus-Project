@@ -104,7 +104,7 @@ def request_message():
     user_input = content.get("user_input", "")
 
     try:
-        pack, user_id, assistant_id = getOutputPacked(user_input)
+        pack, user_id, assistant_id, conv_id = getOutputPacked(user_input)
     except Exception as exc:
         print("[Flask] LLM failure:", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
@@ -128,6 +128,7 @@ def request_message():
         "speech_id": speech_id,
         "user_id": user_id,
         "assistant_id": assistant_id,
+        "conversation_id": conv_id,
     })
 
 @application.route("/speech/<speech_id>", methods=["GET"])
@@ -229,9 +230,12 @@ def getCurrLLMModel():
 # - returns all stored conversation messages in list of Jsons
 @application.route("/getMemory", methods=["POST"])
 def getMemory():
-    print("[Flask] /getMemory triggered")  
+    print("[Flask] /getMemory triggered")
     msgs = get_raw_memory()
-    return jsonify({"status":"ok","messages": msgs})
+    # The session this batch belongs to, so the UI can always verify the
+    # pane it is showing matches the backend's active conversation.
+    return jsonify({"status":"ok","messages": msgs,
+                    "conversation_id": memory.load_active_conversation()})
 
 
 @application.route("/getPersonality", methods=["GET"])
@@ -293,7 +297,8 @@ def doSpecialInteraction():
             "audio_url": "/reaction_audio/" + audio_url[len(prefix):],
         }
 
-    return jsonify({"status": "ok", **reply})
+    return jsonify({"status": "ok", **reply,
+                    "conversation_id": memory.load_active_conversation()})
 
 
 @application.route("/getWebAccess", methods=["GET"])
