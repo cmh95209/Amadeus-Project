@@ -929,6 +929,25 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Windows Launcher: One-Click Start No Longer Dies on a Hidden Parse Error — September 21, 2026
+
+The one-click Windows start (`start_windows.bat`) had a latent flaw in its
+"Python not found" warning box: one of the message lines sat inside an
+"if ( … )" block and contained round brackets, which made Windows' built-in
+command interpreter (cmd) choke *before it ran anything*. The start window
+would flash and close instantly, with no error left to read. The warning box
+is now written the safe way (its message lines live outside the block), so the
+script is valid from top to bottom again. Nothing about how it locates your
+Python, starts the three services, or shuts down cleanly on Ctrl+C changed.
+
+- 149 offline tests pass.
+
+---
+
+<details>
+<summary><strong>Earlier entries</strong> (click to expand)</summary>
+
+
 ## Startup Greeting: She Speaks First When the App Opens — September 20, 2026
 
 When you open the WebUI, Amadeus now greets you first — a short line in her
@@ -959,10 +978,6 @@ or tease it; only her, only when it is true.
 - 149 offline tests pass.
 
 ---
-
-<details>
-<summary><strong>Earlier entries</strong> (click to expand)</summary>
-
 
 ## Conversation Sessions: the Window and the Backend Stay in Step — September 20, 2026
 
