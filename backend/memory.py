@@ -347,11 +347,14 @@ def _last_user_timing(now: datetime | None = None) -> Dict[str, object]:
     return out
 
 
-def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
+def load_internal_context(now: datetime | None = None, is_greeting=False) -> Dict[str, str]:
     """Capture before appending the incoming message, once per chat request.
 
     Existing SQLite timestamps are server-local, with minute precision. Treat
     their elapsed times as approximate; also accept timezone-aware ISO dates.
+    is_greeting is set on the startup-greeting path, where acknowledging a
+    real absence is the point of the line (normal replies still keep the gap
+    at most a brief aside).
     """
     now_local = (now or datetime.now().astimezone()).astimezone()
     facts = _last_user_timing(now)
@@ -366,13 +369,23 @@ def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
             f"Previous user message: {previous_time:%Y-%m-%d %H:%M %Z}. "
             f"Time since previous user message: approximately {gap}. "
             f"Put casually, the last message was {phrase}. "
-            + ("This is the first message after a substantial conversation gap. "
+            + ("This is a return moment after a substantial conversation gap: "
+               "acknowledging the absence (in your own words, not the raw "
+               "number) is expected on this line, then move on to the topic."
+               if elapsed >= 3600 and is_greeting else
+               "This is the first message after a substantial conversation gap. "
                "You may briefly and naturally welcome them back if it fits their message."
                if elapsed >= 3600 else
                "This is an ongoing conversation or a short pause. Do not give a return greeting.")
         )
     else:
         timing = "The previous message time is unavailable or unreliable. Do not guess the gap."
+
+    gap_note = (
+        "On this return line the acknowledgment is the point, not an option."
+        if is_greeting else
+        "Follow the user's message first; a greeting is optional, never mandatory."
+    )
 
     return {
         "role": "system",
@@ -387,9 +400,8 @@ def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
             "across that kind of difference.\n"
             "- A conversation gap is not proof the user was away from the app. "
             "Do not assume their location, activity, or reason for the silence.\n"
-            "- Acknowledge a long gap at most briefly on this return turn; do not "
-            "repeat it in subsequent replies without a new long gap. Follow the user's "
-            "message first; a greeting is optional, never mandatory.\n"
+            f"- Acknowledge a long gap at most briefly on this return turn; do not repeat "
+            f"it in subsequent replies without a new long gap. {gap_note}\n"
             "- Do not announce exact elapsed times unless asked or directly relevant. "
             "Do not guilt the user, claim you waited or watched them, or invent "
             "experiences during the gap.\n"

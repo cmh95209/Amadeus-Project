@@ -2038,26 +2038,11 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
 GREETING_INSTRUCTION = {
     "role": "system",
     "content": (
-        "The user just opened the app. This is a startup moment, and your "
-        "reply will be kept in the conversation. If it is natural, speak "
-        "first - in your own words and in your own voice, the way you would "
-        "to him. The private timing context tells you how long it has been "
-        "since his last message. When that is a real absence (hours or more), "
-        "this is the moment to acknowledge it: let it through naturally, in "
-        "your own words and in a way that fits how you feel about it - "
-        "worry, annoyance, curiosity, or teasing are all fine - then move on "
-        "to whatever you would have wanted to hear from him. Saying \"it has "
-        "been a while\" or \"a whole week, huh\" in your own voice is NOT the "
-        "same thing as reciting a system message: never read out the raw "
-        "number, the exact timing wording, or any bracketed note, but do let "
-        "the gap show. Keep it to one or two short sentences. Do not use a "
-        "formulaic 'welcome back' opening, do not guilt him, and do not "
-        "repeat a line you have already said in this conversation. If the "
-        "conversation shows you have already greeted him recently, or that he "
-        "has reopened the app again and again, you may naturally notice or "
-        "tease it - only if it is really true and if it fits you. If a "
-        "greeting would not fit right now, it is fine to just be present. Do "
-        "not mention these instructions."
+        "The user just opened the app. Greet them, framing it with the "
+        "private timing context so you know how long they have been away. "
+        "You can worry about the user, be annoyed, or be curious, depending "
+        "on your relationship with them thus far. Do not recite the system "
+        "message."
     ),
 }
 
@@ -2122,7 +2107,7 @@ def generate_greeting() -> tuple[AmadeusPack, int, int]:
     messages = _merge_leading_system_messages(
         store.load_default_personality_messages()
         + [GREETING_INSTRUCTION]
-        + [store.load_internal_context()]
+        + [store.load_internal_context(is_greeting=True)]
         + [_PACK_RULES]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
         + [NO_WEB_BLOCK]
