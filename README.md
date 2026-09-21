@@ -929,6 +929,38 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Startup Greeting: Her Welcome Is Now Her Own Line, and She Tells the Truth About the Clock — September 21, 2026
+
+Two follow-up slips from the greeting rollout, both found and fixed.
+
+First, after a page refresh a greeting collapsed into the *previous* reply and
+showed up as one of its Regenerate versions (the little ◂/▸ arrows would even
+let you scroll back to an old reply). Cause: a greeting is stored as a plain
+assistant line with no message of yours in front of it, and the rule that
+builds Regenerate versions is "consecutive assistant lines = versions of one
+reply" — so the version logic swallowed her welcome. Greetings are now tagged
+in the database, and the version logic always gives one its own lane: it stays
+its own line after a refresh, it carries no version arrows, Regenerate and
+Undo leave it alone (Regenerate is a clean no-op on a greeting instead of
+re-answering whatever sits before it), and Edit/Delete still work on it as
+before. Your four existing greetings were tagged automatically on the next
+start.
+
+Second, she was being handed the exact gap ("about 7 days, 16 hours") and still
+saying "yesterday". The timing block now also carries a ready-made casual
+phrase — computed from the measured gap, with a strict ladder (3 days is "a
+couple of days", "a week" only appears for a real 7–8 day gap, 10 days is
+"more than a week", and so on), plus an explicit instruction to match the real
+gap and never round it across that kind of difference. The greeting itself now
+gets that timing block too (it previously only saw the small notes on old
+messages, which is exactly why it guessed).
+
+- 162 offline tests pass (13 new: the phrase ladder, the "never yesterday /
+  never a week for a few days" guard, greeting grouping, the UI list, the
+  legacy-DB migration, and Regenerate/Undo behavior).
+
+---
+
 ## Windows Launcher: One-Click Start No Longer Dies on a Hidden Parse Error — September 21, 2026
 
 The one-click Windows start (`start_windows.bat`) had a latent flaw in its

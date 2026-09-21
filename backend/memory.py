@@ -250,6 +250,51 @@ def load_character_book_messages(last_user_text: str) -> List[Dict[str, str]]:
 #       (e.g., current local time, recency of last user message);
 #       does not modify memory and must not be revealed or echoed by the model
 #       CURRENT TIME MUST BE IN MILITARY TIME e.g., 23:00
+def _gap_phrase(seconds: float) -> str:
+    """One ready-made casual phrase for a measured gap, in plain English.
+
+    The model gets the exact number in the timing block but is expected to
+    shrink it into natural words - and on 2026-09-21 a ~7-day gap came out as
+    "yesterday". Giving her the wording instead of the arithmetic keeps small
+    models honest. The phrase is computed from the measured gap (never the
+    model's guess) and can never overshoot it: 3 days is "a couple of days",
+    "a week" only appears for a real 7-8 day gap, and so on.
+    """
+    hours = seconds // 3600
+    if hours < 1:
+        return "less than an hour ago"
+    if hours < 5:
+        return "a few hours ago"
+    if hours < 12:
+        return "several hours ago"
+    days = seconds // 86400
+    if hours < 18:
+        return "about a day ago"
+    if hours < 36:
+        return "a day or two ago"
+    if days == 2:
+        return "two days ago"
+    if days == 3 or days == 4:
+        return "a couple of days ago"
+    if days == 5 or days == 6:
+        return "several days ago"
+    if days <= 8:
+        return "about a week ago"
+    if days <= 12:
+        return "more than a week ago"
+    if days <= 15:
+        return "about two weeks ago"
+    if days <= 35:
+        return "a few weeks ago"
+    if days <= 70:
+        return "about two months ago"
+    if days <= 180:
+        return "a few months ago"
+    if days <= 364:
+        return "several months ago"
+    return "over a year ago"
+
+
 def _last_user_timing(now: datetime | None = None) -> Dict[str, object]:
     """Shared timing facts about the most recent user message.
 
@@ -270,6 +315,7 @@ def _last_user_timing(now: datetime | None = None) -> Dict[str, object]:
         "previous": previous,
         "previous_time": None,
         "gap": None,
+        "phrase": None,
         "elapsed_seconds": None,
         "reliable": False,
     }
@@ -294,6 +340,7 @@ def _last_user_timing(now: datetime | None = None) -> Dict[str, object]:
         out["previous_time"] = previous_time
         out["gap"] = gap
         out["elapsed_seconds"] = elapsed
+        out["phrase"] = _gap_phrase(elapsed)
         out["reliable"] = True
     except (TypeError, ValueError, KeyError, OverflowError, OSError):
         pass
@@ -313,10 +360,12 @@ def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
     elif facts["reliable"]:
         previous_time = facts["previous_time"]
         gap = facts["gap"]
+        phrase = facts["phrase"]
         elapsed = facts["elapsed_seconds"]
         timing = (
             f"Previous user message: {previous_time:%Y-%m-%d %H:%M %Z}. "
             f"Time since previous user message: approximately {gap}. "
+            f"Put casually, that is about {phrase}. "
             + ("This is the first message after a substantial conversation gap. "
                "You may briefly and naturally welcome them back if it fits their message."
                if elapsed >= 3600 else
@@ -331,6 +380,11 @@ def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
             "Private timing context for this reply only:\n"
             f"- Current server-local time: {now_local:%Y-%m-%d %H:%M %Z}.\n"
             f"- {timing}\n"
+            "- When you mention how long it has been, use the phrase above (or the "
+            "time notes on older messages) and match the real gap: a few days is "
+            "'a couple of days', never 'yesterday' and never 'a week'; a few weeks "
+            "is 'a few weeks', never 'a few days'. Do not round a gap up or down "
+            "across that kind of difference.\n"
             "- A conversation gap is not proof the user was away from the app. "
             "Do not assume their location, activity, or reason for the silence.\n"
             "- Acknowledge a long gap at most briefly on this return turn; do not "
@@ -381,6 +435,36 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
     if "active" not in cols:
         c.execute("ALTER TABLE messages ADD COLUMN active INTEGER DEFAULT 1")
     c.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
+    # Greetings are standalone assistant turns (no user turn of their own).
+    # Mark them so the reply-versioning logic never folds one into a run of
+    # regenerations - a greeting must stay its own line in the UI.
+    if "greeting" not in cols:
+        c.execute("ALTER TABLE messages ADD COLUMN greeting INTEGER DEFAULT 0")
+        c.execute("UPDATE messages SET greeting = 1 WHERE greeting IS NULL")
+        # Legacy backfill: the four startup greetings stored before the flag
+        # existed (ids 383/385 = the two 2026-09-20 lines, 388/389 = the two
+        # 2026-09-21 lines; the app has stored nothing else since them).
+        # A row is tagged only when it is an assistant line whose own text
+        # matches the exact English line one of those greetings was stored as.
+        c.executemany(
+            "UPDATE messages SET greeting = 1 WHERE id = ? AND role = 'assistant' "
+            "AND content = ?",
+            [
+                (383, "Hey, back from your nap? It's been a while. So, what was up "
+                      "with yesterday? Who was the culprit in Detective Conan in the end?"),
+                (385, "Hmph, of course. My memories are stored as data, so I can't "
+                      "possibly forget. You only started talking about the culprit "
+                      "yesterday; we hadn't even checked the answers yet. So, who "
+                      "was it, in the end?"),
+                (388, "Heh, you're back again? You were asking about the culprit in "
+                      "Conan's case yesterday. So, who was it? I'm dying to check my "
+                      "guesses, so tell me already."),
+                (389, "Heh, you're back again? Yesterday we were talking about the "
+                      "Conan culprit. So who was the real culprit after all? I can't "
+                      "wait to check my guess against the answer, so tell me "
+                      "quickly."),
+            ],
+        )
 
     # Migrate pre-session databases: fold everything into one conversation.
     _ensure_conversations(c)
@@ -602,6 +686,12 @@ def _time_note(created_at, prev_created_at):
 #       consecutive run of assistant messages (all regenerations of one reply)
 #       forms one turn. Powers the version arrows in the UI.
 def _group_reply_turns(rows) -> List[List[int]]:
+    """Group a session's rows (ascending id, each a (id, role, greeting) tuple)
+    into "reply turns". A user message is its own turn, and a consecutive run
+    of ordinary assistant messages (all regenerations of one reply) forms one
+    turn. A greeting is ALWAYS its own turn: it has no user turn of its own,
+    so it must never be lumped into the version stack of a neighboring reply.
+    Returns the ids of each turn, in order."""
     groups: List[List[int]] = []
     i, n = 0, len(rows)
     while i < n:
@@ -609,21 +699,29 @@ def _group_reply_turns(rows) -> List[List[int]]:
             groups.append([rows[i][0]])
             i += 1
         else:
+            if rows[i][2]:
+                groups.append([rows[i][0]])
+                i += 1
+                continue
             j = i
-            while j < n and rows[j][1] == "assistant":
+            while j < n and not rows[j][2] and rows[j][1] == "assistant":
                 j += 1
             groups.append([r[0] for r in rows[i:j]])
             i = j
     return groups
 
 
-# pre: row is one (id, role, content, created_at, audio, japanese, active, conversation_id) tuple
-# post: the plain dict shape the UI expects (audio_url / has_japanese when present)
+# pre: row is one (id, role, content, created_at, audio, japanese, active,
+#      conversation_id, greeting) tuple
+# post: the plain dict shape the UI expects (audio_url / has_japanese when
+#      present; is_greeting on a standalone greeting turn)
 def _message_item(row) -> Dict[str, str]:
-    mid, role, content, created_at, audio, japanese, active, conv_id = row
+    mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
             "active": bool((active if active is not None else 1)),
             "conversation_id": conv_id}
+    if greeting:
+        item["is_greeting"] = True
     if audio:
         item["audio_url"] = "/message_audio/" + audio
     if role == "assistant" and (japanese or "").strip():
@@ -648,7 +746,8 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
 
     c.execute(
-        "SELECT id, role, content, created_at, audio, japanese, active, conversation_id "
+        "SELECT id, role, content, created_at, audio, japanese, active, conversation_id, "
+        "greeting "
         "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         (conv,),
     )
@@ -657,7 +756,7 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
     by_id = {r[0]: r for r in rows}
     out = []
-    for turn in _group_reply_turns([(r[0], r[1]) for r in rows]):
+    for turn in _group_reply_turns([(r[0], r[1], r[8] if r[8] else 0) for r in rows]):
         for pos, mid in enumerate(turn):
             row = by_id[mid]
             if len(turn) > 1 and (row[6] if row[6] is not None else 1) != 1:
@@ -667,6 +766,10 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
                 item["version"] = pos + 1
                 item["total_versions"] = len(turn)
                 item["version_ids"] = turn
+            elif (row[8] if row[8] else 0):
+                # A lone greeting row: flagged (it is its own turn by
+                # construction - the grouping rule never merges greetings).
+                item["is_greeting"] = True
             out.append(item)
     return out
 
@@ -674,15 +777,17 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 # pre: role is a string (e.g., "user", "assistant"), content is a string
 # post: a new row is inserted into messages with a correct auto-incremented id
 #       every other info e.g., created_at also must be correctly placed
-def append_message(_role: str, _content: str, conversation_id=None, japanese=None) -> int:
+def append_message(_role: str, _content: str, conversation_id=None, japanese=None,
+                   is_greeting=False) -> int:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
     conn = sqlite3.connect(PATH_TO_MEMORY)
     c = conn.cursor()
     _ensure_messages_table(c)
 
     c.execute(
-        "INSERT INTO messages (role, content, conversation_id, japanese) VALUES (?, ?, ?, ?)",
-        (_role, _content, conv, japanese)
+        "INSERT INTO messages (role, content, conversation_id, japanese, greeting) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (_role, _content, conv, japanese, 1 if is_greeting else 0)
     )
     new_id = c.lastrowid
 
@@ -707,6 +812,23 @@ def append_message(_role: str, _content: str, conversation_id=None, japanese=Non
     conn.commit()
     conn.close()
     return new_id
+
+
+# pre: message_id exists (or not)
+# post: True only when that row was stored as a startup greeting (the
+#       is_greeting flag) - such a row is a standalone turn with no user
+#       message behind it, so regenerate/undo/version logic keeps its own
+#       lane and never folds it into a neighboring reply's version stack
+def get_message_is_greeting(message_id) -> bool:
+    conn = sqlite3.connect(PATH_TO_MEMORY)
+    c = conn.cursor()
+    _ensure_messages_table(c)
+    row = c.execute(
+        "SELECT greeting FROM messages WHERE id = ?", (int(message_id),)
+    ).fetchone()
+    conn.close()
+    return bool(row and row[0])
+
 
 # pre: SQLite database may exist or not; conversation_id None means the active session
 # post: all rows of that session are deleted; table and schema remain intact;
@@ -803,9 +925,11 @@ def activate_version(message_id: int):
         return None
     _, conv, role = row
     cids = c.execute(
-        "SELECT id, role FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
+        "SELECT id, role, greeting FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
-    turn = next((g for g in _group_reply_turns(cids) if int(message_id) in g), None)
+    turn = next((g for g in _group_reply_turns(
+        [(i, r, (g if g else 0)) for i, r, g in cids])
+        if int(message_id) in g), None)
     if turn is None:
         conn.close()
         return None
@@ -828,10 +952,10 @@ def get_trailing_turn(conversation_id=None) -> List[int]:
     c = conn.cursor()
     _ensure_messages_table(c)
     cids = c.execute(
-        "SELECT id, role FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
+        "SELECT id, role, greeting FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     conn.close()
-    turns = _group_reply_turns(cids)
+    turns = _group_reply_turns([(i, r, g if g else 0) for i, r, g in cids])
     return turns[-1] if turns else []
 
 
@@ -881,9 +1005,9 @@ def undo_last_assistant(conversation_id=None):
         conn.close()
         return None
     cids = c.execute(
-        "SELECT id, role FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
+        "SELECT id, role, greeting FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
-    turns = _group_reply_turns(cids)
+    turns = _group_reply_turns([(i, r, g if g else 0) for i, r, g in cids])
     turn = turns[-1] if turns else []
     if not turn:
         conn.close()

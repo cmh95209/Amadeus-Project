@@ -239,7 +239,7 @@ export default function App() {
       sessionStorage.setItem("amadeusGreeted", "1");
       setMessages((current) => [
         ...current,
-        { role: "assistant", content: line, id: g.assistantId },
+        { role: "assistant", content: line, id: g.assistantId, is_greeting: true },
       ]);
       // She animates even when the browser blocks audio on a fresh load.
       characterRef.current?.playMotion("TapReaction");
@@ -1110,7 +1110,11 @@ export default function App() {
                     </>
                   )}
 
-                  {message.role !== "user" && index === lastAssistantIndex && !loading && (
+                  {/* A startup greeting has no user message behind it: Regenerate
+                      and Undo are no-ops for it, so the buttons stay hidden (Edit
+                      and Delete still work on the line itself). */}
+                  {message.role !== "user" && index === lastAssistantIndex && !loading &&
+                    !message.is_greeting && (
                     <>
                       <button
                         type="button"

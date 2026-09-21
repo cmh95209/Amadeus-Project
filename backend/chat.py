@@ -2074,10 +2074,14 @@ def _store_greeting_line(pack: "AmadeusPack") -> tuple[int, int]:
     """Persist a startup greeting as a normal assistant message.
 
     There is no user turn to remove on failure - her line simply never
-    enters memory and the caller's exception propagates untouched.
+    enters memory and the caller's exception propagates untouched. The row
+    is flagged as a greeting so the reply-versioning logic (regenerate,
+    undo, the version arrows in the UI) treats it as its own standalone
+    line instead of a version of a neighboring reply.
     Returns (assistant_id, conversation_id)."""
     assistant_id = store.append_message(
-        "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
+        "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS,
+        is_greeting=True
     )
     return assistant_id, store.load_active_conversation()
 
@@ -2101,9 +2105,16 @@ def generate_greeting() -> tuple[AmadeusPack, int, int]:
     # line - prompt-only, never stored in memory.
     context = list(context) + [{"role": "user",
                                 "content": "[The user just opened the app.]"}]
+    # A normal reply gets the private timing block (current time + how long
+    # it has been since the last user message, with a ready-made casual
+    # phrase). The greeting needs it too - it is a return moment with no
+    # incoming user message to anchor on. Without it she can only infer the
+    # gap from the time notes on old messages (observed 2026-09-21: she was
+    # handed "about 7 days" and still said "yesterday").
     messages = _merge_leading_system_messages(
         store.load_default_personality_messages()
         + [GREETING_INSTRUCTION]
+        + [store.load_internal_context()]
         + [_PACK_RULES]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
         + [NO_WEB_BLOCK]
@@ -2339,6 +2350,11 @@ def regenerateReply():
 
     excluded = None
     if last["role"] == "assistant":
+        # A startup greeting is a standalone turn: there is no user message
+        # behind it to re-answer, so regeneration is a clean no-op here
+        # instead of reaching back to whatever user message sits before it.
+        if store.get_message_is_greeting(last["id"]):
+            raise ValueError("Nothing to regenerate here")
         excluded = store.get_trailing_turn() or [last["id"]]
         target = store.get_message_before(excluded)
         if target is None or target["role"] != "user":

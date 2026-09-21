@@ -17,6 +17,7 @@ export type MemoryMessage = {
   version?: number;
   total_versions?: number;
   version_ids?: number[];
+  is_greeting?: boolean;
 };
 
 export type MessageReply = {
