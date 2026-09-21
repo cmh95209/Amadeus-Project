@@ -955,6 +955,17 @@ gap and never round it across that kind of difference. The greeting itself now
 gets that timing block too (it previously only saw the small notes on old
 messages, which is exactly why it guessed).
 
+Third, once the wording was honest she was *skipping the gap entirely* — a
+perfect on-topic continuation with no sign a week had passed. The timing block
+stacks up a lot of "don'ts" (don't recite the time, keep it brief, it's
+optional), so the model's safe move was to say nothing about the absence. The
+greeting now treats a real absence (hours or more) as a moment to *acknowledge
+it* — in her own voice and in a way that fits how she'd feel (worry,
+annoyance, curiosity, teasing all count) — and makes clear that "it has been a
+while" is not the same as reciting a system message (only reading out the raw
+number or the exact wording is banned). Your own personality notes about the
+greeting now reinforce this instead of competing with it.
+
 - 162 offline tests pass (13 new: the phrase ladder, the "never yesterday /
   never a week for a few days" guard, greeting grouping, the UI list, the
   legacy-DB migration, and Regenerate/Undo behavior).
