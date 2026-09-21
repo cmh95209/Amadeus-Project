@@ -365,7 +365,7 @@ def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
         timing = (
             f"Previous user message: {previous_time:%Y-%m-%d %H:%M %Z}. "
             f"Time since previous user message: approximately {gap}. "
-            f"Put casually, that is about {phrase}. "
+            f"Put casually, the last message was {phrase}. "
             + ("This is the first message after a substantial conversation gap. "
                "You may briefly and naturally welcome them back if it fits their message."
                if elapsed >= 3600 else
