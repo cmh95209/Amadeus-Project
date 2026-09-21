@@ -16,13 +16,14 @@ if not defined AMADEUS_PY if exist "%USERPROFILE%\anaconda3\envs\amadeus\python.
 if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\miniconda3\envs\amadeus\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\miniconda3\envs\amadeus\python.exe"
 if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\anaconda3\envs\amadeus\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\anaconda3\envs\amadeus\python.exe"
 if not defined AMADEUS_PY if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "AMADEUS_PY=%CONDA_PREFIX%\python.exe"
-if not defined AMADEUS_PY (
-    echo ERROR: Amadeus's Python (conda env "amadeus") could not be found.
-    echo Install it with scripts\install_windows.ps1 (or: conda env create -f
-    echo backend\environment.yml -n amadeus), then try again.
-    pause
-    exit /b 1
-)
+if defined AMADEUS_PY goto :found_python
+
+echo ERROR: Amadeus's Python (conda env "amadeus") could not be found.
+echo Install it with scripts\install_windows.ps1 (or: conda env create -f
+echo backend\environment.yml -n amadeus), then try again.
+pause
+exit /b 1
+:found_python
 
 rem ---- WebUI fix (added by your helper) ------------------------------------
 rem Windows is set to block PowerShell from running local scripts, which stops
