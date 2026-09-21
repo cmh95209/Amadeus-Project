@@ -3,6 +3,7 @@ from flask_cors import CORS
 
 from chat import (
     getOutputPacked,
+    generate_greeting,
     apply_interaction_trust,
     regenerateReply,
     setKey,
@@ -68,6 +69,8 @@ def _llm_error_message(exc: Exception) -> str:
 # post:
 # - updates the active API key if provided
 # - returns status indicating success or error
+from typing import Dict
+
 @application.route("/set_key", methods=["POST"])
 def set_api_key():
     print("[Flask] /set_key route triggered")  # ← add this
@@ -652,3 +655,64 @@ def delete_conversation(conversation_id):
     if was_active:
         resp["active_id"] = memory.load_active_conversation()
     return jsonify(resp)
+
+
+def model_ready() -> Dict[str, object]:
+    """Is the configured model actually servable right now?
+
+    Uses the same standard /models probe (test_server) and the same model-name
+    matching (_model_in_list) as the /testConnection footer dot, so the /greet
+    route only fires when the footer would show 'connected'. No LLM generation
+    is attempted here - this is a cheap reachability + model-name check only.
+    """
+    address = memory.load_llm_server() or llm._server_url()
+    model_name = getLLMModel()
+    if not model_name or model_name == "No Model Selected.":
+        return {"ready": False, "reason": "no model configured"}
+    probe = llm.test_server(address, api_key=chat.API_KEY, timeout=5.0)
+    if not probe["reachable"]:
+        return {"ready": False,
+                "reason": f"model server unreachable at {address}"}
+    if not _model_in_list(model_name, probe["models"]):
+        return {"ready": False,
+                "reason": f"model '{model_name}' not served by {address}"}
+    return {"ready": True, "reason": ""}
+
+
+# pre: the configured model is servable (see model_ready) and an API key set
+# post: generates AND stores one startup greeting as a normal assistant
+#       message, mints a single-use speech id for its Japanese line (the same
+#       voice mechanism a normal reply uses), and returns the English line for
+#       the UI. If the model is not ready yet, returns 200 with ready=false so
+#       the client can wait (and re-fire when the model comes up) instead of
+#       treating it as an error.
+@application.route("/greet", methods=["POST"])
+def greet():
+    if not has_api_key():
+        return jsonify({"message": "No API key. Add one in Settings."}), 400
+    ready = model_ready()
+    if not ready["ready"]:
+        return jsonify({"ready": False, "reason": ready["reason"]})
+    try:
+        pack, assistant_id, conv_id = generate_greeting()
+    except Exception as exc:
+        print("[Flask] Greeting failure:", repr(exc))
+        return jsonify({"message": _llm_error_message(exc)}), 502
+
+    speech_id = uuid.uuid4().hex
+    with _speech_requests_lock:
+        now = time.monotonic()
+        for key in [k for k, (created, _, _) in _speech_requests.items()
+                    if now - created > 300]:
+            _speech_requests.pop(key, None)
+        _speech_requests[speech_id] = (now, pack.assistant_reply_JPS, assistant_id)
+        while len(_speech_requests) > 20:
+            _speech_requests.pop(next(iter(_speech_requests)))
+
+    return jsonify({
+        "ready": True,
+        "response": pack.assistant_reply_ENG,
+        "speech_id": speech_id,
+        "assistant_id": assistant_id,
+        "conversation_id": conv_id,
+    })

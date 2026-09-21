@@ -13,6 +13,7 @@ import {
   MemoryMessage,
   resetMemory,
   sendMessage,
+  getGreeting,
   setModel,
   getWebAccess,
   setWebAccess,
@@ -127,6 +128,15 @@ export default function App() {
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const characterRef = useRef<Live2DCharacterHandle>(null);
+  // Startup greeting: once per app start (sessionStorage blocks a refresh
+  // from re-greeting) plus a re-fire the moment the model server becomes
+  // servable (the "I forgot to start it" case). The backend stores her line,
+  // so a later startup can naturally notice repeated restarts.
+  const greetedThisSession = useRef<boolean>(
+    typeof sessionStorage !== "undefined" && sessionStorage.getItem("amadeusGreeted") === "1"
+  );
+  const modelWasFound = useRef<boolean | null>(null);
+  const greetingInFlight = useRef<boolean>(false);
 
   useEffect(() => {
     void initialize();
@@ -183,6 +193,22 @@ export default function App() {
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
   }, [settingsOpen, personalityDirty]);
+  // Browsers suspend audio until a user gesture (the launcher's Chromium
+  // flag makes this a no-op there; this is the silent fallback for Firefox
+  // and other browsers): unlock Web Audio on the first click/keypress, once.
+  useEffect(() => {
+    const unlock = () => {
+      void characterRef.current?.prepareSpeech();
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
 
   async function savePersonality() {
     if (settingsBusy || loading || !personalityLoaded || !personalityDirty || !personality.trim()) return;
@@ -201,9 +227,42 @@ export default function App() {
     }
   }
 
+  async function fireGreeting() {
+    if (greetingInFlight.current || greetedThisSession.current) return;
+    if (loading) return; // do not interrupt an in-flight turn
+    greetingInFlight.current = true;
+    try {
+      const g = await getGreeting();
+      const line = g.response;
+      if (!g.ready || !line) return; // model not up yet; the probe re-fires
+      greetedThisSession.current = true;
+      sessionStorage.setItem("amadeusGreeted", "1");
+      setMessages((current) => [
+        ...current,
+        { role: "assistant", content: line, id: g.assistantId },
+      ]);
+      // She animates even when the browser blocks audio on a fresh load.
+      characterRef.current?.playMotion("TapReaction");
+      if (g.speechUrl) {
+        void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
+        rememberVoiceLine(g.assistantId); // surfaces the existing Replay button
+      }
+    } catch {
+      // A greeting failure is silent by design - never shown as an error.
+    } finally {
+      greetingInFlight.current = false;
+    }
+  }
+
   async function refreshConnection() {
     try {
-      setConnStatus(await testConnection());
+      const status = await testConnection();
+      setConnStatus(status);
+      const found = status.reachable && status.model_found;
+      if (found && modelWasFound.current !== true && !greetedThisSession.current) {
+        void fireGreeting(); // fires the moment the model becomes servable
+      }
+      modelWasFound.current = found;
     } catch {
       setConnStatus(null); // even the backend is unreachable
     }
@@ -270,6 +329,10 @@ export default function App() {
         setDisplayedConvId(convs.active_id);
       }
       setStatus("Online");
+      // Startup greeting: fires once now if the model is already servable,
+      // and again (still once per session) the instant it comes up. Silent
+      // on failure - a greeting must never break the app loading.
+      void fireGreeting();
     } catch (error) {
       setStatus(
         error instanceof Error

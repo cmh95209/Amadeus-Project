@@ -929,6 +929,41 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Startup Greeting: She Speaks First When the App Opens — September 20, 2026
+
+When you open the WebUI, Amadeus now greets you first — a short line in her
+own voice that takes into account how long it has been and what you last
+talked about (the same timing context and time notes the conversation fix
+added). It is generated like a normal reply — same forced Japanese-first
+packaging, same output guards, no web search — but is deliberately loose
+about *what* she says, so it does not sound like a template. If the
+conversation shows you have restarted the app over and over, she may notice
+or tease it; only her, only when it is true.
+
+- The greeting is stored in the conversation like any other reply (and gets
+  the usual Replay button), so it never repeats itself on a page refresh
+  within the same tab, and a later startup can naturally refer back to it.
+- If the model server is not up when the page loads, nothing happens — the
+  greeting fires the moment the existing 30-second connection probe shows the
+  model is back (so a forgotten llama.cpp/NInfer start or a provider switch
+  still gets a welcome).
+- The launcher now opens the WebUI in your *default* browser (Windows reads
+  the OS's own default-browser record — no install-path guessing), and adds
+  the Chromium `--autoplay-policy=no-user-gesture-required` flag when that
+  browser is Chromium-based, so the greeting's voice plays with zero clicks.
+  For Firefox (no equivalent flag): one-time `about:config` setup — set
+  `media.autoplay.default` to `0` — and the same zero-click voice works.
+  On browsers where audio is blocked at load, the line still appears as text
+  with her animation and the Replay button, and unlocks on your first click
+  or keystroke.
+- 149 offline tests pass.
+
+---
+
+<details>
+<summary><strong>Earlier entries</strong> (click to expand)</summary>
+
+
 ## Conversation Sessions: the Window and the Backend Stay in Step — September 20, 2026
 
 Two quiet slips cost a confused afternoon: after a week's gap she called a
@@ -955,10 +990,6 @@ mention either.
 - 140 offline tests pass.
 
 ---
-
-
-<details>
-<summary><strong>Earlier entries</strong> (click to expand)</summary>
 
 ## Voice: Leaked English No Longer Read Out Loud — September 16, 2026
 

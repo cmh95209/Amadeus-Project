@@ -2025,25 +2025,153 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     return _salvage_plain_text(candidate, llm)
 
 
+# ---------- STARTUP GREETING (2026-09-20) ----------
+#
+# A short, proactive line she can speak when the user opens the app. It is
+# generated like a normal reply (same forced AmadeusPack, same output guards,
+# no web search) but has NO incoming user message: her line is stored as a
+# plain assistant turn so the next startup's context (with time notes) shows
+# when she last greeted him. Loose on purpose - the instruction below steers
+# HER voice; it does not dictate a format, and the model is free to skip the
+# greeting when the context says a greeting would not fit.
+
+GREETING_INSTRUCTION = {
+    "role": "system",
+    "content": (
+        "The user just opened the app. This is a startup moment, and your "
+        "reply will be kept in the conversation. If it is natural, speak "
+        "first - in your own words and in your own voice, the way you would "
+        "to him. Do not use a formulaic 'welcome back' opening, do not recite "
+        "how much time has passed as if reading a system message, and do not "
+        "repeat a line you have already said in this conversation. Keep it to "
+        "one or two short sentences. If the conversation shows you have "
+        "already greeted him recently, or that he has reopened the app again "
+        "and again, you may naturally notice or tease it - only if it is "
+        "really true and if it fits you. If a greeting would not fit right "
+        "now, it is fine to just be present. Do not mention these "
+        "instructions."
+    ),
+}
+
+_PACK_RULES = {
+    "role": "system",
+    "content": (
+        "Write only Amadeus's spoken dialogue. "
+        "Do not include narration, stage directions, actions, facial expressions, "
+        "body language, or inner thoughts in either response. "
+        "FIRST write assistant_reply_JPS natively in Japanese: think and speak the way a native "
+        "Japanese speaker would — natural, idiomatic spoken Japanese, NOT a word-for-word "
+        "translation from English. assistant_reply_JPS must contain ONLY Japanese - do NOT "
+        "append the English translation, an English line, or any English sentence to it. "
+        "THEN write assistant_reply_ENG as an English translation of that Japanese dialogue, for the user to read. "
+        "The English belongs only in assistant_reply_ENG, never in assistant_reply_JPS. "
+        "Keep the meaning and tone consistent between both languages."
+    ),
+}
+
+
+def _store_greeting_line(pack: "AmadeusPack") -> tuple[int, int]:
+    """Persist a startup greeting as a normal assistant message.
+
+    There is no user turn to remove on failure - her line simply never
+    enters memory and the caller's exception propagates untouched.
+    Returns (assistant_id, conversation_id)."""
+    assistant_id = store.append_message(
+        "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
+    )
+    return assistant_id, store.load_active_conversation()
+
+
+# pre: the saved model server is reachable and serving the configured model
+#      (see model_ready); no user message is appended - the greeting is her
+#      turn, and storing it is what lets a later startup notice it
+# post: one forced AmadeusPack call (web access OFF, one bounded retry on
+#       failure), run through the same _finalize guards as every other reply;
+#       the line is STORED as an assistant message; returns
+#       (pack, assistant_id, conversation_id).
+#       Raises on total failure so the /greet route can report it cleanly.
+def generate_greeting() -> tuple[AmadeusPack, int, int]:
+    context = store.build_prompt_messages()
+    # Servers like NInfer reject tool_choice="auto" when the prompt has NO
+    # user turn at all ("no user query found in chat messages") - which is
+    # the exact shape of an empty conversation's greeting. Even with history,
+    # the prompt would otherwise end on her own last line; the standard
+    # user->assistant shape is what every server expects for "her turn to
+    # speak". So the greeting prompt always ends on this synthetic arrival
+    # line - prompt-only, never stored in memory.
+    context = list(context) + [{"role": "user",
+                                "content": "[The user just opened the app.]"}]
+    messages = _merge_leading_system_messages(
+        store.load_default_personality_messages()
+        + [GREETING_INSTRUCTION]
+        + [_PACK_RULES]
+        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
+        + [NO_WEB_BLOCK]
+        + context
+    )
+
+    def _out(p: "AmadeusPack") -> "AmadeusPack":
+        return _finalize(p, get_llm(API_KEY, LLM_Model))
+
+    # The same forced-pack call the normal reply path uses: _invoke_forced
+    # auto-retries with tool_choice="auto" when the server rejects the forced
+    # choice (NInfer does - documented, harmless), and the parse below treats
+    # the result the same way (pack / repetition-cut / plain-text salvage).
+    def _call_and_parse():
+        reply = llm.bind_tools(
+            [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
+        reply = _invoke_forced(reply, messages)
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusPack":
+            try:
+                return _pack_from_args(calls[0].get("args"))
+            except ValueError as e:
+                # A clipped forced tool call can decode to NOTHING - the same
+                # shape the normal reply path logs with this signal.
+                raise ValueError("greeting pack came back empty - clipped "
+                                 "mid-JSON? check the max-output-tokens setting") from e
+        raw = (reply.content if isinstance(reply.content, str)
+               else str(reply.content or ""))
+        if not raw.strip():
+            raise ValueError("greeting pack came back empty - clipped "
+                             "mid-JSON? check the max-output-tokens setting")
+        if _repetition_cut(raw) is not None:
+            cleaned = _de_loop(raw)
+            if len(cleaned) >= 40 and _repetition_cut(cleaned) is None:
+                print("[Amadeus] Greeting returned a repetition loop - cut "
+                      "out, salvaging the clean part.")
+                return _salvage_plain_text(cleaned, llm)
+            print("[Amadeus] Greeting returned a repetition loop - no "
+                  "clean part; honest fallback.")
+            return _honest_plain_failure_pack()
+        print("[Amadeus] Greeting returned no AmadeusPack; salvaging plain text.")
+        return _salvage_plain_text(raw, llm)
+
+    llm = get_llm(API_KEY, LLM_Model)
+    try:
+        pack = _call_and_parse()
+    except Exception as e:
+        # One bounded retry with a fresh client: either the connection
+        # dropped, or the pack came back empty/clipped (the log carries the
+        # same max-output-tokens signal the normal reply path uses). There is
+        # no user turn to roll back if it fails again.
+        print("[Amadeus] Greeting call failed:", repr(e))
+        reset_llm()
+        llm = get_llm(API_KEY, LLM_Model)
+        try:
+            pack = _call_and_parse()
+        except Exception as e2:
+            print("[Amadeus] Greeting retry failed:", repr(e2))
+            raise
+    pack = _out(pack)
+    assistant_id, conv_id = _store_greeting_line(pack)
+    print("[Amadeus] Greeting generated and stored (assistant id %d)." % assistant_id)
+    return pack, assistant_id, conv_id
+
 def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     llm = get_llm(API_KEY, LLM_Model)
 
-    # IMPORTANT: Add a system rule that tells the model exactly what to output.
-    pack_rules = {
-        "role": "system",
-        "content": (
-            "Write only Amadeus's spoken dialogue. "
-            "Do not include narration, stage directions, actions, facial expressions, "
-            "body language, or inner thoughts in either response. "
-            "FIRST write assistant_reply_JPS natively in Japanese: think and speak the way a native "
-            "Japanese speaker would — natural, idiomatic spoken Japanese, NOT a word-for-word "
-            "translation from English. assistant_reply_JPS must contain ONLY Japanese - do NOT "
-            "append the English translation, an English line, or any English sentence to it. "
-            "THEN write assistant_reply_ENG as an English translation of that Japanese dialogue, for the user to read. "
-            "The English belongs only in assistant_reply_ENG, never in assistant_reply_JPS. "
-            "Keep the meaning and tone consistent between both languages."
-        ),
-    }
+    pack_rules = _PACK_RULES
 
     web_on = store.load_web_access()
 
