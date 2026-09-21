@@ -102,6 +102,45 @@ export async function sendMessage(userInput: string): Promise<MessageReply> {
   };
 }
 
+export type GreetingReply = {
+  ready: boolean;
+  reason?: string;
+  response?: string;
+  speechUrl?: string;
+  assistantId?: number;
+  conversationId?: number;
+};
+
+export async function getGreeting(): Promise<GreetingReply> {
+  const response = await fetch(`${API_BASE}/greet`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const data = await parseResponse(response);
+  if (typeof data.ready !== "boolean") {
+    throw new Error("Backend returned an invalid greeting report");
+  }
+  if (!data.ready) {
+    return { ready: false, reason: typeof data.reason === "string" ? data.reason : undefined };
+  }
+  if (typeof data.response !== "string") {
+    throw new Error("Backend returned an invalid greeting");
+  }
+  return {
+    ready: true,
+    response: data.response,
+    speechUrl:
+      typeof data.speech_id === "string"
+        ? `${API_BASE}/speech/${encodeURIComponent(data.speech_id)}`
+        : undefined,
+    assistantId: typeof data.assistant_id === "number" ? data.assistant_id : undefined,
+    conversationId:
+      typeof data.conversation_id === "number" ? data.conversation_id : undefined,
+  };
+}
+
+
 export async function getMemory(): Promise<MemoryMessage[]> {
   const response = await fetch(`${API_BASE}/getMemory`, {
     method: "POST",

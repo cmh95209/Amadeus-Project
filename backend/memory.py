@@ -250,6 +250,56 @@ def load_character_book_messages(last_user_text: str) -> List[Dict[str, str]]:
 #       (e.g., current local time, recency of last user message);
 #       does not modify memory and must not be revealed or echoed by the model
 #       CURRENT TIME MUST BE IN MILITARY TIME e.g., 23:00
+def _last_user_timing(now: datetime | None = None) -> Dict[str, object]:
+    """Shared timing facts about the most recent user message.
+
+    Used by load_internal_context() (per-reply timing context) and by the
+    startup greeting. Reads the memory database and derives, from the last
+    user message only: its timestamp, the elapsed time since it, and whether
+    those values are trustworthy. Does not modify memory.
+    Returns a dict with keys: previous (row or None), previous_time
+    (datetime or None), gap (human string or None), elapsed_seconds (float or
+    None), reliable (bool).
+    """
+    now_local = (now or datetime.now().astimezone()).astimezone()
+    previous = next(
+        (m for m in reversed(load_memory_raw()) if m.get("role") == "user"),
+        None,
+    )
+    out: Dict[str, object] = {
+        "previous": previous,
+        "previous_time": None,
+        "gap": None,
+        "elapsed_seconds": None,
+        "reliable": False,
+    }
+    if previous is None:
+        return out
+    try:
+        previous_time = datetime.fromisoformat(previous["created_at"])
+        # astimezone interprets legacy naive dates in the server's local zone.
+        previous_time = previous_time.astimezone()
+        elapsed = (now_local.astimezone(timezone.utc)
+                   - previous_time.astimezone(timezone.utc)).total_seconds()
+        if elapsed < 0:
+            raise ValueError("Previous timestamp is in the future")
+        minutes = int(elapsed // 60)
+        days, remaining = divmod(minutes, 1440)
+        hours, minutes = divmod(remaining, 60)
+        parts = []
+        for value, unit in ((days, "day"), (hours, "hour"), (minutes, "minute")):
+            if value:
+                parts.append(f"{value} {unit}{'s' if value != 1 else ''}")
+        gap = ", ".join(parts) or "less than one minute"
+        out["previous_time"] = previous_time
+        out["gap"] = gap
+        out["elapsed_seconds"] = elapsed
+        out["reliable"] = True
+    except (TypeError, ValueError, KeyError, OverflowError, OSError):
+        pass
+    return out
+
+
 def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
     """Capture before appending the incoming message, once per chat request.
 
@@ -257,38 +307,23 @@ def load_internal_context(now: datetime | None = None) -> Dict[str, str]:
     their elapsed times as approximate; also accept timezone-aware ISO dates.
     """
     now_local = (now or datetime.now().astimezone()).astimezone()
-    previous = next(
-        (m for m in reversed(load_memory_raw()) if m.get("role") == "user"),
-        None,
-    )
-    timing = "No previous user message is recorded. Do not imply a previous absence."
-    if previous is not None:
-        try:
-            previous_time = datetime.fromisoformat(previous["created_at"])
-            # astimezone interprets legacy naive dates in the server's local zone.
-            previous_time = previous_time.astimezone()
-            elapsed = (now_local.astimezone(timezone.utc)
-                       - previous_time.astimezone(timezone.utc)).total_seconds()
-            if elapsed < 0:
-                raise ValueError("Previous timestamp is in the future")
-            minutes = int(elapsed // 60)
-            days, remaining = divmod(minutes, 1440)
-            hours, minutes = divmod(remaining, 60)
-            parts = []
-            for value, unit in ((days, "day"), (hours, "hour"), (minutes, "minute")):
-                if value:
-                    parts.append(f"{value} {unit}{'s' if value != 1 else ''}")
-            gap = ", ".join(parts) or "less than one minute"
-            timing = (
-                f"Previous user message: {previous_time:%Y-%m-%d %H:%M %Z}. "
-                f"Time since previous user message: approximately {gap}. "
-                + ("This is the first message after a substantial conversation gap. "
-                   "You may briefly and naturally welcome them back if it fits their message."
-                   if elapsed >= 3600 else
-                   "This is an ongoing conversation or a short pause. Do not give a return greeting.")
-            )
-        except (TypeError, ValueError, KeyError, OverflowError, OSError):
-            timing = "The previous message time is unavailable or unreliable. Do not guess the gap."
+    facts = _last_user_timing(now)
+    if facts["previous"] is None:
+        timing = "No previous user message is recorded. Do not imply a previous absence."
+    elif facts["reliable"]:
+        previous_time = facts["previous_time"]
+        gap = facts["gap"]
+        elapsed = facts["elapsed_seconds"]
+        timing = (
+            f"Previous user message: {previous_time:%Y-%m-%d %H:%M %Z}. "
+            f"Time since previous user message: approximately {gap}. "
+            + ("This is the first message after a substantial conversation gap. "
+               "You may briefly and naturally welcome them back if it fits their message."
+               if elapsed >= 3600 else
+               "This is an ongoing conversation or a short pause. Do not give a return greeting.")
+        )
+    else:
+        timing = "The previous message time is unavailable or unreliable. Do not guess the gap."
 
     return {
         "role": "system",
