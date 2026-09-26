@@ -31,9 +31,11 @@ $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faste
 
 $InstallDir = Join-Path $env:USERPROFILE "Amadeus"
 $LogPath    = Join-Path $InstallDir "install_log.txt"
-# Your fork's main branch holds all the features; this is the branch to install.
+# Your fork's FEATURE branch holds the greeting features (startup + switch
+# greetings, anti-repeat pass, 2026-09-22/23); main lags behind until that
+# branch is merged. FLIP $Branch BACK TO "main" once the merge is done.
 $ForkUrl   = "https://github.com/cmh95209/Amadeus-Project.git"
-$Branch    = "main"
+$Branch    = "feature/startup-greeting"
 
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
