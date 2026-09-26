@@ -680,6 +680,21 @@ def model_ready() -> Dict[str, object]:
 
 
 # pre: the configured model is servable (see model_ready) and an API key set
+def _mint_speech_id(pack, assistant_id) -> str:
+    """Mint a single-use speech id for a stored assistant line (the same
+    mechanism /greet uses for the startup greeting)."""
+    speech_id = uuid.uuid4().hex
+    with _speech_requests_lock:
+        now = time.monotonic()
+        for key in [k for k, (created, _, _) in _speech_requests.items()
+                    if now - created > 300]:
+            _speech_requests.pop(key, None)
+        _speech_requests[speech_id] = (now, pack.assistant_reply_JPS, assistant_id)
+        while len(_speech_requests) > 20:
+            _speech_requests.pop(next(iter(_speech_requests)))
+    return speech_id
+
+
 # post: generates AND stores one startup greeting as a normal assistant
 #       message, mints a single-use speech id for its Japanese line (the same
 #       voice mechanism a normal reply uses), and returns the English line for
@@ -699,16 +714,52 @@ def greet():
         print("[Flask] Greeting failure:", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
 
-    speech_id = uuid.uuid4().hex
-    with _speech_requests_lock:
-        now = time.monotonic()
-        for key in [k for k, (created, _, _) in _speech_requests.items()
-                    if now - created > 300]:
-            _speech_requests.pop(key, None)
-        _speech_requests[speech_id] = (now, pack.assistant_reply_JPS, assistant_id)
-        while len(_speech_requests) > 20:
-            _speech_requests.pop(next(iter(_speech_requests)))
+    speech_id = _mint_speech_id(pack, assistant_id)
+    return jsonify({
+        "ready": True,
+        "response": pack.assistant_reply_ENG,
+        "speech_id": speech_id,
+        "assistant_id": assistant_id,
+        "conversation_id": conv_id,
+    })
 
+
+# pre: the target conversation exists (this route activates it, so the
+#      greeting is generated against - and stored in - exactly that tab) and
+#      the configured model is servable. There are NO staleness/cooldown
+#      gates: a topic-switch acknowledgment is voiced on every switch, so the
+#      previous tab is captured first (to name the topic change) and passed
+#      into the timing context.
+# post: stores ONE line as a plain assistant line in the target tab and mints
+#       the speech id - the same shape as /greet. A not-ready model returns
+#       200 with {"ready": false, "reason": ...}: the client treats that as
+#       "no line", never an error (a tab switch must never break).
+@application.route("/conversations/<int:conversation_id>/greet", methods=["POST"])
+def greet_conversation(conversation_id):
+    if not has_api_key():
+        return jsonify({"message": "No API key. Add one in Settings."}), 400
+    # Capture the tab the user LEFT before activating the target - the
+    # topic-switch line names it. A failed read is non-fatal (None -> the
+    # line simply can't name the previous tab).
+    try:
+        previous_id = memory.load_active_conversation()
+    except Exception:
+        previous_id = None
+    try:
+        memory.set_active_conversation(conversation_id)
+    except ValueError:
+        return jsonify({"message": "Conversation not found"}), 404
+    ready = model_ready()
+    if not ready["ready"]:
+        return jsonify({"ready": False, "reason": ready["reason"]})
+    try:
+        pack, assistant_id, conv_id = generate_greeting(
+            mode="switch", conversation_id=conversation_id,
+            previous_conversation_id=previous_id)
+    except Exception as exc:
+        print("[Flask] Switch-greeting failure:", repr(exc))
+        return jsonify({"message": _llm_error_message(exc)}), 502
+    speech_id = _mint_speech_id(pack, assistant_id)
     return jsonify({
         "ready": True,
         "response": pack.assistant_reply_ENG,

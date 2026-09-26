@@ -14,6 +14,7 @@ import {
   resetMemory,
   sendMessage,
   getGreeting,
+  getConversationGreeting,
   setModel,
   getWebAccess,
   setWebAccess,
@@ -137,6 +138,7 @@ export default function App() {
   );
   const modelWasFound = useRef<boolean | null>(null);
   const greetingInFlight = useRef<boolean>(false);
+  const switchGreetingInFlight = useRef<boolean>(false);
 
   useEffect(() => {
     void initialize();
@@ -251,6 +253,35 @@ export default function App() {
       // A greeting failure is silent by design - never shown as an error.
     } finally {
       greetingInFlight.current = false;
+    }
+  }
+
+  // A switch greeting is aimed at one tab: fired only when the target
+  // clears the backend gates (stale enough + cooldown), stored as its own
+  // greeting line in that tab, and silent on failure (a tab switch must
+  // never break). The is_greeting flag already gives it its own line in the
+  // UI (no version arrows, Regenerate/Undo hidden).
+  async function fireSwitchGreeting(convId: number) {
+    if (switchGreetingInFlight.current || loading) return;
+    switchGreetingInFlight.current = true;
+    try {
+      const g = await getConversationGreeting(convId);
+      if (!g.ready || !g.response) return; // gated or model not up: no line
+      if (displayedConvIdRef.current !== convId) return; // tab moved on; drop
+      const line = g.response;
+      setMessages((current) => [
+        ...current,
+        { role: "assistant", content: line, id: g.assistantId, is_greeting: true },
+      ]);
+      characterRef.current?.playMotion("TapReaction");
+      if (g.speechUrl) {
+        void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
+        rememberVoiceLine(g.assistantId);
+      }
+    } catch {
+      // A switch-greeting failure is silent by design - never breaks the switch.
+    } finally {
+      switchGreetingInFlight.current = false;
     }
   }
 
@@ -666,6 +697,7 @@ export default function App() {
       setDisplayedConvId(id);
       setStatus("Online");
       void refreshConversations();
+      void fireSwitchGreeting(id);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not switch conversations");
     } finally {

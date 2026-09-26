@@ -2038,11 +2038,30 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
 GREETING_INSTRUCTION = {
     "role": "system",
     "content": (
-        "The user just opened the app. Greet them, framing it with the "
-        "private timing context so you know how long they have been away. "
+        "The user just opened the app. You were here the whole time - you "
+        "keep this conversation, and the last thing you said is still yours. "
+        "Speak naturally, as if they simply came back to where you left off. "
         "You can worry about the user, be annoyed, or be curious, depending "
-        "on your relationship with them thus far. Do not recite the system "
-        "message."
+        "on your relationship with them thus far. You can see your previous "
+        "lines in the conversation - do not repeat the same greeting formula; "
+        "react to the actual situation. Do not recite the system message."
+    ),
+}
+
+# The switch variant (2026-09-21; strict rewrite + loosening 2026-09-22,
+# repositioned 2026-09-23): the strict version killed the welcome-back
+# formula but only MOVED the groove, and a trimmed vary-topic directive in
+# the SYSTEM NOTES was then ignored too (live: the prompt tail's template
+# of her own previous switch lines won - 8 near-identical lines). So this
+# instruction stays THIN; the vary-topic steering lives in the re-greeting
+# ARRIVAL line - the last thing in the prompt, the position where the
+# user's working chat instruction sat. The playful bouncing framing is
+# kept (user decision 2026-09-22).
+GREETING_INSTRUCTION_SWITCH = {
+    "role": "system",
+    "content": (
+        "The user has switched to this conversation. Say something natural "
+        "about where things stand here. Do not recite the system message."
     ),
 }
 
@@ -2087,8 +2106,56 @@ def _store_greeting_line(pack: "AmadeusPack") -> tuple[int, int]:
 #       the line is STORED as an assistant message; returns
 #       (pack, assistant_id, conversation_id).
 #       Raises on total failure so the /greet route can report it cleanly.
-def generate_greeting() -> tuple[AmadeusPack, int, int]:
-    context = store.build_prompt_messages()
+def generate_greeting(mode: str = "startup",
+                      conversation_id: int | None = None,
+                      previous_conversation_id: int | None = None) -> tuple[AmadeusPack, int, int]:
+    switch = (mode == "switch")
+    instruction = (GREETING_INSTRUCTION_SWITCH if switch
+                   else GREETING_INSTRUCTION)
+    if conversation_id is None:
+        # Startup: the greeted tab is the active one (the timing context's
+        # per-tab anchor and the cross note both key off it).
+        conversation_id = store.load_active_conversation()
+    # The synthetic arrival line is the LAST thing in the greeting prompt -
+    # the strongest position for steering on this model (live 2026-09-23:
+    # the vary-topic directive in the system notes at the FRONT was ignored
+    # while a one-off user message at the END fixed it). A switch into a
+    # tab whose last line is one of her own greetings (the bounce case)
+    # gets the vary-topic directive here; the playful bouncing framing is
+    # kept (user decision 2026-09-22), and the old "note how many of your
+    # lines above are switch reactions" nudge is replaced - it pointed her
+    # AT the template (live: 8 near-identical switch lines at the tail).
+    re_greeting = False
+    if switch:
+        try:
+            last_line = store.load_last_assistant_line(conversation_id)
+        except Exception:
+            last_line = None
+        re_greeting = bool(last_line and last_line.get("is_greeting"))
+        if re_greeting:
+            arrival = (
+                "[The user has switched to this conversation again - you "
+                "have already greeted them. This time speak a completely "
+                "different topic (science, trivia, ask about their day, "
+                "etc.). Randomize it. Be sassy and teasing.]"
+            )
+        else:
+            arrival = "[The user has switched to this conversation.]"
+    else:
+        arrival = "[The user just opened the app.]"
+    # When the prompt tail is a run of her own switch lines (the
+    # re-greeting case above), hide the stored greeting rows from the
+    # history so she cannot repeat a line she cannot see (2026-09-23). The
+    # facts about them stay in the timing block (the last-line quote + the
+    # "already greeted this tab N times" count). Switch-only: startup and
+    # normal replies see the full history.
+    exclude_ids = None
+    if re_greeting:
+        try:
+            exclude_ids = store.greeting_row_ids(conversation_id)
+        except Exception:
+            exclude_ids = None
+    context = store.build_prompt_messages(exclude_ids=exclude_ids)
     # Servers like NInfer reject tool_choice="auto" when the prompt has NO
     # user turn at all ("no user query found in chat messages") - which is
     # the exact shape of an empty conversation's greeting. Even with history,
@@ -2096,8 +2163,7 @@ def generate_greeting() -> tuple[AmadeusPack, int, int]:
     # user->assistant shape is what every server expects for "her turn to
     # speak". So the greeting prompt always ends on this synthetic arrival
     # line - prompt-only, never stored in memory.
-    context = list(context) + [{"role": "user",
-                                "content": "[The user just opened the app.]"}]
+    context = list(context) + [{"role": "user", "content": arrival}]
     # A normal reply gets the private timing block (current time + how long
     # it has been since the last user message, with a ready-made casual
     # phrase). The greeting needs it too - it is a return moment with no
@@ -2106,8 +2172,13 @@ def generate_greeting() -> tuple[AmadeusPack, int, int]:
     # handed "about 7 days" and still said "yesterday").
     messages = _merge_leading_system_messages(
         store.load_default_personality_messages()
-        + [GREETING_INSTRUCTION]
-        + [store.load_internal_context(is_greeting=True)]
+        + [instruction]
+        + [store.load_internal_context(is_greeting=True,
+                                       conversation_id=conversation_id,
+                                       is_return=not switch,
+                                       previous_conversation_id=(
+                                           previous_conversation_id
+                                           if switch else None))]
         + [_PACK_RULES]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
         + [NO_WEB_BLOCK]

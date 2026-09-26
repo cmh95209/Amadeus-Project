@@ -27,7 +27,7 @@ class TemporalContextTests(unittest.TestCase):
         self.assertIn('first message after a substantial', content)
         followup = self.context('2026-09-06 18:42', now + timedelta(seconds=20))
         self.assertIn('less than one minute', followup)
-        self.assertIn('Do not give a return greeting', followup)
+        self.assertIn('a welcome-back is not expected', followup)
 
     def test_multi_day_and_timezone_aware_dates(self):
         now = datetime(2026, 9, 6, 18, 42, tzinfo=timezone.utc)
