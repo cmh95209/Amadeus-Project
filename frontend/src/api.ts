@@ -112,8 +112,8 @@ export type GreetingReply = {
   conversationId?: number;
 };
 
-export async function getGreeting(): Promise<GreetingReply> {
-  const response = await fetch(`${API_BASE}/greet`, {
+async function fetchGreetingReport(path: string): Promise<GreetingReply> {
+  const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -139,6 +139,14 @@ export async function getGreeting(): Promise<GreetingReply> {
     conversationId:
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
   };
+}
+
+export async function getGreeting(): Promise<GreetingReply> {
+  return fetchGreetingReport(`${API_BASE}/greet`);
+}
+
+export async function getConversationGreeting(id: number): Promise<GreetingReply> {
+  return fetchGreetingReport(`${API_BASE}/conversations/${id}/greet`);
 }
 
 

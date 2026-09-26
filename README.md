@@ -929,6 +929,102 @@ Longer-term ideas include richer character interaction, additional activities su
 
 # Changelog
 
+## Switching Tabs No Longer Gets the Same "Welcome Back" — September 22, 2026
+
+During live testing, switching between tabs five times in a row got five
+"welcome back" lines in a row — the same formula every time, even though
+she could see her own previous lines right there in the conversation.
+The
+instructions had been trimmed to "speak naturally", but the hidden context
+still described every switch as a *return* ("the user came back to this
+conversation, which has been quiet"), so the path of least resistance stayed
+the welcome-back formula.
+
+The fix makes the goal explicit and stops describing switches as returns:
+
+- **Switches are no longer framed as coming back.** The switch instruction
+  now says plainly: do *not* welcome them back (they were here the whole
+  time, in other conversations); react to this conversation's actual state,
+  including your previous lines on this tab; and if you just switched back
+  and forth, you may notice that. The hidden "came back… quiet" line is
+  now a neutral "the user is now reading this conversation."
+- **She's asked to count her own switch lines** when a switch happens —
+  they are in the prompt, but a small local model does not notice the
+  pattern on its own.
+- **A deterministic safety net.** The app itself counts her greeting lines
+  in that tab from the last 30 minutes; if there are two or more, she's
+  told so flatly ("you have already greeted this tab N times in the last 30
+  minutes"). The computer does the counting, not her — so a quick
+  back-and-forth bounce cannot produce the same welcome again.
+
+App startup is untouched: a real return after an absence is still greeted
+as before (the safety net is switch-only, because bouncing is a switch
+phenomenon).
+
+Live testing with the strict version then showed it had only *moved* the
+groove — the welcome-back formula was gone, but a thin tab still produced
+five letter-for-letter repeats of a new "how many times is this now?" line.
+So the steer was thinned again, on top of the neutralized framing:
+the switch instruction is now just *"Say something natural about where
+things stand here"*, the "you were just in …" note is pure data (where
+you were, what was said there — no instruction tail), and the arrival line
+keeps its "again — note how many of your previous lines above are already
+switch reactions" nudge on purpose, because the bouncing reaction is a
+wanted feature. One guard stays strict: the timing block still says this
+line is *not* a welcome-back (the failure mode that burned twice). The
+timestamp machinery and all the data facts are unchanged.
+
+One more nudge, found by the user himself in live chat: telling her in a
+normal message to "try speaking completely different topics when I
+switch to you" fixed the repetition immediately — because a *do*
+("pick a new angle") beats every *don't* ("don't repeat") for this
+model. So when a tab switch lands right after one of her own greeting
+lines, her timing context now carries a short directive with a topic
+list: *"You have already greeted them, so they might be playing
+around. Respond by introducing completely different topics (science,
+trivia, ask about their day, etc.) - randomize it. You may be sassy and
+teasing about it."* The first version of this was a long explanation
+and did nothing (stacks of instructions lose on this model), so it was
+trimmed to the basics. Startup greetings are untouched (it's
+switch-only).
+
+- 186 offline tests pass (3 new: the "already greeted this tab N times"
+  fact, its switch-only scope, and the 30-minute counter).
+
+## Greetings Know You, Not Just the Tab — September 21, 2026
+
+Two additions to her greeting, both about *being aware of you, not just of
+whichever tab you opened*.
+
+**She now knows when you last talked to her anywhere, not just in the tab
+you opened.** Before, the "how long have I been away?" number came from the
+active tab's last message — so if you'd chatted with her two days ago in one
+tab and then opened a tab that had sat idle for a week, she'd greet you as
+if you'd been gone a week. Now the absence is measured against your newest
+message *across every conversation* (capped at 30 days), and she's handed a
+small, labeled note about the other threads — the newest one, what it was
+about, and how long ago — so she can ask how it turned out. It's a bounded
+digest (at most 3 other tabs, a short quote each), never a merge of your
+conversations, so the context doesn't balloon. Normal replies are untouched;
+this only shapes her greeting line.
+
+**She picks a thread back up when you switch to it, not only on app
+start.** Opening a tab that's been quiet for a while now gets a short line
+from her (and she'll voice it), generated the same way as the startup
+greeting. Crucially it's *not* a second welcome-back — she knows you've been
+here the whole time, in the other tabs, and the app-launch greeting already
+covered that. Instead she re-enters that conversation: how long this thread
+has been quiet, and what you'd been up to in the other one — then continues
+from where you left it. It's gated so it never gets chatty: a tab that was
+active recently (under ~2 hours) gets nothing, and the same tab won't be
+greeted again within an hour. Switching is fire-and-forget — a skipped or
+failed greeting is silent and never breaks the switch.
+
+- 178 offline tests pass (16 new: the cross-tab anchor, the bounded digest
+  caps, the staleness/cooldown gates, the widened timing block, the
+  switch-back re-orientation frame (no second welcome-back), and the
+  switch-greeting prompt end to end).
+
 ## Startup Greeting: Her Welcome Is Now Her Own Line, and She Tells the Truth About the Clock — September 21, 2026
 
 Two follow-up slips from the greeting rollout, both found and fixed.
