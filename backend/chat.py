@@ -13,6 +13,7 @@ import stats
 import ja_voice
 import webfetch
 import weather
+import cm_bridge
 
 default_LLM_Model = store.DEFAULT_LLM_MODEL
 API_KEY = store.load_api_key()
@@ -2259,9 +2260,18 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     )
     book_messages = store.load_character_book_messages(last_user)
 
+    # CharacterMemory long-term recall (sidecar): ONE labeled, token-capped
+    # system section; service absent/empty -> None -> prompt byte-identical.
+    try:
+        memory_block = cm_bridge.fetch_memory_block(
+            store.load_active_conversation())
+    except Exception:
+        memory_block = None
+
     messages = _merge_leading_system_messages(
         store.load_default_personality_messages()
         + book_messages
+        + ([memory_block] if memory_block else [])
         + [internal_context if internal_context is not None else store.load_internal_context()]
         + [pack_rules]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
@@ -2376,6 +2386,9 @@ def getOutputPacked(user_message: str):
     # Snapshot the previous turn before the new message becomes the latest one.
     internal_context = store.load_internal_context()
     user_id = store.append_message("user", user_message)
+    # CharacterMemory: mirror the persisted user turn (fire-and-forget).
+    cm_bridge.save_turn(store.load_active_conversation(), "user",
+                        user_message)
     context = store.build_prompt_messages()
 
     try:
@@ -2392,6 +2405,11 @@ def getOutputPacked(user_message: str):
     assistant_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )
+    # CharacterMemory: mirror the line she actually spoke (prompt-history
+    # rule: the japanese column when present, else the English text).
+    cm_bridge.save_turn(store.load_active_conversation(), "assistant",
+                        (pack.assistant_reply_JPS or "").strip()
+                        or pack.assistant_reply_ENG)
     maybe_schedule_trust_rescore()
     # The session this turn actually landed in, so the UI can verify it is
     # showing the conversation the turn was written to.

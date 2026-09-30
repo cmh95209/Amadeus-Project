@@ -80,8 +80,13 @@ class TemporalContextTests(unittest.TestCase):
             original_context = store.load_internal_context
             # maybe_schedule_trust_rescore is a real chat.py helper the
             # orchestration calls after storing the reply; no-op it here.
+            # The orchestration mirrors each persisted turn to the
+            # CharacterMemory sidecar (fire-and-forget). Stub it out: the test
+            # must not fire a real HTTP save, and a live sidecar on a dev
+            # machine must not ingest test turns.
             scope = {'store': store, 'AmadeusPack': object, 'getResponsePacked': respond,
-                     'maybe_schedule_trust_rescore': lambda: None}
+                     'maybe_schedule_trust_rescore': lambda: None,
+                     'cm_bridge': SimpleNamespace(save_turn=lambda *a, **k: None)}
             exec(compile(ast.Module(body=[function], type_ignores=[]), 'chat.py', 'exec'), scope)
             with patch.object(store, 'load_internal_context', side_effect=lambda: original_context(now)):
                 scope['getOutputPacked']('Hello again')
