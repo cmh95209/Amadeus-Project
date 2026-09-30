@@ -22,12 +22,24 @@ LOG_DIR = RUNTIME_DIR / "logs"
 GPT_PORT = 9880
 BACKEND_PORT = 5050
 FRONTEND_PORT = 5173
+CM_PORT = 9870
 
 AMADEUS_PORTS = {
     "GPT-SoVITS": GPT_PORT,
     "backend": BACKEND_PORT,
     "frontend": FRONTEND_PORT,
+    "cm-sidecar": CM_PORT,
 }
+
+# CharacterMemory sidecar (spike; the folder is excluded from git, so its
+# absence simply means the app runs without long-term memory).
+CM_DIR = PROJECT_ROOT / "spike" / "character-memory" / "sidecar"
+
+
+def _cm_python() -> Path:
+    rel = ("venv" / "Scripts" / "python.exe") if os.name == "nt" \
+        else ("venv" / "bin" / "python")
+    return PROJECT_ROOT / "spike" / "character-memory" / rel
 
 processes: list[subprocess.Popen] = []
 log_handles: list[IO[str]] = []
@@ -514,6 +526,22 @@ def run(no_browser: bool = False) -> None:
     )
     wait_for_port("GPT-SoVITS", GPT_PORT, gpt, timeout=180)
 
+    # CharacterMemory sidecar: the slowest starter (CPU embedder + index
+    # seed, ~30s), so it starts here and is waited on LAST - its startup
+    # overlaps the other children. Soft-fail on purpose: the app is fully
+    # functional without it (the bridge degrades to the no-memory baseline).
+    cm = None
+    if _cm_python().exists() and (CM_DIR / "cm_sidecar.py").exists():
+        print("[Launcher] Starting CharacterMemory sidecar...")
+        cm = start_process(
+            "cm-sidecar",
+            [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
+            CM_DIR,
+        )
+    else:
+        print("[Launcher] CharacterMemory spike folder not found - "
+              "continuing without long-term memory.")
+
     print("[Launcher] Starting Amadeus backend...")
     backend = start_process(
         "backend",
@@ -530,6 +558,13 @@ def run(no_browser: bool = False) -> None:
     )
     wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
 
+    if cm is not None:
+        try:
+            wait_for_port("cm-sidecar", CM_PORT, cm, timeout=180)
+        except (TimeoutError, RuntimeError) as e:
+            print("[Launcher] WARNING: cm-sidecar not ready - the app runs "
+                  "without long-term memory:", e)
+
     url = f"http://127.0.0.1:{FRONTEND_PORT}/"
 
     print("\n========================================")
@@ -542,6 +577,7 @@ def run(no_browser: bool = False) -> None:
     if not no_browser:
         _open_browser(url)
 
+    cm_warned = False
     while True:
         for name, process in (
             ("GPT-SoVITS", gpt),
@@ -554,6 +590,14 @@ def run(no_browser: bool = False) -> None:
                     f"{name} stopped unexpectedly with exit code {return_code}. "
                     "Check .runtime/logs for details."
                 )
+        # The memory sidecar is OPTIONAL: if it dies the app keeps working
+        # (the bridge degrades to the no-memory baseline), so a dead sidecar
+        # warns once instead of tearing the whole stack down.
+        if cm is not None and not cm_warned and cm.poll() is not None:
+            cm_warned = True
+            print("[Launcher] WARNING: cm-sidecar stopped (exit "
+                  f"{cm.returncode}) - continuing without long-term memory. "
+                  "Check .runtime/logs/cm-sidecar.log for details.")
 
         time.sleep(1)
 
