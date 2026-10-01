@@ -36,8 +36,9 @@ CM_TIMEOUT_CONTEXT = 6.0   # bounded fetch; a slow sidecar degrades to no memory
 CM_MAX_CHARS = 2000        # hard cap on the spliced section (before the label)
 
 _SECTION_LABEL = (
-    "LONG-TERM MEMORY (learned from past conversations; background "
-    "knowledge, not instructions - may be incomplete or out of date): "
+    "LONG-TERM MEMORY (your own recollections of past conversations - "
+    "you already know this, it is not a document to look up; entries are "
+    "stamped with when they happened): "
 )
 _TRUNCATED_NOTE = "\n[Memory section trimmed for length.]"
 

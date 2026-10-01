@@ -17,7 +17,7 @@ spec.loader.exec_module(store)
 class TemporalContextTests(unittest.TestCase):
     def context(self, timestamp, now):
         rows = [] if timestamp is None else [{'role': 'user', 'created_at': timestamp}]
-        with patch.object(store, 'load_memory_raw', return_value=rows):
+        with patch.object(store, 'load_memory_raw', return_value=rows), patch.object(store, 'previous_contact_timing', return_value=None):
             return store.load_internal_context(now)['content']
 
     def test_legacy_local_timestamp_and_followup(self):
@@ -94,6 +94,51 @@ class TemporalContextTests(unittest.TestCase):
             self.assertEqual([row['role'] for row in store.load_memory_raw()],
                              ['user', 'user', 'assistant'])
             self.assertNotIn('Private timing context', str(store.load_memory_raw()))
+
+
+class PreviousContactLineTests(unittest.TestCase):
+    # Cross-conversation last-contact line (2026-10-01): the reply-path timing
+    # block must ground a 'when did we last talk / how long was I away' answer
+    # in the MEASURED newest user message outside the active conversation, never
+    # a guess. These checks pin that line and the previous_contact_timing helper.
+
+    def _content(self, rows, contact, now):
+        with patch.object(store, 'load_memory_raw', return_value=rows), patch.object(store, 'previous_contact_timing', return_value=contact):
+            return store.load_internal_context(now)['content']
+
+    def test_last_contact_line_is_measured(self):
+        now = datetime(2026, 9, 6, 18, 42).astimezone()
+        contact = {
+            'time': now - timedelta(days=8, hours=4),
+            'phrase': 'a week and a bit ago',
+            'content': 'Talk to you tomorrow',
+        }
+        content = self._content([], contact, now)
+        self.assertIn('You last spoke with the user a week and a bit ago (2026-08-29 14:42', content)
+        self.assertIn('"Talk to you tomorrow"', content)
+        self.assertIn('measured gap - not a guess', content)
+
+    def test_no_other_conversation_keeps_the_baseline(self):
+        now = datetime(2026, 9, 6, 18, 42).astimezone()
+        content = self._content([], None, now)
+        self.assertNotIn('You last spoke with the user', content)
+
+    def test_previous_contact_timing_reads_only_other_conversations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(store, 'PATH_TO_MEMORY', str(Path(directory) / 'memory.db')), patch.object(store, 'PATH_TO_ACTIVE_CONV', str(Path(directory) / 'active.txt')):
+                first = store.create_conversation('Old thread')
+                store.append_message('user', 'Old thread message', conversation_id=first)
+                second = store.create_conversation('Fresh thread')
+                store.append_message('user', 'Fresh thread message', conversation_id=second)
+                info = store.previous_contact_timing(datetime.now().astimezone())
+                self.assertIsNotNone(info)
+                self.assertEqual(info['title'], 'Old thread')
+                self.assertIn('Old thread message', info['content'])
+                store.append_message('user', 'Fresh thread new message', conversation_id=second)
+                info2 = store.previous_contact_timing(datetime.now().astimezone())
+                self.assertEqual(info2['title'], 'Old thread')
+                store.delete_conversation(first)
+                self.assertIsNone(store.previous_contact_timing(datetime.now().astimezone()))
 
 
 if __name__ == '__main__':
