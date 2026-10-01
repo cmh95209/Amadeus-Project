@@ -37,8 +37,8 @@ CM_DIR = PROJECT_ROOT / "spike" / "character-memory" / "sidecar"
 
 
 def _cm_python() -> Path:
-    rel = ("venv" / "Scripts" / "python.exe") if os.name == "nt" \
-        else ("venv" / "bin" / "python")
+    rel = Path("venv") / "Scripts" / "python.exe" if os.name == "nt" \
+        else Path("venv") / "bin" / "python"
     return PROJECT_ROOT / "spike" / "character-memory" / rel
 
 processes: list[subprocess.Popen] = []
