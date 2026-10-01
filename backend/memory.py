@@ -506,6 +506,64 @@ def greeting_row_ids(conversation_id: int) -> List[int]:
     return [int(r[0]) for r in rows]
 
 
+def previous_contact_timing(now: datetime | None = None) -> Dict[str, object] | None:
+    """The user's newest message OUTSIDE the active conversation, measured.
+
+    The per-tab timing facts (_last_user_timing) only see the active
+    conversation - in a fresh conversation they read "less than an hour
+    ago" even after a week away, so a "when did we last talk / how long
+    was I away?" question has no measured datum (live 2026-10-01: the
+    model guessed, then the guess was fossilized as a memory episode).
+    This is the cross-conversation anchor the reply-path timing block
+    needs. Pure data, one bounded line.
+
+    pre: the messages + conversations tables exist
+    post: {"time", "created_at", "elapsed_seconds", "phrase", "gap", "title",
+          "content"} for the newest user message in any OTHER conversation,
+          or None when no other conversation holds a user message.
+          Does not modify memory.
+    """
+    now_local = (now or datetime.now().astimezone()).astimezone()
+    try:
+        active = _active_conv_id(None)
+    except Exception:
+        return None
+    conn = sqlite3.connect(PATH_TO_MEMORY)
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        _ensure_conversations(c)
+        row = c.execute(
+            "SELECT m.conversation_id, c.title, m.created_at, m.content "
+            "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+            "WHERE m.role = 'user' AND m.conversation_id != ? "
+            "ORDER BY m.created_at DESC, m.id DESC LIMIT 1", (active,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    _conv_id, title, created_at, content = row
+    try:
+        time = datetime.fromisoformat(created_at).astimezone()
+        elapsed = (now_local.astimezone(timezone.utc)
+                   - time.astimezone(timezone.utc)).total_seconds()
+        if elapsed < 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    text = " ".join((content or "").split())
+    return {
+        "time": time,
+        "created_at": created_at,
+        "elapsed_seconds": elapsed,
+        "phrase": _gap_phrase(elapsed),
+        "gap": _gap_string(elapsed),
+        "title": (title or "").strip() or "New chat",
+        "content": text[:120] + ("..." if len(text) > 120 else ""),
+    }
+
+
 # A greeting (startup or switch) is aimed at the PERSON, not at a thread: if
 # the user's newest message across ALL conversations sits in a different
 # conversation, the per-tab anchor understates "how long have I been away"
@@ -847,7 +905,29 @@ def load_internal_context(now: datetime | None = None, is_greeting=False,
         "If you mention how long this thread has been idle, use the phrase "
         "above."
     )
-    cross_block = ("\n".join(cross_lines) + "\n") if cross_lines else ""
+    if not is_greeting:
+        # Reply-path last-contact anchor: the per-tab line above only
+        # measures THIS conversation, so in a fresh conversation it cannot
+        # express "the user's previous conversation ended a week ago" - the
+        # exact datum a "when did I last talk to you?" question needs
+        # (live 2026-10-01). One measured line; omitted when no other
+        # conversation holds a user message (single-tab installs keep the
+        # baseline byte-identical).
+        try:
+            prev_contact = previous_contact_timing(now)
+        except Exception:
+            prev_contact = None
+        if prev_contact is not None:
+            cross_lines.append(
+                f"- You last spoke with the user {prev_contact['phrase']} "
+                f"({prev_contact['time']:%Y-%m-%d %H:%M %Z}) in their previous "
+                f"conversation; its last line was: "
+                f'"{_collapse_line(prev_contact["content"])}". If asked when '
+                "you last talked or how long the user was away, that "
+                "measured gap - not a guess - is the answer."
+            )
+    cross_block = (
+"\n".join(cross_lines) + "\n") if cross_lines else ""
     return {
         "role": "system",
         "content": (

@@ -824,7 +824,43 @@ def _finalize(pack: "AmadeusPack", llm) -> "AmadeusPack":
     return _ensure_english(_ensure_japanese(pack, llm), llm)
 
 
+# --- Check-promise detection (non-agentic honesty net) -----------------------
+# "Wait, let me check." is the sentence a tool-using model says right BEFORE
+# the check it then performs. This app performs no checks after sending a
+# reply (one user message in, one reply out), so a reply that stalls on such
+# a promise is a half-action the user is left to chase with "continue"
+# (live 2026-10-01: "do you remember X?" -> "Wait, let me check." and no
+# follow-up ever came). Tail-anchored and length-capped so complete answers
+# that merely mention "hold on" mid-sentence never trigger.
+_CHECK_PROMISE_PATTERNS_EN = (
+    "let me check", "let me look", "let me see", "let me think",
+    "i'll check", "i will check", "i'll look", "i'm checking",
+    "give me a second", "give me a moment", "give me a sec",
+    "give me a minute", "hold on", "one moment", "one second",
+    "just a moment", "just a second",
+)
+_CHECK_PROMISE_PATTERNS_JA = (
+    "確認してみる", "調べてみる", "ちょっと待って", "少し待って",
+)
+
+
+def _is_check_promise(text: str) -> bool:
+    """True when a reply is only a mid-action check promise (see above).
+
+    "I checked. It was about 24 hours." is NOT a promise (the check is
+    claimed done); "Hold on, actually I remember..." is NOT (the answer
+    follows); a question is NOT (it is complete)."""
+    t = _strip_thinking(text or "").strip()
+    if not t or len(t) > 100 or "?" in t or "？" in t:
+        return False
+    tail = t.lower()[-40:]
+    if any(p in tail for p in _CHECK_PROMISE_PATTERNS_EN):
+        return True
+    return any(p in t[-40:] for p in _CHECK_PROMISE_PATTERNS_JA)
+
+
 def _salvage_plain_text(raw, llm) -> "AmadeusPack":
+
     """Last resort: turn whatever plain text the model actually produced into an
     AmadeusPack, so a flaky model/server still yields *an* answer instead of a hard
     error. Called only when the structured AmadeusPack tool call never came through
@@ -2078,7 +2114,14 @@ _PACK_RULES = {
         "append the English translation, an English line, or any English sentence to it. "
         "THEN write assistant_reply_ENG as an English translation of that Japanese dialogue, for the user to read. "
         "The English belongs only in assistant_reply_ENG, never in assistant_reply_JPS. "
-        "Keep the meaning and tone consistent between both languages."
+        "Keep the meaning and tone consistent between both languages. "
+        "Every reply is a single complete message - nothing comes after it. "
+        "Never end a reply with a promise to check, look up, or follow up "
+        "('let me check', 'give me a second', 'hold on'): give the full "
+        "answer in this reply, or say plainly what you do not know. Never "
+        "state a specific time gap or date you were not given as measured - "
+        "if no measured time covers the gap, say you are not sure instead "
+        "of guessing a number."
     ),
 }
 
@@ -2366,6 +2409,45 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             print("[Amadeus] Forced pack call returned a repetition loop - "
                   "no clean part; honest fallback.")
             return _honest_plain_failure_pack()
+        # A reply that stalls on a check promise ("Wait, let me check.") is a
+        # mid-action sentence: the model announces a check it cannot perform
+        # (no tool round-trip, no second turn in this app). Finish it with
+        # ONE bounded follow-up - her own half-line fed back plus a nudge -
+        # so the user never sees the dangling promise. Strictly one retry:
+        # if that also stalls or fails, the original line is served.
+        if _is_check_promise(raw):
+            print("[Amadeus] Reply stalled on a check promise - finishing with "
+                  "one bounded follow-up.")
+            finish_convo = list(messages) + [
+                {"role": "assistant",
+                 "content": _strip_thinking(raw).strip()},
+                {"role": "user",
+                 "content": "(Your last message ended before giving an answer. "
+                            "Finish it now: give the complete answer in this "
+                            "reply. There is no follow-up turn - if you do not "
+                            "know something, say so plainly and answer with "
+                            "what you do know.)"},
+            ]
+            try:
+                finish_llm = llm.bind_tools(
+                    [convert_to_openai_tool(AmadeusPack)],
+                    tool_choice="required")
+                reply2 = _invoke_forced(finish_llm, finish_convo)
+                calls2 = getattr(reply2, "tool_calls", None) or []
+                if calls2 and calls2[0].get("name") == "AmadeusPack":
+                    return _out(_pack_from_args(calls2[0].get("args")))
+                raw2 = reply2.content
+                raw2 = _strip_thinking(raw2 if isinstance(raw2, str)
+                                       else str(raw2 or "")).strip()
+                if raw2 and not _is_check_promise(raw2) and _repetition_cut(raw2) is None:
+                    print("[Amadeus] Follow-up finished the reply as plain "
+                          "text; salvaging.")
+                    return _out(_salvage_plain_text(raw2, llm))
+                print("[Amadeus] Follow-up stalled too - serving the original "
+                      "line.")
+            except Exception as e3:
+                print("[Amadeus] Check-promise follow-up failed; serving the "
+                      "original line:", repr(e3))
         print("[Amadeus] Forced pack call returned no AmadeusPack; salvaging plain text.")
         return _out(_salvage_plain_text(raw, llm))
 
