@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#e3cefb">
+  <title>CharacterMemory — Memories</title>
+  <meta name="application-name" content="CharacterMemory">
+  <meta name="description" content="Explore character memories, configure characters, and follow live recall in CharacterMemory.">
+  <link rel="icon" type="image/svg+xml" href="/gui/static/assets/favicon.svg">
+  <script>
+    (() => {
+      const isEmbed = location.pathname.replace(/\/+$/, "") === "/gui/embed/knowledge-graph";
+      if (isEmbed) {
+        document.documentElement.classList.add("live-graph-embed");
+      }
+      let requested = "";
+      if (isEmbed) {
+        try { requested = (new URLSearchParams(location.search).get("theme") || "").toLowerCase(); }
+        catch (error) { requested = ""; }
+      }
+      let saved = null;
+      try { saved = localStorage.getItem("cm_theme"); } catch (error) { /* storage may be disabled */ }
+      const theme = requested === "light" || requested === "dark"
+        ? requested
+        : requested === "system"
+        ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : (saved === "light" || saved === "dark")
+        ? saved
+        : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+    })();
+  </script>
+  <link rel="stylesheet" href="/gui/static/styles.css?v=cm-brand-4">
+  <!-- Icons are Lucide (vendored under /gui/static/vendor — no CDN): <i data-lucide="name">
+       placeholders become inline SVG at load; JS-built DOM uses cmUtil.icon().
+       The knowledge-graph view stays a self-contained canvas force-renderer. -->
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-wordmark brand-wordmark-light" src="/gui/static/assets/wordmark-light.svg" alt="CharacterMemory" width="205" height="61">
+        <img class="brand-wordmark brand-wordmark-dark" src="/gui/static/assets/wordmark-dark.svg" alt="CharacterMemory" width="205" height="61">
+      </div>
+      <nav class="tabbar" role="tablist" aria-label="View">
+        <button id="tab-browse" class="tab active" role="tab" aria-selected="true"><i data-lucide="layers-3" class="icon tab-icon" aria-hidden="true"></i> Memories</button>
+        <button id="tab-configure" class="tab" role="tab" aria-selected="false"><i data-lucide="user-round-pen" class="icon tab-icon" aria-hidden="true"></i> Character studio</button>
+        <button id="tab-live" class="tab" role="tab" aria-selected="false"><i data-lucide="radar" class="icon tab-icon" aria-hidden="true"></i> Live recall</button>
+      </nav>
+      <div class="topbar-actions">
+        <label class="char-picker">
+          <span>Character</span>
+          <select id="character" title="Switch character"></select>
+        </label>
+        <label class="theme-switch" title="Switch between light and dark themes">
+          <span class="theme-switch-label" aria-hidden="true">Theme</span>
+          <input id="theme-toggle" type="checkbox" role="switch" aria-label="Use dark theme">
+          <span class="theme-track" aria-hidden="true">
+            <span class="theme-sun"><i data-lucide="sun" class="icon"></i></span>
+            <span class="theme-moon"><i data-lucide="moon" class="icon"></i></span>
+            <span class="theme-knob"></span>
+          </span>
+        </label>
+        <button id="refresh" class="btn icon-btn" title="Reload overview" aria-label="Reload overview"><i data-lucide="refresh-cw" class="icon"></i></button>
+        <button id="api-key-btn" class="btn icon-btn" type="button" title="API key" aria-label="Set the server API key"><i data-lucide="key-round" class="icon"></i></button>
+        <a class="btn ghost api-link" href="/" title="JSON index">API</a>
+      </div>
+    </header>
+
+    <div class="main">
+      <aside class="sidebar">
+        <button id="memory-picker-toggle" class="memory-picker-toggle" type="button" aria-expanded="false" aria-controls="memory-picker-body">
+          <i data-lucide="layers-3" class="icon"></i><span id="memory-picker-label">Choose memory</span><i data-lucide="chevron-down" class="icon picker-chevron"></i>
+        </button>
+        <div id="memory-picker-body" class="memory-picker-body">
+        <div class="side-label"><span><i data-lucide="sparkle" class="icon side-label-ico"></i>Memory systems</span><span id="memory-total">—</span></div>
+        <div class="side-head">
+          <input id="memory-filter" class="filter-input" placeholder="Filter memories…" autocomplete="off">
+        </div>
+        <nav id="memories" class="mem-list" aria-label="Memories"></nav>
+        </div>
+      </aside>
+
+      <section class="content">
+        <div class="content-head">
+          <div class="ch-title">
+            <h2 id="mem-title">—</h2>
+            <span id="mem-kind" class="chip kind-chip"></span>
+            <span id="mem-count" class="count"></span>
+            <span id="mem-disabled" class="chip warn-chip hidden">disabled</span>
+          </div>
+          <button class="btn mobile-tools-toggle" type="button" aria-expanded="false" aria-controls="memory-toolbar">Search &amp; filters</button>
+          <div id="memory-toolbar" class="tools mobile-toolbar">
+            <button id="add-memory" class="btn primary add-memory hidden" type="button"><i data-lucide="plus" class="icon"></i><span class="btn-label">Add memory</span></button>
+            <div class="search">
+              <span class="search-ico"><i data-lucide="search" class="icon"></i></span>
+              <input id="q" placeholder="Search this memory…" autocomplete="off" spellcheck="false">
+              <button id="q-clear" class="q-clear hidden" title="Clear search" aria-label="Clear search"><i data-lucide="x" class="icon"></i></button>
+            </div>
+            <select id="user-filter" class="user-filter" title="Filter by user"></select>
+          </div>
+        </div>
+
+        <div id="extra" class="extra"></div>
+        <div id="graph-view" class="graph-view hidden">
+          <button class="btn mobile-tools-toggle" type="button" aria-expanded="false" aria-controls="graph-toolbar">Graph controls</button>
+          <div id="graph-toolbar" class="graph-controls mobile-toolbar">
+            <div class="search">
+              <span class="search-ico"><i data-lucide="search" class="icon"></i></span>
+              <input id="graph-q" placeholder="Activate the graph by query…" autocomplete="off" spellcheck="false">
+              <button id="graph-q-clear" class="q-clear hidden" title="Clear" aria-label="Clear activation query"><i data-lucide="x" class="icon"></i></button>
+            </div>
+            <select id="graph-user" class="user-filter" title="Bias a user's PersonNode"></select>
+            <button id="graph-full" class="btn ghost" title="Show the whole graph and highlight retrieved nodes"><i data-lucide="circle-dashed" class="icon"></i><span class="btn-label">Full graph</span></button>
+            <span id="graph-meta" class="graph-meta"></span>
+            <div class="graph-ctl-spacer"></div>
+            <button id="graph-freeze" class="btn ghost" title="Pause / resume physics (space)"><i data-lucide="pause" class="icon"></i><span class="btn-label">Freeze</span></button>
+            <button id="graph-fit" class="btn ghost" title="Fit graph to view"><i data-lucide="maximize" class="icon"></i><span class="btn-label">Fit</span></button>
+            <button id="graph-repel" class="btn ghost" title="Re-run layout"><i data-lucide="refresh-ccw" class="icon"></i><span class="btn-label">Relayout</span></button>
+            <button id="graph-settings-btn" class="btn ghost" type="button" title="Graph settings" aria-controls="graph-settings" aria-expanded="false"><i data-lucide="settings" class="icon"></i><span class="btn-label">Settings</span></button>
+          </div>
+          <div class="graph-split">
+            <div class="graph-canvas-wrap">
+              <canvas id="cy" class="graph-cy" tabindex="0" aria-label="Interactive knowledge graph. Drag to pan, pinch or use the zoom buttons to zoom, and tap a node for details."></canvas>
+              <div id="graph-overlay" class="graph-overlay"></div>
+              <div class="graph-nav" role="group" aria-label="Graph zoom controls">
+                <button id="graph-zoom-in" class="graph-nav-btn" type="button" title="Zoom in" aria-label="Zoom in"><i data-lucide="plus" class="icon"></i></button>
+                <button id="graph-zoom-out" class="graph-nav-btn" type="button" title="Zoom out" aria-label="Zoom out"><i data-lucide="minus" class="icon"></i></button>
+              </div>
+              <div id="graph-settings" class="graph-settings hidden" role="region" aria-label="Graph settings" aria-hidden="true">
+                <div class="gs-title">Graph settings <button id="gs-close" class="gs-close" type="button" title="Hide panel" aria-label="Close graph settings"><i data-lucide="x" class="icon"></i></button></div>
+                <label class="gs-row">
+                  <span class="gs-label">Repulsion</span>
+                  <span class="gs-val" id="gs-repulsion-val">3200</span>
+                  <input type="range" id="gs-repulsion" min="500" max="8000" step="100" value="3200">
+                </label>
+                <label class="gs-row">
+                  <span class="gs-label">Link distance</span>
+                  <span class="gs-val" id="gs-link-val">78</span>
+                  <input type="range" id="gs-link" min="30" max="220" step="2" value="78">
+                </label>
+                <label class="gs-row">
+                  <span class="gs-label">Gravity</span>
+                  <span class="gs-val" id="gs-gravity-val">0.018</span>
+                  <input type="range" id="gs-gravity" min="0" max="0.06" step="0.002" value="0.018">
+                </label>
+                <label class="gs-row">
+                  <span class="gs-label">Particle speed</span>
+                  <span class="gs-val" id="gs-particles-val">1.0</span>
+                  <input type="range" id="gs-particles" min="0" max="3" step="0.1" value="1">
+                </label>
+                <label class="gs-row">
+                  <span class="gs-label">Label zoom</span>
+                  <span class="gs-val" id="gs-labelzoom-val">2.4</span>
+                  <input type="range" id="gs-labelzoom" min="1.2" max="4" step="0.1" value="2.4">
+                </label>
+                <label class="gs-row">
+                  <span class="gs-label">Node limit</span>
+                  <span class="gs-val" id="gs-nodes-val">50</span>
+                  <input type="range" id="gs-nodes" min="10" max="6000" step="10" value="50">
+                </label>
+                <label class="gs-row">
+                  <span class="gs-label">Edge limit</span>
+                  <span class="gs-val" id="gs-edges-val">300</span>
+                  <input type="range" id="gs-edges" min="50" max="10000" step="50" value="300">
+                </label>
+                <label class="gs-check">
+                  <input type="checkbox" id="gs-hide-sparse">
+                  <span class="gs-label">Hide episode/fact with &lt;2 edges</span>
+                </label>
+                <label class="gs-check">
+                  <input type="checkbox" id="gs-hide-epfact">
+                  <span class="gs-label">Hide all episode/fact</span>
+                </label>
+                <button id="gs-reset" class="gs-reset" title="Restore defaults">Reset defaults</button>
+              </div>
+            </div>
+            <aside id="graph-side" class="graph-side">
+              <div class="graph-side-head">Top activated</div>
+              <div id="graph-detail" class="graph-detail hidden"></div>
+              <ol id="graph-list" class="graph-list"></ol>
+            </aside>
+          </div>
+          <div class="graph-legend">
+            <span><span class="dot dot-self"></span> self</span>
+            <span><span class="dot dot-person"></span> person</span>
+            <span><span class="dot dot-fact"></span> fact</span>
+            <span><span class="dot dot-episode"></span> episode</span>
+            <span><span class="dot dot-entity"></span> entity</span>
+            <span class="graph-tip">drag to pan · pinch/scroll to zoom · tap a node</span>
+          </div>
+        </div>
+        <div id="records" class="records"></div>
+        <div id="paginator" class="paginator"></div>
+        <div id="status" class="status hidden"></div>
+      </section>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- Live /context recall monitor.                                     -->
+    <!-- ================================================================ -->
+    <div id="live-pane" class="live-pane hidden">
+      <header class="live-head">
+        <div class="live-title-wrap">
+          <div class="live-eyebrow"><span id="live-status-dot" class="live-status-dot connecting"></span><span id="live-status">Connecting to /context…</span></div>
+          <h2>Live recall</h2>
+          <p>Watch the memories that shape each incoming request.</p>
+        </div>
+        <button class="btn mobile-tools-toggle" type="button" aria-expanded="false" aria-controls="live-toolbar">Recall controls</button>
+        <div id="live-toolbar" class="live-head-actions mobile-toolbar">
+          <span id="live-follow-label" class="live-follow-label">Following latest</span>
+          <a id="live-embed-link" class="btn ghost" href="/gui/embed/knowledge-graph" target="_blank" rel="noopener" title="Open the minimal knowledge-graph view made for iframes"><i data-lucide="panel-top-open" class="icon"></i><span class="btn-label">Iframe graph</span></a>
+          <button id="live-follow" class="btn ghost" type="button"><i data-lucide="arrow-up-to-line" class="icon"></i><span class="btn-label">Follow latest</span></button>
+          <button id="live-expand" class="btn ghost" type="button">Expand all</button>
+          <button id="live-collapse" class="btn ghost" type="button">Collapse all</button>
+        </div>
+      </header>
+      <div id="live-new" class="live-new hidden" role="status" aria-live="polite">
+        <button id="live-new-btn" type="button">New request received · show latest</button>
+      </div>
+      <div id="live-embed-toolbar" class="live-embed-toolbar" aria-label="Live knowledge graph controls">
+        <div class="live-embed-connection" title="Live /context connection">
+          <span id="live-embed-status-dot" class="live-status-dot connecting"></span>
+          <span id="live-embed-status">Connecting…</span>
+        </div>
+        <span id="live-embed-identity" class="live-embed-identity">Waiting for /context</span>
+        <button id="live-embed-full-btn" class="btn live-embed-full-btn" type="button" aria-pressed="false" title="Show the privacy-scoped full graph (nodes need at least two visible edges)">
+          <i data-lucide="share-2" class="icon"></i>
+          <span class="btn-label">Full graph</span>
+        </button>
+        <button id="live-embed-recalls-btn" class="btn live-embed-recalls-btn" type="button" aria-controls="live-embed-drawer" aria-expanded="false">
+          <i data-lucide="layers-3" class="icon"></i>
+          <span id="live-embed-recalls-label">Recalled memories</span>
+          <span id="live-embed-recalls-count" class="live-embed-recalls-count">0</span>
+        </button>
+      </div>
+      <div class="live-layout">
+        <aside class="live-timeline-panel">
+          <div class="live-panel-label"><span>Recent requests</span><span id="live-history-count">0 / 25</span></div>
+          <div id="live-timeline" class="live-timeline" aria-label="Recent context requests"></div>
+          <div id="live-timeline-empty" class="live-empty live-timeline-empty">
+            <span class="live-empty-mark"><span class="brand-mascot" aria-hidden="true"></span></span>
+            <span>Waiting for a <code>POST /context</code> request…</span>
+          </div>
+        </aside>
+        <main class="live-main" aria-live="polite">
+          <div id="live-request" class="live-request hidden"></div>
+          <div id="live-recalls" class="live-recalls"></div>
+          <div id="live-empty" class="live-empty hidden">
+            <span class="live-empty-mark"><span class="brand-mascot" aria-hidden="true"></span></span>
+            <strong>No context request yet</strong>
+            <span>Keep this tab open while your client chats with the character.</span>
+          </div>
+        </main>
+        <section class="live-graph-panel" aria-label="Knowledge graph activation">
+          <div class="live-graph-head">
+            <div>
+              <div class="live-panel-label">Activation field</div>
+              <div id="live-graph-meta" class="live-graph-meta">No graph in this request</div>
+            </div>
+            <select id="live-graph-user" class="user-filter hidden" title="Choose participant graph"></select>
+          </div>
+          <div id="live-graph-empty" class="live-empty">
+            <span class="live-empty-mark"><i data-lucide="share-2" class="icon"></i></span>
+            <strong>Knowledge graph idle</strong>
+            <span>When graph memory is recalled, its activation cloud will appear here.</span>
+          </div>
+          <div id="live-graph-shell" class="live-graph-shell hidden">
+            <div class="live-graph-canvas-wrap">
+              <canvas id="live-cy" class="graph-cy" tabindex="0" aria-label="Knowledge graph activation for the selected context request"></canvas>
+              <div id="live-graph-overlay" class="graph-overlay"></div>
+              <div class="graph-nav live-graph-nav" role="group" aria-label="Live graph zoom controls">
+                <button id="live-zoom-in" class="graph-nav-btn" type="button" title="Zoom in" aria-label="Zoom in"><i data-lucide="plus" class="icon"></i></button>
+                <button id="live-zoom-out" class="graph-nav-btn" type="button" title="Zoom out" aria-label="Zoom out"><i data-lucide="minus" class="icon"></i></button>
+              </div>
+            </div>
+            <aside class="live-graph-side">
+              <div class="graph-side-head">Top activated</div>
+              <div id="live-graph-detail" class="graph-detail hidden"></div>
+              <ol id="live-graph-list" class="graph-list"></ol>
+            </aside>
+          </div>
+          <div class="graph-legend live-graph-legend">
+            <span><span class="dot dot-self"></span> self</span>
+            <span><span class="dot dot-person"></span> person</span>
+            <span><span class="dot dot-fact"></span> fact</span>
+            <span><span class="dot dot-episode"></span> episode</span>
+            <span><span class="dot dot-entity"></span> entity</span>
+          </div>
+        </section>
+      </div>
+      <button id="live-embed-backdrop" class="live-embed-backdrop hidden" type="button" aria-label="Close recalled memories"></button>
+      <aside id="live-embed-drawer" class="live-embed-drawer hidden" role="dialog" aria-modal="true" aria-labelledby="live-embed-drawer-title" aria-hidden="true">
+        <header class="live-embed-drawer-head">
+          <div>
+            <div class="live-panel-label">Last /context</div>
+            <h2 id="live-embed-drawer-title">Recalled memories</h2>
+          </div>
+          <div class="live-embed-drawer-actions">
+            <button id="live-embed-expand" class="btn ghost" type="button">Expand</button>
+            <button id="live-embed-collapse" class="btn ghost" type="button">Collapse</button>
+            <button id="live-embed-drawer-close" class="modal-close" type="button" aria-label="Close recalled memories"><i data-lucide="x" class="icon"></i></button>
+          </div>
+        </header>
+        <div id="live-embed-request" class="live-embed-request">Waiting for the first context request.</div>
+        <div id="live-embed-recalls" class="live-recalls" role="region" aria-label="Recalled memory items" tabindex="0"></div>
+        <div id="live-embed-recalls-empty" class="live-empty">
+          <span class="live-empty-mark"><i data-lucide="layers-3" class="icon"></i></span>
+          <strong>No recalled memories yet</strong>
+          <span>The latest request will appear here automatically.</span>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Schema-driven editor for structured memories and emotion state. -->
+    <div id="memory-editor" class="memory-editor hidden" role="dialog" aria-modal="true" aria-labelledby="memory-editor-title">
+      <form id="memory-form" class="memory-editor-card">
+        <header class="memory-editor-head">
+          <div>
+            <div id="memory-editor-eyebrow" class="modal-eyebrow">New record</div>
+            <h2 id="memory-editor-title">Add memory</h2>
+          </div>
+          <button id="memory-editor-close" class="modal-close" type="button" aria-label="Close"><i data-lucide="x" class="icon"></i></button>
+        </header>
+        <p id="memory-editor-note" class="memory-editor-note"></p>
+        <div id="memory-fields" class="memory-fields"></div>
+        <p id="memory-editor-error" class="form-error hidden"></p>
+        <footer class="memory-editor-foot">
+          <button id="memory-editor-cancel" class="btn ghost" type="button">Cancel</button>
+          <span class="modal-spacer"></span>
+          <button id="memory-editor-save" class="btn primary" type="submit">Save memory</button>
+        </footer>
+      </form>
+    </div>
+
+    <!-- API key dialog: shown when the server requires a key (401) or via
+         the key topbar button. The key is stored locally and sent with every
+         request; reload re-bootstraps all tabs with it applied. -->
+    <div id="api-key-overlay" class="api-key-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="api-key-title">
+      <form id="api-key-form" class="api-key-card">
+        <header class="api-key-head">
+          <h2 id="api-key-title"><i data-lucide="key-round" class="icon"></i> API key</h2>
+          <button id="api-key-close" class="modal-close" type="button" aria-label="Close"><i data-lucide="x" class="icon"></i></button>
+        </header>
+        <p id="api-key-hint" class="api-key-hint">
+          This server requires an API key. Paste the key configured as <code>CM_API_KEY</code> (or <code>--api-key</code>) on the server.
+        </p>
+        <input id="api-key-input" class="api-key-input" type="password" placeholder="Paste the API key…" autocomplete="off" spellcheck="false">
+        <p id="api-key-error" class="form-error hidden"></p>
+        <footer class="api-key-foot">
+          <button id="api-key-clear" class="btn ghost" type="button">Clear</button>
+          <span class="modal-spacer"></span>
+          <button id="api-key-save" class="btn primary" type="submit">Save key</button>
+        </footer>
+      </form>
+    </div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <!-- ================================================================ -->
+    <!-- Configure tab: character list + editor (persona / files / chat). -->
+    <!-- ================================================================ -->
+    <div id="cfg-pane" class="cfg-pane hidden">
+      <aside class="cfg-rail">
+        <div class="cfg-rail-head">
+          <span class="cfg-rail-title">Characters</span>
+          <button id="cfg-new" class="btn primary tight" title="Create a new character"><i data-lucide="plus" class="icon"></i><span class="btn-label">New</span></button>
+        </div>
+        <nav id="cfg-char-list" class="cfg-char-list" aria-label="Characters"></nav>
+      </aside>
+
+      <section id="cfg-empty" class="cfg-empty">
+        <div class="cfg-empty-big"><span class="brand-mascot" aria-hidden="true"></span></div>
+        <div class="cfg-empty-text">Select a character — or tap <b>+ New</b> to build one.</div>
+      </section>
+
+      <section id="cfg-pane-main" class="cfg-main hidden">
+        <header class="cfg-head">
+          <div class="cfg-head-title">
+            <h2 id="cfg-name">—</h2>
+            <button id="cfg-copy" class="btn ghost" title="Copy this character to a new one">Copy</button>
+            <button id="cfg-delete" class="btn danger ghost" title="Delete this character and all its data">Delete</button>
+          </div>
+          <nav class="editor-tabs" role="tablist">
+            <button class="etab active" data-edit="persona" role="tab">Persona &amp; memories</button>
+            <button class="etab" data-edit="world" role="tab">World</button>
+            <button class="etab" data-edit="files" role="tab">Files</button>
+            <button class="etab" data-edit="chat" role="tab">Chat</button>
+          </nav>
+        </header>
+
+        <!-- Persona + memories -->
+        <div class="edit-pane" data-edit="persona">
+          <div class="cfg-block">
+            <div class="cfg-block-head">
+              <label class="cfg-label" for="cfg-persona">Persona / description</label>
+              <button id="cfg-save-persona" class="btn primary">Save persona</button>
+            </div>
+            <textarea id="cfg-persona" class="cfg-textarea" rows="5"
+              placeholder="Short blurb the character uses to know who they are. Optional."></textarea>
+          </div>
+
+          <div class="cfg-block">
+            <div class="cfg-block-head">
+              <div>
+                <label class="cfg-label">Memories &amp; context order</label>
+                <div class="cfg-hint">Enable memory systems, then choose which sections reach <code>/context</code> and in what order. Set <code>k</code> to 0 to skip automatic retrieval; MCP and tools still work.</div>
+              </div>
+              <button id="cfg-save-memory" class="btn primary">Save memories &amp; order</button>
+            </div>
+            <div id="cfg-memory-list" class="cfg-memory-list"></div>
+            <details class="cfg-dedup-panel">
+              <summary class="cfg-label">Deduplication &amp; decision model</summary>
+              <p class="cfg-hint">Reconcile duplicate structured memories after extraction. Save with “Save memories &amp; order” above. When disabled, the legacy exact-match guard still applies.</p>
+              <div id="cfg-dedup-fields" class="cfg-dedup-fields"></div>
+            </details>
+            <div class="cfg-section-order-head">
+              <div>
+                <span class="cfg-label">Context order</span>
+                <div class="cfg-hint">Numbered items define <code>context_order</code> and <code>context_text</code>. Empty recalled sections are skipped per request.</div>
+              </div>
+              <button id="cfg-add-intermediate-prompt" class="btn ghost tight" type="button">
+                <i data-lucide="plus" class="icon"></i><span class="btn-label">Intermediate prompt</span>
+              </button>
+            </div>
+            <div id="cfg-section-order" class="cfg-section-order" aria-label="Context section order"></div>
+          </div>
+
+          <div class="cfg-block">
+            <div class="cfg-block-head">
+              <label class="cfg-label" for="cfg-kg">
+                <input id="cfg-kg" type="checkbox" class="switch-input inline">
+                Knowledge graph
+              </label>
+              <span class="k-wrap">
+                <span class="k-label">token budget</span>
+                <input id="cfg-kg-token-budget" type="number" min="0" step="100" class="k-input">
+              </span>
+            </div>
+            <span class="cfg-hint">Off by default. Building it runs an LLM extraction pass.</span>
+          </div>
+
+          <div class="cfg-block">
+            <div class="cfg-block-head">
+              <label class="cfg-label">Indexes</label>
+              <button id="cfg-rebuild" class="btn ghost"><i data-lucide="refresh-cw" class="icon"></i><span class="btn-label">Rebuild indexes</span></button>
+            </div>
+            <div id="cfg-build-status" class="cfg-build-status"></div>
+          </div>
+        </div>
+
+        <!-- Private world -->
+        <div class="edit-pane hidden" data-edit="world">
+          <div id="cfg-world-disabled" class="cfg-block hidden">
+            <p>Enable <b>World</b> under Persona &amp; memories, save, then open this tab.</p>
+          </div>
+          <div id="cfg-world-editor">
+            <div class="cfg-block">
+              <div class="cfg-block-head">
+                <label class="cfg-label">World subsystems</label>
+                <button id="cfg-world-save-features" class="btn primary">Save switches</button>
+              </div>
+              <div id="cfg-world-features" class="cfg-memory-list"></div>
+              <label class="cfg-label" for="cfg-world-actor">Actor overrides</label>
+              <select id="cfg-world-actor" class="user-filter"><option value="">World defaults</option></select>
+              <span class="cfg-hint">Actor controls are tri-state: inherit, on, or off.</span>
+            </div>
+            <div class="cfg-block">
+              <div class="cfg-block-head">
+                <label class="cfg-label">Projected state</label>
+                <button id="cfg-world-advance" class="btn ghost">Advance now</button>
+              </div>
+              <pre id="cfg-world-state" class="world-json"></pre>
+            </div>
+            <div class="cfg-block">
+              <div class="cfg-block-head">
+                <div>
+                  <label class="cfg-label">World elements</label>
+                  <div class="cfg-hint">Add and edit the places, people, schedules, and facts that make up this world.</div>
+                </div>
+                <button id="cfg-world-save-seed" class="btn primary tight">Save world</button>
+              </div>
+              <div class="world-add-bar" aria-label="Add a world element">
+                <span class="world-add-label">Quick add</span>
+                <button class="btn ghost tight" type="button" data-world-add="locations"><i data-lucide="plus" class="icon"></i><span class="btn-label">Location</span></button>
+                <button class="btn ghost tight" type="button" data-world-add="actors"><i data-lucide="plus" class="icon"></i><span class="btn-label">Actor</span></button>
+                <button class="btn ghost tight" type="button" data-world-add="routines"><i data-lucide="plus" class="icon"></i><span class="btn-label">Routine</span></button>
+                <button class="btn ghost tight" type="button" data-world-add="facts"><i data-lucide="plus" class="icon"></i><span class="btn-label">Fact</span></button>
+              </div>
+              <div id="cfg-world-elements" class="world-elements"></div>
+              <details id="cfg-world-source-panel" class="world-source-panel">
+                <summary>Advanced source editor</summary>
+                <div class="world-source-head">
+                  <span class="cfg-hint">Edit or replace the complete world as JSON or YAML.</span>
+                  <span class="world-source-actions">
+                    <button id="cfg-world-apply-source" class="btn ghost tight" type="button">Apply JSON to form</button>
+                    <button id="cfg-world-export" class="btn ghost tight" type="button">Export</button>
+                    <button id="cfg-world-import" class="btn ghost tight" type="button">Import</button>
+                  </span>
+                </div>
+                <textarea id="cfg-world-seed" class="cfg-file-content world-seed" spellcheck="false"></textarea>
+              </details>
+              <input id="cfg-world-import-file" type="file" accept=".json,.yaml,.yml,application/json" hidden>
+            </div>
+            <div class="cfg-block">
+              <label class="cfg-label">Manual command</label>
+              <div class="world-command-row">
+                <select id="cfg-world-command"><option>move</option><option>start_activity</option><option>eat</option><option>sleep</option><option>wake</option></select>
+                <input id="cfg-world-command-value" placeholder="location or activity">
+                <button id="cfg-world-command-run" class="btn ghost">Apply</button>
+              </div>
+            </div>
+            <div class="cfg-block"><label class="cfg-label">Event history</label><pre id="cfg-world-events" class="world-json"></pre></div>
+          </div>
+        </div>
+
+        <!-- Files -->
+        <div class="edit-pane hidden" data-edit="files">
+          <div class="files-toolbar">
+            <div class="bucket-switch">
+              <button class="bucket-btn active" data-bucket="information">Information (wiki)</button>
+              <button class="bucket-btn" data-bucket="dialogues">Dialogues</button>
+            </div>
+            <label class="btn ghost upload-btn" title="Upload .md / .txt files">
+              <i data-lucide="upload" class="icon"></i> Upload
+              <input id="cfg-upload" type="file" multiple accept=".md,.txt,text/markdown,text/plain" hidden>
+            </label>
+            <button id="cfg-new-file" class="btn ghost"><i data-lucide="plus" class="icon"></i><span class="btn-label">New file</span></button>
+          </div>
+          <div class="files-split">
+            <ul id="cfg-file-list" class="cfg-file-list" aria-label="Files"></ul>
+            <div class="cfg-file-editor">
+              <div class="cfg-file-editor-head">
+                <input id="cfg-filename" class="cfg-filename" placeholder="filename.md" spellcheck="false">
+                <button id="cfg-save-file" class="btn primary tight">Save</button>
+                <button id="cfg-delete-file" class="btn danger ghost tight">Delete</button>
+              </div>
+              <textarea id="cfg-file-content" class="cfg-file-content" spellcheck="false"
+                placeholder="# Section&#10;&#10;Markdown for the character's wiki or dialogue transcript."></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mini chat -->
+        <div class="edit-pane hidden" data-edit="chat">
+          <div class="chat-wrap">
+            <div id="chat-log" class="chat-log" aria-live="polite"></div>
+            <form id="chat-form" class="chat-form">
+              <input id="cfg-chat-user" class="chat-user" value="user" title="Your user id" spellcheck="false">
+              <input id="chat-input" class="chat-input" placeholder="Say something to the character…" autocomplete="off">
+              <button id="chat-send" class="btn primary" type="submit">Send</button>
+              <button id="cfg-chat-clear" class="btn ghost" type="button" title="Clear this conversation view">Clear</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- Wizard modal: 5-step character creation.                         -->
+    <!-- ================================================================ -->
+    <div id="wiz-overlay" class="wiz-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="wiz-title">
+      <div class="wiz-card">
+        <header class="wiz-head">
+          <div>
+            <div class="wiz-eyebrow">New character</div>
+            <h2 id="wiz-title">Create a character</h2>
+          </div>
+          <button id="wiz-close" class="wiz-close" title="Cancel" aria-label="Cancel"><i data-lucide="x" class="icon"></i></button>
+        </header>
+
+        <ol id="wiz-stepper" class="wiz-stepper">
+          <li class="wiz-step active" data-step="1"><span class="wiz-dot">1</span><span class="wiz-step-label">Identity</span></li>
+          <li class="wiz-step" data-step="2"><span class="wiz-dot">2</span><span class="wiz-step-label">Wiki files</span></li>
+          <li class="wiz-step" data-step="3"><span class="wiz-dot">3</span><span class="wiz-step-label">Dialogues</span></li>
+          <li class="wiz-step" data-step="4"><span class="wiz-dot">4</span><span class="wiz-step-label">Memories</span></li>
+          <li class="wiz-step" data-step="5"><span class="wiz-dot">5</span><span class="wiz-step-label">Build</span></li>
+        </ol>
+
+        <!-- Step 1: Identity -->
+        <section class="wiz-pane active" data-step="1">
+          <p class="wiz-intro">Pick a name and a short description. The name becomes the character's folder and identifier.</p>
+          <label class="cfg-label" for="wiz-name">Name</label>
+          <input id="wiz-name" class="wiz-input" placeholder="e.g. Kurisu" autocomplete="off">
+          <label class="cfg-label" for="wiz-desc">Description / persona</label>
+          <textarea id="wiz-desc" class="cfg-textarea" rows="4"
+            placeholder="A short blurb describing who the character is. Optional but recommended."></textarea>
+          <p class="wiz-error hidden" id="wiz-err-1"></p>
+        </section>
+
+        <!-- Step 2: Wiki files -->
+        <section class="wiz-pane hidden" data-step="2">
+          <p class="wiz-intro">Drop the character's lore, story or reference docs. Markdown is chunked by header. Optional — you can add files later.</p>
+          <label class="btn ghost upload-btn" title="Upload wiki files">
+            <i data-lucide="upload" class="icon"></i> Upload wiki files
+            <input id="wiz-wiki-upload" type="file" multiple accept=".md,.txt,text/markdown,text/plain" hidden>
+          </label>
+          <ul id="wiz-wiki-list" class="wiz-file-list" aria-label="Wiki files"></ul>
+        </section>
+
+        <!-- Step 3: Dialogue files -->
+        <section class="wiz-pane hidden" data-step="3">
+          <p class="wiz-intro">Drop dialogue transcripts. Each turn should be <code>Speaker: text</code>, separated by blank lines. Optional.</p>
+          <label class="btn ghost upload-btn" title="Upload dialogue files">
+            <i data-lucide="upload" class="icon"></i> Upload dialogue files
+            <input id="wiz-dialogue-upload" type="file" multiple accept=".md,.txt,text/markdown,text/plain" hidden>
+          </label>
+          <ul id="wiz-dialogue-list" class="wiz-file-list" aria-label="Dialogue files"></ul>
+        </section>
+
+        <!-- Step 4: Memories -->
+        <section class="wiz-pane hidden" data-step="4">
+          <p class="wiz-intro">Pick which memories the character should maintain. Defaults are sensible; change only what you need.</p>
+          <div id="wiz-memories" class="cfg-memory-list"></div>
+          <label class="wiz-kg-row">
+            <input id="wiz-kg" type="checkbox" class="switch-input inline">
+            <span>Enable knowledge graph <span class="cfg-hint">(slower build; LLM extraction)</span></span>
+          </label>
+        </section>
+
+        <!-- Step 5: Build -->
+        <section class="wiz-pane hidden" data-step="5">
+          <p class="wiz-intro">Build the indexes. This chunks the files, embeds them, and (if enabled) runs knowledge-graph extraction. May take a while.</p>
+          <div id="wiz-build-status" class="wiz-build-status">Ready to build.</div>
+        </section>
+
+        <footer class="wiz-foot">
+          <button id="wiz-back" class="btn ghost">Back</button>
+          <span class="wiz-spacer"></span>
+          <button id="wiz-next" class="btn primary"><span class="btn-label">Next</span><i data-lucide="arrow-right" class="icon"></i></button>
+          <button id="wiz-build" class="btn primary hidden">Build</button>
+        </footer>
+      </div>
+    </div>
+  </div>
+  <script src="/gui/static/vendor/lucide.min.js?v=icons-1"
+    onerror="console.error('[CharacterMemory] Failed to load the Lucide icon bundle (/gui/static/vendor/lucide.min.js) — the GUI will render without icons. Hard-reload (Ctrl+Shift+R) or check the server static dir.')"></script>
+  <script src="/gui/static/app.js?v=mobile-3"></script>
+  <script src="/gui/static/config.js?v=k-zero-1"></script>
+</body>
+</html>

@@ -1,0 +1,509 @@
+
+"""Configuration objects for the whole character-memory library."""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+import os
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from pathlib import Path
+
+from ._dotenv import read_text, read_values
+
+
+def _load_dotenv() -> None:
+    """Minimal, dependency-free `.env` loader.
+
+    Reads literal `KEY=VALUE` lines from `.env` in the current directory
+    (falling back to the parent of this package) via :func:`os.environ.setdefault`, so
+    values already present in the real environment win. Runs at import time,
+    before the config dataclasses evaluate their `os.getenv` defaults.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for root in (os.getcwd(), os.path.dirname(here)):
+        path = os.path.join(root, ".env")
+        if not os.path.isfile(path):
+            continue
+        for key, value in read_values(read_text(Path(path))).items():
+            os.environ.setdefault(key, value)
+        break
+
+
+_load_dotenv()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _env_csv(name: str) -> list[str]:
+    return [part.strip() for part in os.getenv(name, "").split(",") if part.strip()]
+
+@dataclass
+class LLMConfig:
+    """Settings for a chat-completions client."""
+
+    base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    api_key: str = os.getenv("OPENAI_API_KEY", "")
+    model: str = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+    temperature: float = 0.7
+    max_tokens: int = 1024
+    timeout: float = 120.0
+
+
+@dataclass
+class TemporalLLMConfig:
+    """Dedicated endpoint used only by the opt-in LLM temporal engine."""
+
+    base_url: str = os.getenv(
+        "CM_TEMPORAL_LLM_BASE_URL",
+        os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
+    api_key: str = os.getenv("CM_TEMPORAL_LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    model: str = os.getenv("CM_TEMPORAL_LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))
+    timeout: float = float(os.getenv("CM_TEMPORAL_LLM_TIMEOUT", "30"))
+    max_tokens: int = int(os.getenv("CM_TEMPORAL_LLM_MAX_TOKENS", "768"))
+
+
+@dataclass
+class TemporalResolutionConfig:
+    """Automatic temporal resolution applied to memory recall.
+
+    The zero-network ``dateparser`` engine is enabled by default. Setting
+    ``engine: llm`` opts into exactly one LLM request per agent recall turn;
+    its endpoint is isolated under :attr:`llm`.
+    """
+
+    enabled: bool = _env_bool("CM_TEMPORAL_RESOLUTION_ENABLED", True)
+    engine: str = os.getenv("CM_TEMPORAL_RESOLUTION_ENGINE", "dateparser")
+    timezone: str = os.getenv("CM_TEMPORAL_RESOLUTION_TIMEZONE", "UTC")
+    weight: float = float(os.getenv("CM_TEMPORAL_RESOLUTION_WEIGHT", "1.0"))
+    # Empty uses the fast engine's broad built-in language set. Use ["*"] for
+    # every locale shipped by dateparser, trading a slower cold start for the
+    # widest coverage, or list specific ISO language codes.
+    languages: list[str] = field(
+        default_factory=lambda: _env_csv("CM_TEMPORAL_RESOLUTION_LANGUAGES")
+    )
+    llm: TemporalLLMConfig = field(default_factory=TemporalLLMConfig)
+
+    def __post_init__(self) -> None:
+        self.engine = str(self.engine).strip().lower()
+        if not self.engine:
+            raise ValueError("temporal_resolution.engine cannot be empty")
+        self.weight = max(0.0, min(1.0, float(self.weight)))
+        self.languages = [str(lang).strip() for lang in self.languages if str(lang).strip()]
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Unknown temporal-resolution timezone: {self.timezone!r}") from exc
+
+
+@dataclass
+class EmbeddingConfig:
+    """Settings for an embedding client."""
+
+    base_url: str = os.getenv("OPENAI_EMBEDDINGS_BASE_URL", "https://api.openai.com/v1")
+    api_key: str = os.getenv("OPENAI_EMBEDDINGS_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    model: str = os.getenv("OPENAI_EMBEDDINGS_MODEL", "text-embedding-ada-002")
+    dim: Optional[int] = None  # inferred from the first request if None
+    batch_size: int = 64
+    timeout: float = 120.0
+    # Optional role-specific transformations for asymmetric retrieval models.
+    # Empty strings preserve symmetric OpenAI-compatible behavior.
+    retrieval_query_prefix: str = ""
+    retrieval_document_prefix: str = ""
+    # Cosine floor for dense retrieval. None preserves the legacy closed-set
+    # behavior where FAISS always contributes its nearest candidates.
+    retrieval_min_similarity: Optional[float] = None
+
+
+@dataclass
+class ChunkingConfig:
+    """Chunker selection + parameters used at index time."""
+
+    info_chunker: str = "header"          # name in the chunker registry
+    dialogue_chunker: str = "dialogue"
+    header_max_tokens: int = 512
+    header_min_tokens: int = 64  # fragments below this are merged, not emitted
+    dialogue_turns_per_chunk: int = 6
+    dialogue_context_width: int = 3       # preceding turns carried as context
+
+
+@dataclass
+class DedupConfig:
+    """Deduplication behaviour for structured memories.
+
+    A memory entry is considered a duplicate when it passes every *enabled*
+    gate, evaluated in escalating order: exact match → similarity → LLM judge.
+    If `consolidate` is on, a confirmed duplicate is merged into one entry
+    instead of being dropped.
+
+    - `enabled`: master switch. When False, memories fall back to the legacy
+      exact-only guard.
+    - `exact`: case-insensitive, stripped string equality (cheapest gate).
+    - `similarity_threshold`: cosine similarity above which two entries are
+      considered candidate duplicates. `None` disables the similarity gate.
+    - `llm_judge`: when True, an LLM confirms that a similarity candidate is
+      genuinely the same information. Needs an `LLMClient`.
+    - `consolidate`: when True, confirmed duplicates are rewritten into a
+      single merged entry instead of the newer one being dropped. Needs an
+      `LLMClient`.
+    - `per_user`: during a sweep, only compare entries sharing a `user_id`.
+    - `candidate_pool`: per-item guard — how many RAG hits to re-rank.
+    """
+
+    enabled: bool = field(default_factory=lambda: _env_bool("CM_DEDUP_ENABLED", False))
+    exact: bool = True
+    similarity_threshold: Optional[float] = 0.92
+    llm_judge: bool = False
+    consolidate: bool = False
+    per_user: bool = True
+    candidate_pool: int = 10
+    # A supplied client or configured provider opts into decision reconciliation.
+    decision_provider: Optional[str] = field(default_factory=lambda: os.getenv("CM_DECISION_PROVIDER") or None)
+    decision_model: Optional[str] = field(default_factory=lambda: os.getenv("CM_DECISION_MODEL") or None)
+    decision_api_key: Optional[str] = None
+    decision_timeout: float = 30.0
+    decision_candidate_pool: int = 20
+    decision_max_request_bytes: int = 24000
+    duplicate_probability: float = 0.98
+    correction_probability: float = 0.99
+    decision_margin: float = 0.20
+    decision_llm_fallback: bool = True
+
+
+@dataclass
+class ContradictionPolicy:
+    """Per-memory policy for resolving contradicting facts.
+
+    Returned by :meth:`StructuredMemory.contradiction_policy`. When enabled,
+    the Deduplicator runs an extra gate — after dedup finds no duplicate —
+    that surfaces semantically close rows which *clash* and overwrites the
+    older row's text with the newer one's. Disabled by default; stable-fact
+    memories override it.
+
+    - `enabled`: master switch for this memory.
+    - `similarity_threshold`: cosine bar below the dedup threshold; catches
+      pairs that clash but are not restatements (e.g. "doctor" vs "engineer").
+    - `candidate_pool`: wider net than dedup's own pool, since contradictions
+      sit at lower similarity.
+    - `show_timestamps`: pass each row's `created_at` to the contradiction
+      judge so it can tell a genuine clash from a change over time.
+    """
+
+    enabled: bool = False
+    similarity_threshold: float = 0.70
+    candidate_pool: int = 20
+    show_timestamps: bool = True
+
+
+class KnowledgeGraphPrivacy(str, Enum):
+    """How user-scoped nodes participate in knowledge-graph retrieval."""
+
+    NONE = "none"
+    EXCLUDE = "exclude"
+    PRIVATE = "private"
+
+    @classmethod
+    def coerce(cls, value: object) -> "KnowledgeGraphPrivacy":
+        """Normalize config/API inputs while keeping ``None`` unrestricted."""
+        if value is None:
+            return cls.NONE
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("", "none", "null"):
+                return cls.NONE
+            try:
+                return cls(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "knowledge-graph privacy must be one of: none, exclude, private"
+                ) from exc
+        raise ValueError(
+            "knowledge-graph privacy must be one of: none, exclude, private"
+        )
+
+
+@dataclass
+class KnowledgeGraphConfig:
+    """Tunables for the optional knowledge-graph retriever.
+
+    See :doc:`docs/knowledge_graph` for the full design. The KG is off by
+    default; enable it via :attr:`MemoryConfig.enabled_knowledge_graph`.
+
+    - `decay`: ACT-R base-level learning decay parameter (d). Higher -> faster
+      forgetting.
+    - `privacy`: `none` keeps the shared graph unrestricted, `exclude` lets
+      hidden user nodes propagate but filters them from results, and `private`
+      calculates only over the active users' induced subgraph.
+    - `decay_half_life`: when > 0, an extra exponential recency factor
+      layered on top of the BLL (seconds).
+    - `gain` / `hops` / `hop_decay`: spreading-activation gain, max hops
+      (pinned at 2 by design), and per-hop attenuation.
+    - `hebbian_threshold` / `hebbian_lr`: nodes co-activating above the
+      threshold reinforce their co-occurrence edge by `hebbian_lr`.
+    - `fact_batch_size` / `episode_batch_size` / `wiki_batch_size`: maximum
+      source items handled in one KG extraction/ingestion batch.
+    - `extraction_token_limit`: maximum source-text tokens in one batch. The
+      prompt, JSON schema, and generated response add their own overhead.
+    - `project_heartbeat` / `project_world`: enable deterministic derived
+      graph views of those source memories. Heartbeats are importance-capped;
+      world events are capped and simulator events are excluded by default.
+      Authored world routines and mutable actor state are never projected.
+    - `world_location_seed`: transient retrieval boost for the observer's
+      current location; it does not persist current state as a graph fact.
+    - `activation_engine`: spreading-activation backend. `auto` picks the
+      NumPy snapshot engine on graphs at/above the size thresholds (see
+      :data:`character_memory.knowledge_graph.activation.NUMERIC_MIN_NODES`),
+      `scalar` forces the reference Python walker, `numeric` forces NumPy.
+    """
+
+    privacy: KnowledgeGraphPrivacy = KnowledgeGraphPrivacy.NONE
+    decay: float = 0.5
+    decay_half_life: float = 60 * 60 * 24 * 7  # one week
+    gain: float = 0.35
+    hops: int = 2
+    hop_decay: float = 0.6
+    base_weight: float = 1.0
+    spread_weight: float = 1.2
+    min_activation: float = 0.0
+    hebbian_threshold: float = 0.15
+    hebbian_lr: float = 0.05
+    self_seed: float = 0.8
+    match_base: float = 4.0
+    match_gain: float = 3.0
+    fact_batch_size: int = 50
+    episode_batch_size: int = 50
+    wiki_batch_size: int = 3
+    extraction_token_limit: int = 10_000
+    # Deterministic, no-LLM projections from character-scoped memories. The
+    # source memories remain authoritative; the graph stores only a derived
+    # view and reconciles it by source fingerprint.
+    project_heartbeat: bool = True
+    heartbeat_min_importance: float = 0.6
+    heartbeat_max_nodes: int = 200
+    project_world: bool = True
+    world_event_max_nodes: int = 500
+    world_include_simulation_events: bool = False
+    # Runtime-only activation boost for the observer's current location.
+    # The snapshot itself is never persisted into the graph.
+    world_location_seed: float = 0.6
+    activation_engine: str = "auto"
+
+    def __post_init__(self) -> None:
+        self.privacy = KnowledgeGraphPrivacy.coerce(self.privacy)
+        engine = str(self.activation_engine or "auto").strip().lower()
+        if engine not in ("auto", "scalar", "numeric"):
+            raise ValueError(
+                "knowledge-graph activation_engine must be one of: "
+                "auto, scalar, numeric"
+            )
+        self.activation_engine = engine
+
+
+@dataclass
+class WorldConfig:
+    """Configuration for the optional private character-world simulation."""
+
+    seed_file: str = "world.yaml"
+    auto_advance: bool = True
+    extract_updates: bool = True
+    allow_model_actions: bool = False
+
+
+@dataclass
+class CalendarConfig:
+    """Configuration for the optional character/user calendar."""
+
+    timezone: str = "UTC"
+    near_past_hours: int = 24
+    near_future_days: int = 14
+    import_world_routines: bool = True
+    extract_updates: bool = True
+
+
+@dataclass
+class MemoryConfig:
+    """Per-memory toggles and retrieval knobs.
+
+    Every memory can be enabled/disabled independently via `enabled_*`.
+    """
+
+    # Toggles
+    enabled_character_info: bool = True
+    enabled_dialogue_style: bool = True
+    enabled_user_facts: bool = True
+    enabled_user_directives: bool = True
+    enabled_episodic: bool = True
+    enabled_conversation_events: bool = True
+    enabled_emotion: bool = True
+    enabled_heartbeat: bool = True
+    enabled_user_summary: bool = True
+    enabled_world: bool = False
+    # Calendar is opt-in so existing characters do not suddenly learn from
+    # conversations or add a new prompt section.
+    enabled_calendar: bool = False
+    #: Knowledge-graph retriever is OFF by default; opt in per character
+    #: (e.g. the Kurisu asset flips this True) or via config.
+    enabled_knowledge_graph: bool = False
+
+    # Retrieval sizes. Most memories use a top-k item limit; the knowledge
+    # graph uses a prompt-token budget because graph nodes vary substantially
+    # in length (short entities versus full facts/episodes). ``0`` disables
+    # automatic prompt retrieval for that memory; MCP and tools still work.
+    character_info_k: int = 4
+    dialogue_style_k: int = 4
+    user_facts_k: int = 5
+    user_directives_k: int = 4
+    episodic_k: int = 4
+    conversation_events_k: int = 4
+    heartbeat_k: int = 4
+    user_summary_k: int = 2
+    world_k: int = 4
+    calendar_k: int = 8
+    knowledge_graph_token_budget: int = 1_000
+
+    # Shared maximum for rendered memory sections. None preserves unlimited
+    # prompt assembly; per-memory limits still bound the candidate pool.
+    token_budget: Optional[int] = None
+
+    # Structured Memory behavior
+    # Facts/directives whose effective importance is at/above this value are
+    # always injected into the prompt ("sticky"), regardless of the query.
+    sticky_threshold: float = 0.95
+    # Extraction of facts/directives/episodes runs every N turns.
+    extract_interval: int = 5
+    # Decay half-life (seconds). Used by facts/episodic/heartbeat.
+    decay_half_life: float = 60 * 60 * 24 * 3 # Three days
+    # How recalled items are timestamped in the prompt: "none", "absolute"
+    # (short local date+time, e.g. [2026-08-14 09:30]), "relative" (humanized
+    # age, e.g. [2 days ago]) or "both" (e.g. [2026-08-12 16:33 (2 days ago)]).
+    # Memories whose items carry no timestamp are rendered unchanged.
+    timestamp_style: str = "both"
+
+    # EMOTIONS
+    # Baseline (user-independent) emotion vector.
+    emotion_baseline: dict = field(
+        default_factory=lambda: {
+            "neutral": 0.5, "joy": 0.2, "sadness": 0.1, "anxiety": 0,
+            "anger": 0.1, "surprise": 0.1,
+        }
+    )
+    # Per-user dimensions maintained alongside the baseline.
+    emotion_user_dims: dict = field(
+        default_factory=lambda: {"affection": 0.0, "valence": 0.0, "trust": 0.0}
+    )
+
+    # DEDUPLICATION
+    dedup: DedupConfig = field(default_factory=DedupConfig)
+
+    # KNOWLEDGE GRAPH (optional, off by default — see enabled_knowledge_graph)
+    knowledge_graph: KnowledgeGraphConfig = field(default_factory=KnowledgeGraphConfig)
+
+    # PRIVATE WORLD SIMULATION
+    world: WorldConfig = field(default_factory=WorldConfig)
+    calendar: CalendarConfig = field(default_factory=CalendarConfig)
+
+    # HISTORY-AWARE RETRIEVAL
+    # Retrieval normally uses only the last user message as the query. These
+    # knobs widen that: the last `retrieval_history_window` user messages each
+    # drive their own hybrid search and the result lists are fused with
+    # weight-scaled RRF, where older messages contribute `retrieval_recency_decay`
+    # times less per step back (weight = decay ** i, most recent at i=0 = 1.0).
+    # ``window=1`` (or empty history) reproduces the legacy single-query path
+    # bit-for-bit; ``decay=1.0`` keeps every message in the window equally
+    # strong.
+    #: How many recent user messages to use as retrieval queries (most-recent
+    #: first, including the current one).
+    retrieval_history_window: int = 5
+    #: Per-step weight multiplier for older messages (0 < decay <= 1.0).
+    retrieval_recency_decay: float = 0.6
+
+    def __post_init__(self) -> None:
+        from .reranking import validate_budget
+
+        validate_budget(self.token_budget)
+
+    def is_enabled(self, name: str) -> bool:
+        return bool(getattr(self, f"enabled_{name}", False))
+
+    def k_for(self, name: str) -> int:
+        # Kept as a compatibility entry point for callers that predate
+        # ``retrieval_limit_for``. The KG value is now tokens, not nodes.
+        if name == "knowledge_graph":
+            return max(0, int(self.knowledge_graph_token_budget))
+        return max(0, int(getattr(self, f"{name}_k", 4)))
+
+    def retrieval_limit_for(self, name: str) -> int:
+        """Return the configured recall bound for ``name``.
+
+        The integer is a top-k item count for regular memories and a token
+        budget for the knowledge graph. Keeping this distinction here lets
+        the generic character orchestration continue to pass one per-memory
+        bound without treating KG nodes as if they had uniform sizes.
+        """
+        return self.k_for(name)
+
+
+@dataclass
+class StorageConfig:
+    """Optional production storage. URL may be supplied through CM_DATABASE_URL."""
+    backend: str = field(default_factory=lambda: os.getenv("CM_STORAGE_BACKEND", "sqlite"))
+    url: str = field(default_factory=lambda: os.getenv("CM_DATABASE_URL", ""), repr=False)
+    namespace: str = field(default_factory=lambda: os.getenv("CM_DATABASE_NAMESPACE", ""))
+    pool_min_size: int = field(default_factory=lambda: int(os.getenv("CM_DB_POOL_MIN_SIZE", "2")))
+    pool_max_size: int = field(default_factory=lambda: int(os.getenv("CM_DB_POOL_MAX_SIZE", "20")))
+    pool_timeout: float = field(default_factory=lambda: float(os.getenv("CM_DB_POOL_TIMEOUT", "30")))
+
+    def __post_init__(self):
+        if self.backend not in {"sqlite", "postgres"}:
+            raise ValueError("storage.backend must be sqlite or postgres")
+        if self.pool_min_size < 0 or self.pool_max_size < max(1, self.pool_min_size) or self.pool_timeout <= 0:
+            raise ValueError("Invalid database pool settings")
+
+
+@dataclass
+class RetrievalConfig:
+    """Hybrid backend; postgres requires PostgreSQL storage and pgvector >=0.8."""
+    backend: str = field(default_factory=lambda: os.getenv("CM_RETRIEVAL_BACKEND", "hybrid"))
+    text_search_config: str = field(default_factory=lambda: os.getenv("CM_TEXT_SEARCH_CONFIG", "simple"))
+    candidate_pool: int = field(default_factory=lambda: int(os.getenv("CM_RETRIEVAL_CANDIDATE_POOL", "30")))
+    rrf_k: int = 60
+    hnsw: bool = field(default_factory=lambda: _env_bool("CM_PGVECTOR_HNSW", True))
+    ef_search: int = field(default_factory=lambda: int(os.getenv("CM_PGVECTOR_EF_SEARCH", "100")))
+    batch_size: int = 256
+
+    def __post_init__(self):
+        if self.backend not in {"hybrid", "postgres"}:
+            raise ValueError("retrieval.backend must be hybrid or postgres")
+        if min(self.candidate_pool, self.ef_search, self.batch_size) < 1 or self.rrf_k < 0:
+            raise ValueError("Invalid retrieval settings")
+
+
+@dataclass
+class CharacterMemoryConfig:
+    """Top-level config: everything needed to build the whole system."""
+
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    temporal_resolution: TemporalResolutionConfig = field(
+        default_factory=TemporalResolutionConfig
+    )
+
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+
+    # Directory used for the SQLite store + persisted RAG indexes.
+    data_dir: str = ".cm_data"
+
+    @classmethod
+    def default(cls) -> "CharacterMemoryConfig":
+        """A config pointing at a local OpenAI-compatible server."""
+        return cls()
