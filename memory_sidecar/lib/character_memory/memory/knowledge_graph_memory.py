@@ -1,0 +1,350 @@
+"""`Memory` wrapper around the knowledge-graph retriever.
+
+This is the adapter that lets the :class:`KnowledgeGraphRetriever` plug into
+the agent like any other memory: it implements :class:`Memory`, renders an
+"Activated knowledge" prompt section, and routes persistence through the
+retriever. The retriever itself stays free of agent concerns.
+
+The memory keeps a back-reference to the *other* memories on the agent so
+the incremental :meth:`KnowledgeGraphRetriever.update` and
+:meth:`apply_deduplication` paths can resolve freshly-added items and
+dedupped source rows to graph nodes.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional
+
+from ..chunking import Chunk
+from ..config import KnowledgeGraphPrivacy
+from ..knowledge_graph import (
+    KnowledgeGraphConfig,
+    KnowledgeGraphRetriever,
+)
+from ..memory.store_base import Store
+from ..rag.base import RAGSystem
+from ..rag.base import Query
+from .base import Memory, MemoryItem, MemoryScope, RecallResult
+
+if TYPE_CHECKING:  # avoid a circular import at runtime
+    from ..memory.dedup import DedupReport
+    from ..temporal import TemporalResolution, TemporalResolutionEngine
+
+
+class KnowledgeGraphMemory(Memory):
+    """A memory whose recall is a knowledge-graph activation search.
+
+    `scope = PER_USER` so the agent recalls once per participant; the
+    queried user's PersonNode gets an activation bias in the retriever.
+    """
+
+    name = "knowledge_graph"
+    scope = MemoryScope.PER_USER
+    supports_temporal_resolution = True
+
+    def __init__(
+        self,
+        store: Store,
+        hybrid: RAGSystem,
+        *,
+        enabled: bool = True,
+        config: Optional[KnowledgeGraphConfig] = None,
+        token_budget: int = 1_000,
+        name: Optional[str] = None,
+    ) -> None:
+        super().__init__(enabled=enabled, name=name)
+        self.store = store
+        self.hybrid = hybrid
+        self.token_budget = max(0, int(token_budget))
+        self.retriever = KnowledgeGraphRetriever(config=config)
+        # Source memories are wired by the agent after construction (see
+        # :meth:`wire_sources`); the retriever's update/dedup paths need them.
+        self._sources: dict[str, Any] = {}
+
+    # ----------------------------------------------------------- wiring hooks
+    def wire_sources(self, memories: dict[str, Any]) -> None:
+        """Register the agent's other memories so incremental ingest works.
+
+        The agent calls this once during build; it lets the retriever resolve
+        a freshly-added `MemoryItem` (carrying `metadata.id`) back to its
+        source row for the `update` / `apply_deduplication` paths.
+        """
+        self._sources = {k: v for k, v in memories.items() if k != self.name}
+        self.retriever.sources_wired = True
+
+    def _source_memory_for(self, name: str) -> Optional[Any]:
+        return self._sources.get(name)
+
+    # --------------------------------------------------------------- lifecycle
+    def attach_backends(self, llm: Any, embedder: Any) -> None:
+        """Wire the LLM/embedder into the retriever (called by the agent)."""
+        self.retriever.load(llm, embedder, self.hybrid, store=self.store)
+        # Re-bind the source-memory resolver so update/dedup work post-attach.
+        self.retriever._source_memory_for = self._source_memory_for  # type: ignore[assignment]
+
+    # ---------------------------------------------------------------- Memory API
+    def recall(
+        self,
+        query: Query,
+        user_id: str,
+        limit: int,
+        state_changing: bool = True,
+        *,
+        temporal_resolution: bool | "TemporalResolution" | None = None,
+        temporal_resolution_engine: Optional["TemporalResolutionEngine"] = None,
+        temporal_weight: float = 1.0,
+    ) -> list[MemoryItem]:
+        """Recall nodes within ``limit`` prompt tokens.
+
+        ``Memory`` names its generic per-memory bound ``limit``; for the
+        knowledge graph that value is deliberately a token budget rather than
+        a node count.
+        """
+        if not self.enabled:
+            return []
+        resolution = self.resolve_temporal(
+            query, temporal_resolution, temporal_resolution_engine
+        )
+        return self.retriever.retrieve(
+            query,
+            user_id=user_id,
+            token_budget=limit,
+            state_changing=state_changing,
+            timestamp_style=self.timestamp_style,
+            temporal_resolution=resolution,
+            temporal_weight=temporal_weight,
+        )
+
+    def _activation_snapshot(
+        self,
+        items: list[MemoryItem],
+        *,
+        visible_ids: Optional[set[str] | frozenset[str]] = None,
+    ) -> dict[str, Any]:
+        """Copy the activation state produced by the just-finished recall.
+
+        The copy is request-local: the graph's transient node fields may be
+        overwritten by a later group participant or request, so the live
+        monitor must never read them after the context call returns.
+        """
+        activation = {
+            str(nid): float(getattr(node, "activation", 0.0))
+            for nid, node in self.retriever.graph.nodes.items()
+            if visible_ids is None or str(nid) in visible_ids
+        }
+        breakdowns = {}
+        for nid, node in self.retriever.graph.nodes.items():
+            if visible_ids is not None and str(nid) not in visible_ids:
+                continue
+            comp = getattr(node, "score_breakdown", None)
+            if isinstance(comp, dict) and comp:
+                breakdowns[str(nid)] = dict(comp)
+        surfaced = [
+            str(item.metadata.get("node_id"))
+            for item in items
+            if item.metadata.get("node_id") is not None
+        ]
+        return {
+            "activation": activation,
+            "breakdowns": breakdowns,
+            "retrieved_ids": list(dict.fromkeys(surfaced)),
+        }
+
+    def build_section_result(
+        self,
+        query: Query,
+        user_id: str,
+        limit: int,
+        state_changing: bool = True,
+        *,
+        temporal_resolution: bool | "TemporalResolution" | None = None,
+        temporal_resolution_engine: Optional["TemporalResolutionEngine"] = None,
+        temporal_weight: Optional[float] = None,
+    ) -> RecallResult:
+        result = super().build_section_result(
+            query,
+            user_id,
+            limit,
+            state_changing=state_changing,
+            temporal_resolution=temporal_resolution,
+            temporal_resolution_engine=temporal_resolution_engine,
+            temporal_weight=temporal_weight,
+        )
+        if result.items:
+            result.diagnostics = self._activation_snapshot(
+                result.items,
+                visible_ids=self.retriever.visible_node_ids(user_id=user_id),
+            )
+        return result
+
+    def build_section_participants_result(
+        self,
+        query: Query,
+        participants: list[str],
+        limit: int,
+        state_changing: bool = True,
+        *,
+        temporal_resolution: bool | "TemporalResolution" | None = None,
+        temporal_resolution_engine: Optional["TemporalResolutionEngine"] = None,
+        temporal_weight: Optional[float] = None,
+    ) -> RecallResult:
+        if not participants:
+            return RecallResult()
+        if len(participants) == 1:
+            return self.build_section_result(
+                query,
+                participants[0],
+                limit,
+                state_changing=state_changing,
+                temporal_resolution=temporal_resolution,
+                temporal_resolution_engine=temporal_resolution_engine,
+                temporal_weight=temporal_weight,
+            )
+        if not self.enabled:
+            return RecallResult()
+
+        if self.retriever._privacy_mode() is not KnowledgeGraphPrivacy.NONE:
+            resolution = self.resolve_temporal(
+                query, temporal_resolution, temporal_resolution_engine
+            )
+            items = self.retriever.retrieve(
+                query,
+                user_ids=participants,
+                token_budget=limit,
+                state_changing=state_changing,
+                timestamp_style=self.timestamp_style,
+                temporal_resolution=resolution,
+                temporal_weight=(
+                    self.temporal_resolution_weight
+                    if temporal_weight is None
+                    else temporal_weight
+                ),
+            )
+            if not items:
+                return RecallResult()
+            diagnostic = self._activation_snapshot(
+                items,
+                visible_ids=self.retriever.visible_node_ids(user_ids=participants),
+            )
+            return RecallResult(
+                items=items,
+                body=self.format(items),
+                diagnostics={
+                    "participants": {
+                        uid: dict(diagnostic) for uid in participants
+                    }
+                },
+            )
+
+        # Participant-specific activation is computed once, shared, then
+        # biased per speaker: the seed search, BLL and spreading run a single
+        # time and each participant's PersonNode bias is composed in
+        # linearly. Shared graph nodes are merged and recorded once. This
+        # prevents a global heartbeat/world/wiki node from being rendered and
+        # practiced once per human speaker in a group chat — and keeps a
+        # P-participant group from paying P full retrievals.
+        resolution = self.resolve_temporal(
+            query, temporal_resolution, temporal_resolution_engine
+        )
+        multi = self.retriever.retrieve_multi(
+            query,
+            user_ids=participants,
+            token_budget=limit,
+            timestamp_style=self.timestamp_style,
+            temporal_resolution=resolution,
+            temporal_weight=(
+                self.temporal_resolution_weight
+                if temporal_weight is None
+                else temporal_weight
+            ),
+        )
+        by_node: dict[str, MemoryItem] = {}
+        for uid in participants:
+            for item in multi.items.get(uid, ()):
+                node_id = str(item.metadata.get("node_id") or "")
+                current = by_node.get(node_id)
+                if current is None or item.score > current.score:
+                    by_node[node_id] = item
+        if not by_node:
+            return RecallResult()
+        items = list(by_node.values())
+        if state_changing:
+            self.retriever.record_recall(items)
+        visible = self.retriever.visible_node_ids(user_ids=participants)
+        by_participant: dict[str, dict[str, Any]] = {}
+        for uid in participants:
+            surfaced = [
+                str(item.metadata.get("node_id"))
+                for item in multi.items.get(uid, ())
+                if item.metadata.get("node_id") is not None
+            ]
+            by_participant[uid] = {
+                "activation": {
+                    nid: score
+                    for nid, score in multi.activation.get(uid, {}).items()
+                    if nid in visible
+                },
+                "breakdowns": {
+                    nid: dict(comp)
+                    for nid, comp in multi.breakdowns.get(uid, {}).items()
+                    if nid in visible
+                },
+                "retrieved_ids": list(dict.fromkeys(surfaced)),
+            }
+        body = self.format(items)
+        return RecallResult(
+            items=items,
+            body=body,
+            diagnostics={"participants": by_participant},
+        )
+
+    def get_memories(
+        self, limit: int = 0, *, include_internal: bool = False
+    ) -> list[MemoryItem]:
+        """Every public node, or every node when explicitly requested."""
+        items: list[MemoryItem] = []
+        visible = self.retriever.visible_node_ids(
+            include_internal=include_internal
+        )
+        nodes = [
+            node
+            for node in self.retriever.graph.nodes.values()
+            if node.id in visible
+        ]
+        for node in nodes[: limit or None]:
+            items.append(self.retriever._node_to_item(node, node.activation))
+        return items
+
+    def format(self, items: list[MemoryItem]) -> str:
+        if not items:
+            return ""
+        return self.retriever.format_items(items, timestamp_style=self.timestamp_style)
+
+    def format_selection(self, items: list[MemoryItem], participants: list[str]) -> str:
+        # Group retrieval already merges shared nodes and filters visibility.
+        return self.format(items)
+
+    def record_recall(self, items: list[MemoryItem]) -> None:
+        self.retriever.record_recall(items)
+
+    # ----------------------------------------------- build / persist / load stubs
+    def build(self, info_chunks: list[Chunk]) -> None:
+        # The graph is built from the source memories, not from info chunks;
+        # the agent drives ingestion explicitly. This is a no-op for the
+        # Memory ABC contract.
+        return None
+
+    def persist(self, path: str) -> None:
+        self.retriever.save(path)
+
+    def load(self, path: str) -> None:
+        self.retriever.load_persisted(path)
+
+    @property
+    def has_persisted(self) -> bool:
+        # Delegated to the retriever once it knows the index path; the agent
+        # passes that path explicitly at build time.
+        return False
+
+
+__all__ = ["KnowledgeGraphMemory"]

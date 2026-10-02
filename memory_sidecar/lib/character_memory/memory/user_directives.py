@@ -1,0 +1,134 @@
+"""User directives: per-user standing instructions with importance + keywords."""
+
+import json
+from typing import TYPE_CHECKING, Any, Optional
+
+from ..rag.base import Query, as_queries
+from .base import ExtractionSpec, MemoryItem
+from .structured import StructuredMemory
+
+if TYPE_CHECKING:  # avoid circular import at runtime
+    from .extract import ExtractionContext
+
+
+class UserDirectiveMemory(StructuredMemory):
+    """Standing instructions from a user.
+
+    Each row: `content` (the instruction), `retrieval_keywords` (a JSON list
+    whose presence in the query boosts recall), plus importance/decay fields.
+    """
+
+    name = "user_directives"
+    table = "user_directives"
+    extra_columns = {
+        "content": "TEXT NOT NULL",
+        "retrieval_keywords": "TEXT NOT NULL DEFAULT '[]'",  # JSON array
+        "source_message_ids": "TEXT NOT NULL DEFAULT '[]'",
+    }
+    text_column = "content"
+    supports_state_transitions = True
+
+    def add_directive(
+        self,
+        user_id: str,
+        content: str,
+        *,
+        importance: float = 0.5,
+        retrieval_keywords: list[str] | None = None,
+        source_message_ids: Optional[list[int]] = None,
+    ) -> int:
+        return self.add(
+            user_id,
+            importance,
+            content=content,
+            retrieval_keywords=json.dumps(retrieval_keywords or []),
+            source_message_ids=json.dumps(source_message_ids or []),
+        )
+
+    def _keywords(self, row: dict[str, Any]) -> list[str]:
+        try:
+            return list(json.loads(row.get("retrieval_keywords") or "[]"))
+        except (TypeError, ValueError):
+            return []
+
+    def _additional_relevance(
+        self,
+        query: Query,
+        rows_by_id: dict[int, dict[str, Any]],
+    ) -> dict[int, float]:
+        """Treat an explicit keyword match as maximum retrieval relevance."""
+        ql = " ".join(q for q, _ in as_queries(query)).lower()
+        return {
+            rid: 1.0
+            for rid, row in rows_by_id.items()
+            if any(kw and kw.lower() in ql for kw in self._keywords(row))
+        }
+
+    def row_text(self, row: dict[str, Any]) -> str:
+        kws = self._keywords(row)
+        kw_part = f" (keywords: {', '.join(kws)})" if kws else ""
+        return f"{row.get('content', '')}{kw_part}"
+
+    def row_item(self, row: dict[str, Any], score: float) -> MemoryItem:
+        return MemoryItem(text=row.get("content", ""), score=score, kind=self.name, metadata=dict(row))
+
+    # Extraction ----------------------------------------------------------
+    def extraction_spec(self, context: "ExtractionContext | None" = None) -> ExtractionSpec:
+        user = context.user_name if context else "the user"
+        char = context.character_name if context else "the character"
+        return ExtractionSpec(
+            field="directives",
+            per_user=True,
+            schema={
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "importance": {"type": "number"},
+                        "keywords": {"type": "array", "items": {"type": "string"}},
+                        "source_message_ids": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                        },
+                    },
+                    "required": [
+                        "content", "importance", "keywords",
+                        "source_message_ids",
+                    ],
+                },
+            },
+            instruction=(
+                f"- directives: standing instructions {user} asked {char} to follow "
+                f"(e.g. \"{user} wants {char} to always answer formally\"). Each "
+                f"`content` must be one self-contained full sentence. importance 0-1. "
+                f"keywords: terms that should trigger retrieval."
+            ),
+        )
+
+    def apply_extraction(self, value: Any, user_id: str, *, chat_id: Optional[str] = None) -> list[MemoryItem]:
+        added: list[MemoryItem] = []
+        for d in value or []:
+            content = (d.get("content") or "").strip()
+            source_message_ids = d.get("source_message_ids") or []
+            uid = str(d.get("user_id") or user_id)
+            if (
+                not content
+                or not source_message_ids
+                or self._has_text(uid, content, "content")
+            ):
+                continue
+            keywords = d.get("keywords") or []
+            # Multi-user: attribute to the participant the LLM named, else the
+            # caller's default user (the chat owner / current speaker).
+            row_id = self.add_directive(
+                uid,
+                content,
+                importance=self._clip(d.get("importance", 0.5)),
+                retrieval_keywords=keywords,
+                source_message_ids=source_message_ids,
+            )
+            row = self.get_row(row_id)
+            if row is not None:
+                added.append(self.row_item(row, self._effective(row)))
+        return added

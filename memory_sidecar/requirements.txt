@@ -1,0 +1,16 @@
+# CharacterMemory sidecar - install list for memory_sidecar/venv.
+# The memory library itself is vendored in lib/ (charactermemory 0.1.2,
+# GPL-3.0-or-later - see LICENSE-NOTE.md); this file pins its
+# third-party dependencies (versions as validated in the spike env).
+openai==3.19.2
+numpy==2.5.3
+llama-index-core==0.14.25
+llama-index-retrievers-bm25==0.8.0
+faiss-cpu==1.15.1
+rank-bm25==0.2.2
+tiktoken==0.14.0
+PyYAML==6.0.3
+dateparser==1.4.3
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+sentence-transformers==6.1.0

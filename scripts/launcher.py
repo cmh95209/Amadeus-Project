@@ -31,15 +31,43 @@ AMADEUS_PORTS = {
     "cm-sidecar": CM_PORT,
 }
 
-# CharacterMemory sidecar (spike; the folder is excluded from git, so its
-# absence simply means the app runs without long-term memory).
-CM_DIR = PROJECT_ROOT / "spike" / "character-memory" / "sidecar"
+# CharacterMemory sidecar (official component since Phase 4). Its venv is
+# created on first run by ensure_cm_sidecar(); if the engine is absent or
+# its install fails, the app simply runs without long-term memory (soft-fail).
+CM_DIR = PROJECT_ROOT / "memory_sidecar"
 
 
 def _cm_python() -> Path:
     rel = Path("venv") / "Scripts" / "python.exe" if os.name == "nt" \
         else Path("venv") / "bin" / "python"
-    return PROJECT_ROOT / "spike" / "character-memory" / rel
+    return CM_DIR / rel
+
+
+def ensure_cm_sidecar() -> bool:
+    """First-run install of the memory sidecar (mirrors the npm-install
+    pattern): create its venv and pip-install its pinned requirements.
+    Returns True when the sidecar can start. Never raises - the sidecar is
+    optional and its absence must not block the app."""
+    if not (CM_DIR / "cm_sidecar.py").exists():
+        return False
+    if _cm_python().exists():
+        return True
+    req = CM_DIR / "requirements.txt"
+    if not req.exists():
+        return False
+    print("[Launcher] Memory sidecar not installed yet - one-time setup "
+          "(creates its venv and downloads packages, a few minutes)...")
+    try:
+        subprocess.run([sys.executable, "-m", "venv", str(CM_DIR / "venv")],
+                       check=True)
+        subprocess.run([str(_cm_python()), "-m", "pip", "install",
+                        "-r", str(req)], check=True)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"[Launcher] WARNING: memory sidecar install failed ({e}) - "
+              "the app runs without long-term memory.")
+        return False
+    print("[Launcher] Memory sidecar installed.")
+    return True
 
 processes: list[subprocess.Popen] = []
 log_handles: list[IO[str]] = []
@@ -526,12 +554,14 @@ def run(no_browser: bool = False) -> None:
     )
     wait_for_port("GPT-SoVITS", GPT_PORT, gpt, timeout=180)
 
-    # CharacterMemory sidecar: the slowest starter (CPU embedder + index
-    # seed, ~30s), so it starts here and is waited on LAST - its startup
-    # overlaps the other children. Soft-fail on purpose: the app is fully
-    # functional without it (the bridge degrades to the no-memory baseline).
+    # CharacterMemory sidecar: the slowest starter (CPU embedder + lore
+    # index, ~30-60s with the shipped seed; a one-time cold lore build can
+    # take ~10 min, hence the 600s wait), so it starts here and is waited
+    # on LAST - its startup overlaps the other children. Soft-fail on
+    # purpose: the app is fully functional without it (the bridge degrades
+    # to the no-memory baseline).
     cm = None
-    if _cm_python().exists() and (CM_DIR / "cm_sidecar.py").exists():
+    if ensure_cm_sidecar():
         print("[Launcher] Starting CharacterMemory sidecar...")
         cm = start_process(
             "cm-sidecar",
@@ -539,7 +569,7 @@ def run(no_browser: bool = False) -> None:
             CM_DIR,
         )
     else:
-        print("[Launcher] CharacterMemory spike folder not found - "
+        print("[Launcher] CharacterMemory sidecar not available - "
               "continuing without long-term memory.")
 
     print("[Launcher] Starting Amadeus backend...")
@@ -560,7 +590,7 @@ def run(no_browser: bool = False) -> None:
 
     if cm is not None:
         try:
-            wait_for_port("cm-sidecar", CM_PORT, cm, timeout=180)
+            wait_for_port("cm-sidecar", CM_PORT, cm, timeout=600)
         except (TimeoutError, RuntimeError) as e:
             print("[Launcher] WARNING: cm-sidecar not ready - the app runs "
                   "without long-term memory:", e)
