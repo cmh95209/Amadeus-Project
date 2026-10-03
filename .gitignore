@@ -13,6 +13,9 @@ __pycache__/
 venv/
 # Per-machine marker: sidecar venv install complete (launcher.ensure_cm_sidecar)
 memory_sidecar/.venv_installed
+# Runtime caches dropped by the sidecar / test runs
+memory_sidecar/data-gym-cache/
+.pytest_cache/
 
 # =====================
 # Amadeus backend runtime data
