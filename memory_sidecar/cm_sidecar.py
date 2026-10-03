@@ -12,9 +12,16 @@ Design decisions:
 - Memories IN: character_info (lore RAG) + user_facts, episodic,
   user_summary, emotion, user_directives.
 - Memories OUT: world, knowledge graph, calendar (user decisions).
-- LLM: ninfer 127.0.0.1:8080 / qwen3.8-27b-nvfp4 ONLY (hard rule), thinking
-  DISABLED via chat_template_kwargs (required for this model - extraction
-  truncates otherwise).
+- LLM: follows the APP'S OWN settings (backend/llm_server.txt +
+  backend/data/llm_model.txt + backend/data/api_key.txt), so any local or
+  cloud server the app uses works. Thinking is DISABLED via
+  chat_template_kwargs when the server accepts it (required where
+  supported - the thinking budget otherwise truncates the extraction
+  JSON); servers that reject the parameter get one plain retry (mirrors
+  the app's maybe_strip_rejected_params). The LLM is NOT required at
+  startup: context serving is pure local retrieval, and if the model is
+  not loaded, learning simply pauses with turns queued - so switching
+  servers between launches can never kill the service.
 - Embeddings: Qwen3-Embedding-0.6B IN-PROCESS on CPU (zero VRAM; the GPU
   stays free for the 27B).
 - Data dir: backend/data/character_memory/ (its own SQLite + indexes; user
@@ -47,8 +54,6 @@ os.environ.setdefault("USERPROFILE", r"C:\Users\xlhhm")
 os.environ.setdefault("HOME", r"C:\Users\xlhhm")
 os.environ.setdefault("LOCALAPPDATA", r"C:\Users\xlhhm\AppData\Local")
 
-BASE = "http://127.0.0.1:8080/v1"   # HARD RULE: ninfer 8080 only
-MODEL = "qwen3.8-27b-nvfp4"
 HOST = "127.0.0.1"
 PORT = 9870
 USER_ID = "the user"
@@ -56,26 +61,64 @@ EXTRACT_INTERVAL = 10               # learn after every N new user turns
 DATA_DIR = os.path.join(PROJECT_ROOT, "backend", "data", "character_memory")
 ASSETS = os.path.join(HERE, "assets", "Kurisu")
 SEED_DIR = os.path.join(HERE, "seed_index")
+# LLM target: the app's own settings (same files the backend reads), so
+# the sidecar always follows whatever server/model the app talks to.
+SERVER_FILE = os.path.join(PROJECT_ROOT, "backend", "llm_server.txt")
+MODEL_FILE = os.path.join(PROJECT_ROOT, "backend", "data", "llm_model.txt")
+KEY_FILE = os.path.join(PROJECT_ROOT, "backend", "data", "api_key.txt")
 
 
 def log(msg):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, flush=True)
 
 
-def preflight():
-    """Read-only /v1/models probe (max allowed by the hard rule). Abort before
-    the service can serve if the LLM target is not the loaded model."""
-    assert ":8080" in BASE and ":8888" not in BASE, "LLM target must be ninfer 8080"
-    with urllib.request.urlopen(BASE + "/models", timeout=10) as r:
-        loaded = [m["id"] for m in json.load(r)["data"]]
-    if MODEL not in loaded:
-        raise SystemExit(f"LLM preflight FAILED: {MODEL} not loaded on 8080: {loaded}")
-    log(f"LLM preflight OK: {BASE} models={loaded}")
+def _read_app_llm():
+    """(server, model, key) from the app's own config files. Defaults only
+    if a file is missing/empty - the app always writes them, so this is
+    belt-and-braces."""
+    def _read(path, default):
+        try:
+            v = open(path, encoding="utf-8").read().strip()
+            return v or default
+        except OSError:
+            return default
+    return (_read(SERVER_FILE, "http://127.0.0.1:8080/v1"),
+            _read(MODEL_FILE, "qwen3.8-27b-nvfp4"),
+            _read(KEY_FILE, "unsloth"))
+
+
+def llm_ready(server, model, key, timeout=5.0):
+    """Read-only /models probe (the app does the same in test_server). True
+    only when the server answers AND the configured model is actually
+    loaded - the guard that prevents hitting a downloaded-but-not-loaded
+    model (the 2026-09-26 crash incident)."""
+    req = urllib.request.Request(server.rstrip("/") + "/models",
+                                 headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            loaded = [m["id"] for m in json.load(r)["data"]]
+        return model in loaded, loaded
+    except Exception:
+        return False, []
+
+
+def startup_llm_note():
+    """Best-effort startup note: is the configured LLM reachable RIGHT NOW?
+    Never fatal - the service starts either way; learning just resumes
+    once the model is loaded (llm_ready guards every learning batch)."""
+    server, model, key = _read_app_llm()
+    ok, loaded = llm_ready(server, model, key)
+    if ok:
+        log(f"LLM target OK: {server} model={model} (loaded: {loaded})")
+    else:
+        log(f"LLM target not reachable/loaded yet: {server} model={model} - "
+            f"starting anyway; learning resumes once it is (the app's LLM "
+            f"settings are re-read on every learning batch).")
 
 
 log("== amadeus charactermemory sidecar starting ==")
 t_start = time.time()
-preflight()
+startup_llm_note()
 
 t0 = time.time()
 from sentence_transformers import SentenceTransformer
@@ -117,24 +160,48 @@ class STEmbedder(EmbeddingProvider):
 
 
 class NonThinkingLLM(OpenAICompatibleLLM):
-    """Their client + the exact extra_body Amadeus's own thinking-off client
-    sends. REQUIRED: the model's thinking budget otherwise truncates the
-    extraction JSON (crash-incident rule; see WORKING_BRIEF)."""
+    """Their client + Amadeus's thinking-off extra_body. Thinking off is
+    REQUIRED where the server accepts it (the thinking budget otherwise
+    truncates the extraction JSON); servers that REJECT the parameter
+    (HTTP 400/422 - foreign local servers, cloud) get one plain retry,
+    mirroring the app's maybe_strip_rejected_params."""
     def chat(self, messages, *, temperature=None, max_tokens=None):
-        resp = self._client.chat.completions.create(
+        kw = dict(
             model=self.config.model, messages=messages,
             temperature=self.config.temperature if temperature is None else temperature,
             max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
+        try:
+            resp = self._client.chat.completions.create(
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}}, **kw)
+        except Exception as e:
+            msg = repr(e)
+            if not ("400" in msg or "422" in msg
+                    or "Bad Request" in msg or "Unprocessable" in msg):
+                raise
+            log("server rejected the thinking-off parameter - plain retry")
+            resp = self._client.chat.completions.create(**kw)
         return resp.choices[0].message.content or ""
 
 
-KEY = open(os.path.join(PROJECT_ROOT, "backend", "data", "api_key.txt"),
-           encoding="utf-8").read().strip()
-llm = NonThinkingLLM(LLMConfig(base_url=BASE, api_key=KEY, model=MODEL,
-                               temperature=0.0, max_tokens=2048, timeout=240.0))
 _emb = STEmbedder(_model)
+_llm = None
+_llm_sig = None
+
+
+def get_llm():
+    """LLM client built from the app's LIVE settings (hot reload: a server
+    switch in the app is picked up on the next learning batch)."""
+    global _llm, _llm_sig
+    server, model, key = _read_app_llm()
+    sig = (server, model)
+    if _llm is None or _llm_sig != sig:
+        _llm = NonThinkingLLM(LLMConfig(base_url=server, api_key=key, model=model,
+                                        temperature=0.0, max_tokens=2048,
+                                        timeout=240.0))
+        _llm_sig = sig
+        log(f"LLM client -> {server} model={model}")
+    return _llm
 
 
 def _seed_index():
@@ -162,7 +229,7 @@ memories = [
     UserDirectiveMemory(store, HybridSearch(_emb)),
 ]
 agent = CharacterAgent(directory=ASSETS, name="Kurisu", save_directory=DATA_DIR)
-agent.load(llm=llm, embedder=_emb, memories=memories)
+agent.load(llm=get_llm(), embedder=_emb, memories=memories)
 t0 = time.time()
 agent.build()
 log(f"agent built in {time.time()-t0:.1f}s (a ~508s number would mean a lore REBUILD)")
@@ -188,6 +255,19 @@ def _start_background_extract(chat_id: str) -> bool:
                 chat = agent.load_chat(chat_id)
                 if chat is None or not chat.unextracted():
                     break
+                ok = False
+                server, model, key = _read_app_llm()
+                for _attempt in range(5):   # bounded wait: the model server
+                    ok, _loaded = llm_ready(server, model, key)  # may start after the app
+                    if ok:
+                        break
+                    time.sleep(30)
+                if not ok:
+                    log(f"extraction paused for chat {chat_id}: LLM not ready "
+                        f"({server} model={model}) - turns stay queued; they "
+                        f"resume on the next learning trigger")
+                    break
+                agent.llm = get_llm()   # follow any app-side server switch
                 agent.extract(target=chat)
             log(f"extraction complete for chat {chat_id} ({time.time()-t0:.0f}s)")
         except Exception as e:
@@ -234,8 +314,10 @@ def _get_or_create_chat(chat_id: str, user: str, title: str) -> Chat:
 @app.get("/health")
 def health():
     un = sum(len(c.unextracted()) for c in agent.list_chats())
+    server, model, key = _read_app_llm()
+    ok, _loaded = llm_ready(server, model, key, timeout=3.0)
     return {"ok": True, "service": "amadeus-cm-sidecar", "character": "Kurisu",
-            "port": PORT, "llm": {"base": BASE, "model": MODEL},
+            "port": PORT, "llm": {"base": server, "model": model, "ready": ok},
             "chats": len(agent.list_chats()), "unextracted": un,
             "extracting": sorted(_extracting_chats), "pid": os.getpid()}
 
