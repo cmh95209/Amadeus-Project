@@ -11,6 +11,8 @@ __pycache__/
 *.env
 .venv/
 venv/
+# Per-machine marker: sidecar venv install complete (launcher.ensure_cm_sidecar)
+memory_sidecar/.venv_installed
 
 # =====================
 # Amadeus backend runtime data

@@ -43,29 +43,64 @@ def _cm_python() -> Path:
     return CM_DIR / rel
 
 
+def _cm_marker() -> Path:
+    """Install-complete marker: its existence means the venv holds ALL the
+    pinned packages (it is written only after a fully successful pip run)."""
+    return CM_DIR / ".venv_installed"
+
+
+def _pip_install_sidecar() -> bool:
+    """pip-install the sidecar's pinned requirements into its venv.
+    Returns True on success (the marker is written by the caller only then)."""
+    req = CM_DIR / "requirements.txt"
+    try:
+        subprocess.run([str(_cm_python()), "-m", "pip", "install",
+                        "-r", str(req)], check=True)
+        return True
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"[Launcher] WARNING: memory sidecar install failed ({e}) - "
+              "the app runs without long-term memory (retried at next "
+              "start).")
+        return False
+
+
 def ensure_cm_sidecar() -> bool:
     """First-run install of the memory sidecar (mirrors the npm-install
     pattern): create its venv and pip-install its pinned requirements.
-    Returns True when the sidecar can start. Never raises - the sidecar is
-    optional and its absence must not block the app."""
+    An interrupted first run (crash or PC off mid-download) can never
+    masquerade as a complete install: the .venv_installed marker is written
+    only after a fully successful pip run, so the next launch re-runs the
+    missing part instead of starting a broken service. Returns True when
+    the sidecar can start. Never raises - the sidecar is optional and its
+    absence must not block the app."""
     if not (CM_DIR / "cm_sidecar.py").exists():
         return False
-    if _cm_python().exists():
-        return True
     req = CM_DIR / "requirements.txt"
     if not req.exists():
         return False
-    print("[Launcher] Memory sidecar not installed yet - one-time setup "
-          "(creates its venv and downloads packages, a few minutes)...")
-    try:
-        subprocess.run([sys.executable, "-m", "venv", str(CM_DIR / "venv")],
-                       check=True)
-        subprocess.run([str(_cm_python()), "-m", "pip", "install",
-                        "-r", str(req)], check=True)
-    except (subprocess.CalledProcessError, OSError) as e:
-        print(f"[Launcher] WARNING: memory sidecar install failed ({e}) - "
-              "the app runs without long-term memory.")
-        return False
+    if _cm_python().exists() and _cm_marker().exists():
+        return True
+    if _cm_python().exists():
+        print("[Launcher] Memory sidecar venv exists but its install is "
+              "unverified (an earlier run was interrupted?) - re-running "
+              "its pip install...")
+        if not _pip_install_sidecar():
+            return False
+    else:
+        print("[Launcher] Memory sidecar not installed yet - one-time setup "
+              "(creates its venv and downloads packages, a few minutes)...")
+        try:
+            subprocess.run([sys.executable, "-m", "venv", str(CM_DIR / "venv")],
+                           check=True)
+        except (subprocess.CalledProcessError, OSError) as e:
+            print(f"[Launcher] WARNING: memory sidecar venv creation "
+                  f"failed ({e}) - the app runs without long-term memory.")
+            return False
+        if not _pip_install_sidecar():
+            return False
+    _cm_marker().write_text(
+        "installed " + time.strftime("%Y-%m-%dT%H:%M:%S") + "\n",
+        encoding="utf-8")
     print("[Launcher] Memory sidecar installed.")
     return True
 
