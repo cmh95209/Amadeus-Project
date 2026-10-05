@@ -1,24 +1,41 @@
 # -*- coding: utf-8 -*-
-"""Offline checks for cross-conversation greeting awareness (2026-09-21).
+"""Offline checks for cross-conversation greeting awareness (2026-09-21) and
+the situation engine that replaced the widen/cross-note design
+(2026-10-05 rework).
 
-A greeting is aimed at the PERSON, not at a thread: before this change the
-timing anchor was the active tab's last user message, so with a 2-day-old
-conversation open in another tab, opening a 7-day-old tab made her greet
-the user as if he had been gone a week. The fix (greeting path only):
+A greeting is aimed at the PERSON, not at a thread: the 2026-09-21 change
+widened the absence anchor to the user's newest message ANYWHERE and added a
+bounded cross-conversation digest. Live testing then showed a weak model
+still composing false gaps out of the raw numbers (a 40.8 h gap labelled
+"about a week ago" by the phrase table; a "welcome back" re-fired every
+time the app was closed and reopened over a greeting the user never
+answered). The 2026-10-05 rework (greeting path only):
 
-  1. the absence anchor widens to the user's newest message ANYWHERE when
-     it is more recent than the greeted conversation's own and within
-     GREETING_ANCHOR_ELAPSED_CAP (30 days) - "how long have I been away"
-     is about the user, not the tab;
-  2. a bounded cross-conversation note (other_conversation_facts: at most
-     3 other tabs, 120-char content each, 30-day cutoff, prompt-only)
-     hands her what was said where, so she can ask how the other thing
-     turned out - a digest, never a merge;
-  3. a switch is a TOPIC-SWITCH acknowledgment, not a second welcome-back:
-     the main anchor stays the per-tab gap, the framing is a topic change,
-     the cross note is suppressed, and the previous tab (the one the user
-     LEFT) is named via load_previous_tab_summary. There are NO
-     staleness/cooldown gates - a line is voiced on every switch.
+  1. compute_greeting_situation() decides ONE locked situation from the
+     measured data and writes the truth line itself (the phrase is the
+     code's, never the model's):
+       - "unanswered": the last line of the tab is one of HER OWN greetings
+         and the user never answered it (fresh < 2 h or stale) - this is
+         NOT a welcome-back moment;
+       - "first": nothing stored anywhere;
+       - "continuous": the user's newest message ANYWHERE is within the
+         2 h presence window (this tab or another) - they were never away;
+       - "return": the newest message anywhere is older than the window -
+         a genuine absence, a brief welcome-back is right;
+       - "unknown": user rows exist but no usable timestamp;
+  2. the other-tab digests (other_conversation_facts: at most 3 tabs, 30
+     day cutoff) now quote the conversation's ROLLING SUMMARY when one
+     exists (what the whole thread was about) and fall back to the newest
+     user line - a digest, never a merge;
+  3. on a switch the previous tab (the one the user LEFT) is still named
+     via load_previous_tab_summary, and the flat "you have already greeted
+     this tab N times" backstop is kept. The OLD return-vs-switch framing
+     is gone: a switch that lands after a genuine absence IS a
+     welcome-back, and one within the presence window is a continuation -
+     the situation, not the mode, decides the frame.
+  4. chat.py checks the generated pack against the situation (the
+     time-lie net, covered in tests/test_greeting_net.py) and splices the
+     sidecar recall block like replies do (never mirrored back).
 
 Normal replies are untouched: load_internal_context() without is_greeting
 is scope-guarded below. All seeds are deterministic (fixed "now").
@@ -114,12 +131,20 @@ class _StoreHarness:
         self._p_db = patch.object(store, "PATH_TO_MEMORY", self.mem_db)
         self._p_act = patch.object(store, "PATH_TO_ACTIVE_CONV",
                                    self.active_file)
+        # 2026-10-05: generate_greeting reads the sidecar recall block like
+        # replies do - keep the tests hermetic (no live sidecar, no dead
+        # port timeouts) by returning None, the sidecar-less baseline.
+        self._p_bridge = patch.object(
+            chat, "cm_bridge",
+            SimpleNamespace(fetch_memory_block=lambda *a, **k: None))
         self._p_db.start()
         self._p_act.start()
+        self._p_bridge.start()
 
     def close(self):
         self._p_db.stop()
         self._p_act.stop()
+        self._p_bridge.stop()
         self.tmp.cleanup()
 
     def conn(self):
@@ -315,7 +340,11 @@ class PreviousTabSummaryTests(unittest.TestCase):
 
 
 class CrossTabTimingTests(unittest.TestCase):
-    """load_internal_context: the widened anchor + the cross note."""
+    """load_internal_context (2026-10-05): the locked SITUATION line.
+
+    The code decides the situation and writes the truth line; the old
+    widen/cross-note wording is gone from the greeting block.
+    """
 
     def setUp(self):
         self.h = _StoreHarness()
@@ -324,118 +353,148 @@ class CrossTabTimingTests(unittest.TestCase):
     def _seed(self):
         return _seed_live_shape(self.h)
 
-    def test_widened_anchor_and_cross_note(self):
+    def test_return_cross_tab_truth_line_and_digests(self):
+        # Greeting c1 while the user's newest message anywhere is in c3
+        # (2d19h -> beyond the 2h presence window): a RETURN, and the truth
+        # line names the measured phrase, the exact time, and the tab.
         c1, c3, c4 = self._seed()
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=c1)["content"]
-        # The MAIN timing line is widened to the global anchor (2d19h ->
-        # "two days ago"), not the tab's own 8d -> "about a week".
-        self.assertIn(
-            "Put casually, the last message was two days ago.",
-            content)
-        self.assertIn(
-            "Time since previous user message: approximately 2 days, 19 hours.",
-            content)
-        self.assertNotIn("No previous user message", content)
-        # The cross note carries both numbers, labeled, plus the other tab.
-        self.assertIn(CROSS_MARK, content)
-        self.assertIn(
-            "Overall you last talked to me two days ago "
-            "(2026-09-18 23:30), in a different conversation", content)
+        self.assertIn("Private timing context for this greeting only:",
+                      content)
+        self.assertIn("SITUATION:", content)
+        self.assertIn("the last time you talked was two days ago",
+                      content)
+        self.assertIn("(2026-09-18 23:30)", content)
+        self.assertIn('"Goodnight"', content)
+        self.assertIn("genuinely away", content)
+        # The anchor tab's digest (no rolling summary -> newest user line).
         self.assertIn("good night, i'll look forward to talking to you",
                       content)
+        # The other-tab digest line + the steering tail...
         self.assertIn(
-            "In THIS conversation your last message was about a week ago",
-            content)
-        self.assertIn("plot twists in Conan", content)
-        self.assertIn("Also in \"Genshin\" (about a week ago)", content)
+            'Also in "Genshin" (about a week ago): '
+            "What are the anniversary rewards for version 7.1", content)
         self.assertIn("you just know", content)
-        # Order: the cross block sits between the timing line and the
-        # accuracy guard.
-        self.assertLess(content.index("- " + CROSS_MARK),
-                        content.index("- When you mention how long"))
+        # ...and the new compact tail (voice is hers, facts are fenced).
+        self.assertIn("Never state a time gap or absence that contradicts",
+                      content)
+        # Order: the truth line precedes the other-tab digests.
+        self.assertLess(content.index("SITUATION:"),
+                        content.index('Also in "Genshin"'))
+        # The pre-rework wording is gone.
+        self.assertNotIn(CROSS_MARK, content)
+        self.assertNotIn("Put casually, the last message was", content)
+        self.assertNotIn("Time since previous user message", content)
 
-    def test_greeted_tab_holds_global_anchor_no_cross_note(self):
+    def test_return_same_tab_keeps_per_tab_phrase(self):
+        # The greeted tab holds the global anchor: the truth line is the
+        # per-tab variant (no other-tab naming), still a genuine return.
         c1, c3, c4 = self._seed()
         self.h.set_active(c3)
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=c3)["content"]
-        self.assertNotIn(CROSS_MARK, content)
         self.assertIn(
-            "Put casually, the last message was two days ago.", content)
-        # Zero-cost case: the (empty) cross_block must not leave a blank line.
-        self.assertNotIn("- This is a return moment\n\n-", content)
-        self.assertIn("This is a return moment after a real absence",
-                      content)
+            "the user's last message in this conversation was two days ago",
+            content)
+        self.assertIn("genuinely away", content)
+        self.assertNotIn("in the conversation", content)
+        self.assertNotIn(CROSS_MARK, content)
 
-    def test_empty_greeted_tab_widens_without_cross_note(self):
+    def test_empty_greeted_tab_is_a_return(self):
+        # The user has never spoken in the greeted tab: the global anchor
+        # still decides (2d19h -> return), and the fact says so.
         self._seed()
         fresh = self.h.new_conv("Fresh")
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=fresh)["content"]
-        self.assertIn(
-            "Put casually, the last message was two days ago.", content)
-        self.assertNotIn("No previous user message", content)
+        self.assertIn("the last time you talked was two days ago", content)
+        self.assertIn("They have not sent a message in this conversation "
+                      "yet.", content)
         self.assertNotIn(CROSS_MARK, content)
 
-    def test_anchor_beyond_cap_keeps_tab_wording(self):
-        # The ONLY user message anywhere is 40 days old (beyond the cap):
-        # the empty greeted tab keeps its own wording; nothing is implied.
+    def test_old_anchor_is_still_a_return(self):
+        # The only user message anywhere is 40 days old: the pre-rework
+        # 30-day cap would have hidden it ("no previous message" wording);
+        # the rework tells the truth at any age.
         stale_c = self.h.new_conv("Ancient")
         uid = store.append_message("user", "long ago", stale_c)
         self.h.set_created(uid, NOW - timedelta(days=40))
         fresh = self.h.new_conv("Fresh")
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=fresh)["content"]
-        self.assertIn("No previous user message is recorded.", content)
-        self.assertNotIn(CROSS_MARK, content)
+        self.assertIn("about two months ago", content)
+        self.assertIn("genuinely away", content)
+        self.assertNotIn("No previous user message is recorded.", content)
 
     def test_normal_reply_is_scoped_out(self):
         c1, c3, c4 = self._seed()
         self.h.set_active(c1)
         content = store.load_internal_context(now=NOW)["content"]
+        self.assertNotIn("SITUATION:", content)
         self.assertNotIn(CROSS_MARK, content)
-        # The normal reply keeps the active tab's own anchor.
+        # The normal reply keeps the active tab's own anchor (pre-rework
+        # wording, untouched).
         self.assertIn(
             "Put casually, the last message was about a week ago.", content)
 
     def test_is_greeting_without_conversation_id_unchanged(self):
         # Regression guard: the pre-change call shape (is_greeting=True, no
-        # conversation_id) still works - it cannot compare tabs, so it keeps
-        # the active tab's anchor and no cross note.
+        # conversation_id) keeps the old per-tab facts block byte-for-byte.
         c1, c3, c4 = self._seed()
         self.h.set_active(c1)
         content = store.load_internal_context(now=NOW, is_greeting=True)["content"]
+        self.assertNotIn("SITUATION:", content)
         self.assertNotIn(CROSS_MARK, content)
         self.assertIn("about a week ago", content)
 
-    def test_switch_frame_is_a_topic_switch_not_a_welcome_back(self):
-        # A switch is NOT a return: the main anchor stays the per-tab gap
-        # (8d -> "about a week ago", NOT the widened 2d "two days ago"), the
-        # framing is a topic change, the cross note is suppressed (the
-        # prev-tab line replaces it), and the previous tab is named.
+    def test_switch_after_genuine_absence_is_a_return(self):
+        # The OLD rule ("a switch is never a welcome-back") is gone: the
+        # user was genuinely away (last contact 2d19h ago, beyond the 2h
+        # presence window), so a switch that lands now IS a return - and
+        # the previous tab (where they were) is still named.
         c1, c3, c4 = self._seed()
         self.h.set_active(c1)
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=c1,
             is_return=False, previous_conversation_id=c3)["content"]
-        # Main line: the per-tab anchor, NOT the widened global one (2d).
-        self.assertIn(
-            "Put casually, the last message was about a week ago.", content)
-        self.assertNotIn(
-            "Put casually, the last message was two days ago.", content)
-        self.assertNotIn("This is a return moment", content)
-        # The topic-switch framing is explicit.
-        self.assertIn(
-            "The user is now reading this conversation",
-            content)
-        # The cross note is suppressed on a switch...
-        self.assertNotIn(CROSS_MARK, content)
-        # ...and replaced by the previous-tab line.
+        self.assertIn("SITUATION:", content)
+        self.assertIn("the last time you talked was two days ago", content)
+        self.assertIn("genuinely away", content)
+        # The previous-tab re-orientation line (pure data + its phrase).
+        # Its phrase is computed from the REAL clock (the seed is pinned to
+        # a fixed date), so it is run-dependent - assert the invariant.
         self.assertIn(
             '- You were just in the conversation "Goodnight"', content)
-        # The prev-tab line is pure data now: no instruction tail.
-        self.assertNotIn("acknowledge the topic change", content)
+        self.assertIn('its last line was: "Rest well."', content)
+        # The pre-rework framing wording is gone.
+        self.assertNotIn("This is a return moment", content)
+        self.assertNotIn("The user is now reading this conversation",
+                         content)
+        self.assertNotIn(CROSS_MARK, content)
+
+    def test_switch_within_presence_window_is_a_continuation(self):
+        # The user was in c3 30 minutes ago (inside the 2h window) and now
+        # switches to c1: a CONTINUATION - no welcome-back allowed, even
+        # though c1's own last message is days old.
+        c1, c3, c4 = self._seed()
+        # Move c3's user line inside the presence window (keep c1 at 8d).
+        u3 = self.h.conn().execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user'",
+            (c3,)).fetchone()[0]
+        self.h.set_created(u3, NOW - timedelta(minutes=30))
+        a3 = self.h.conn().execute(
+            "SELECT id FROM messages WHERE conversation_id = ? AND role = 'assistant'",
+            (c3,)).fetchone()[0]
+        self.h.set_created(a3, NOW - timedelta(minutes=30))
+        content = store.load_internal_context(
+            now=NOW, is_greeting=True, conversation_id=c1,
+            is_return=False, previous_conversation_id=c3)["content"]
+        self.assertIn("SITUATION:", content)
+        self.assertIn("they were not away from you", content)
+        self.assertIn("in the conversation \"Goodnight\"", content)
+        self.assertNotIn("genuinely away", content)
+        self.assertNotIn("welcome-back is right", content)
 
     def test_switch_frame_without_previous_id_has_no_prev_tab_line(self):
         c1, c3, c4 = self._seed()
@@ -443,14 +502,16 @@ class CrossTabTimingTests(unittest.TestCase):
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=c1,
             is_return=False)["content"]
-        self.assertIn("The user is now reading this conversation", content)
         self.assertNotIn("You were just in the conversation", content)
+        self.assertNotIn("already greeted this tab", content)
         self.assertNotIn(CROSS_MARK, content)
 
     def test_switch_frame_reports_recent_repeat_greetings(self):
-        # The deterministic backstop: two of her own greeting lines in this
-        # tab within the 30-minute window (a quick bounce) are told to her
-        # flatly, on the switch frame only.
+        # The deterministic backstop (kept from 2026-09-23): two of her own
+        # greeting lines in this tab within the 30-minute window (a quick
+        # bounce) are told to her flatly, on the switch frame only. The
+        # last line is now one of her greetings, so the SITUATION is
+        # unanswered (fresh) - and still not a welcome-back.
         c1, c3, c4 = self._seed()
         self.h.set_active(c1)
         g1 = store.append_message("assistant", "welcome back, line one",
@@ -465,6 +526,7 @@ class CrossTabTimingTests(unittest.TestCase):
         self.assertIn(
             "- You have already greeted this tab 2 times in the last 30 "
             "minutes.", content)
+        self.assertIn("This is not a welcome-back moment", content)
 
     def test_repeat_fact_absent_below_threshold_and_in_startup_frame(self):
         c1, c3, c4 = self._seed()
@@ -477,8 +539,8 @@ class CrossTabTimingTests(unittest.TestCase):
             now=NOW, is_greeting=True, conversation_id=c1,
             is_return=False)["content"]
         self.assertNotIn("already greeted this tab", content)
-        # Two recent greetings: the fact is switch-only - the startup
-        # (return) frame stays clean of it.
+        # Two recent greetings: the fact is switch-only - the startup frame
+        # stays clean of it.
         g2 = store.append_message("assistant", "welcome back, line two",
                                   c1, is_greeting=True)
         self.h.set_created(g2, NOW - timedelta(minutes=5))
@@ -499,8 +561,14 @@ class SwitchGreetingGenerationTests(unittest.TestCase):
         return h, c1, c3, c4
 
     def _run(self, h, c1, c3, mode, conversation_id, active_for_run,
-             previous_conversation_id=None):
-        fake = _FakeLLM()
+             previous_conversation_id=None, eng=None, jps=None):
+        # Default pack: "Welcome back." - situation-safe on a RETURN
+        # (genuine absence) but a lie on a fresh UNANSWERED tab, where the
+        # 2026-10-05 time-lie net bounces it (covered in
+        # test_greeting_net.py). Tests whose situation is unanswered pass a
+        # clean pack to focus on the steering they assert on.
+        fake = _FakeLLM(eng=eng or "Welcome back.",
+                        jps=jps or "おかえり。")
         fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
             "role": "system", "content": VOICELINE_MARK + " (trust 62)"})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
@@ -554,35 +622,41 @@ class SwitchGreetingGenerationTests(unittest.TestCase):
         store.append_message(
             "assistant", "the second old switch line", c1, is_greeting=True,
             japanese="old greeting ja two")
+        # Net-clean canned line (the tab's situation is a fresh UNANSWERED,
+        # where the default "Welcome back." would be bounced by the
+        # time-lie net - that behavior is covered in test_greeting_net.py).
         fake, result, exc, rows = self._run(
             h, c1, c3, mode="switch", conversation_id=c1, active_for_run=c1,
-            previous_conversation_id=c3)
+            previous_conversation_id=c3,
+            eng="So you're here. Good.", jps="ふーん、来たんだ。")
         self.assertIsNone(exc)
         pack, assistant_id, conv_id = result
         self.assertEqual(conv_id, c1)
         self.assertEqual(len(rows), 3)  # two old greetings + the new one
         self.assertEqual(rows[-1][3], c1)
         self.assertEqual(rows[-1][0], assistant_id)
+        self.assertEqual(rows[-1][2], "So you're here. Good.")
+        self.assertEqual(fake.calls, 1)  # the net let the line through
         messages = fake.last_messages
         system = [m for m in messages if m["role"] == "system"]
         self.assertEqual(len(system), 1)
         content = system[0]["content"]
         self.assertIn(GREET_SWITCH_MARK, content)
+        # 2026-10-05: the timing block is now the SITUATION frame. Here the
+        # tab's last line is one of her greetings the user never answered,
+        # so the locked situation is "unanswered" (NOT a welcome-back). The
+        # greeting's timestamp uses the real clock (the seed is pinned to a
+        # fixed date), so the exact phrase is run-dependent - assert the
+        # invariants instead.
+        self.assertIn("SITUATION:", content)
+        self.assertIn("This is not a welcome-back moment", content)
+        # The previous-tab re-orientation line (the tab the user LEFT).
         self.assertIn('You were just in the conversation "Goodnight"',
                       content)
-        self.assertIn(
-            "The user is now reading this conversation",
-            content)
-        # The per-tab anchor uses the REAL clock while the seed is pinned to
-        # a fixed date, so the phrase is run-dependent - assert the invariant
-        # instead: the main anchor is NOT the widened global one ("two days
-        # ago") and NOT a return moment. (The unit test pins the exact phrase
-        # with a fixed now.)
+        # The pre-rework framing wording is gone.
         self.assertNotIn(
-            "Put casually, the last message was two days ago.", content)
+            "The user is now reading this conversation", content)
         self.assertNotIn("This is a return moment", content)
-        # The cross note is suppressed on a switch (the prev-tab line is the
-        # re-orientation).
         self.assertNotIn(CROSS_MARK, content)
         # The directive lives on the ARRIVAL line now, not in the system
         # notes (the position it was ignored from).
