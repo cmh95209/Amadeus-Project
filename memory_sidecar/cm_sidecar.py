@@ -32,7 +32,11 @@ Design decisions:
 Endpoints:
   GET  /health
   POST /save     {chat_id, role, content, user?, title?, occurred_at?}
-  GET  /context?chat_id=...&user=...   -> rendered memory block ("" if empty)
+  GET  /context?chat_id=...&user=...&exclude_chat_id=...
+      -> rendered memory block ("" if empty). exclude_chat_id drops memories
+         learned FROM that conversation (two-tier memory: the active
+         conversation is already in the app's prompt, so recalling it would
+         double-inject its facts).
   POST /extract  (optional chat_id)    -> flush pending learning now
   GET  /memories                       -> per-memory rows (inspection)
 
@@ -297,6 +301,47 @@ for _c in agent.list_chats():
         _start_background_extract(_c.id)
 
 # --------------------------------------------------------------------------- #
+# Active-conversation exclusion (two-tier memory, 2026-10-05)
+# --------------------------------------------------------------------------- #
+# The app's prompt already carries the active conversation (recent turns
+# verbatim + rolling summary), so memories learned FROM it must not also be
+# recalled (double injection, and her own words echoed back at her). While
+# the block below is active, every memory recall drops items whose row was
+# stamped with `exclude_chat_id` (user_facts / episodic carry a chat_id
+# column; memories without one - user_summary, emotion, directives - pass
+# through, they cannot be attributed to a single conversation). No library
+# files are modified: each memory's _recall_with_temporal is shadowed on the
+# instance for the duration of the snapshot.
+def _recall_exclude_chat(exclude_chat_id: Optional[str]):
+    import contextlib
+
+    @contextlib.contextmanager
+    def _guard():
+        if not exclude_chat_id:
+            yield
+            return
+        patched = []
+        for mem in agent.memories.values():
+            orig = mem._recall_with_temporal
+
+            def _wrapped(orig=orig):
+                def call(*args, **kwargs):
+                    items = orig(*args, **kwargs)
+                    return [it for it in items
+                            if str(it.metadata.get("chat_id") or "") != exclude_chat_id]
+                return call
+            mem._recall_with_temporal = _wrapped()
+            patched.append((mem, orig))
+        try:
+            yield
+        finally:
+            for mem, orig in patched:
+                mem._recall_with_temporal = orig
+
+    return _guard()
+
+
+# --------------------------------------------------------------------------- #
 # HTTP surface
 # --------------------------------------------------------------------------- #
 app = FastAPI(title="amadeus-charactermemory-sidecar")
@@ -354,10 +399,16 @@ def save(req: SaveIn):
 
 @app.get("/context")
 def context(chat_id: str, user: str = USER_ID,
-          memories: Optional[str] = None):
+          memories: Optional[str] = None,
+          exclude_chat_id: Optional[str] = None):
     """Rendered memory block for the chat (query = its latest user message).
     Empty string = nothing to recall -> the caller's prompt stays
-    byte-identical to the no-memory baseline."""
+    byte-identical to the no-memory baseline.
+
+    exclude_chat_id (two-tier memory, 2026-10-05): the app passes the ACTIVE
+    conversation's id - that conversation is already in its prompt (recent
+    turns verbatim + rolling summary), so memories learned FROM it are dropped
+    here; everything from other conversations / before this one is kept."""
     t0 = time.time()
     chat = agent.load_chat(chat_id)
     if chat is None:
@@ -372,7 +423,8 @@ def context(chat_id: str, user: str = USER_ID,
         # Comma-separated memory names, e.g. 'user_facts,episodic,emotion'.
         # Lets the bridge choose which sections land in the prompt.
         opts["memory_types"] = [m.strip() for m in memories.split(",") if m.strip()]
-    snap = agent.build_context_snapshot(chat, user_id=user, **opts)
+    with _recall_exclude_chat(exclude_chat_id):
+        snap = agent.build_context_snapshot(chat, user_id=user, **opts)
     text = "\n\n".join(snap.sections.values())
     log(f"context chat={chat_id}: {len(text)} chars, {len(snap.sections)} "
         f"sections, {time.time()-t0:.2f}s")
