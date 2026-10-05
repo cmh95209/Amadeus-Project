@@ -407,7 +407,8 @@ export default function App() {
     setStatus("Amadeus is thinking...");
 
     try {
-      const reply = await sendMessage(text);
+      const turn = await sendMessage(text);
+      const reply = turn.reply;
 
       // The reply tells us which conversation the turn was stored in. If the
       // pane is showing a different one, the pane went stale - reload it.
@@ -421,6 +422,9 @@ export default function App() {
         setDisplayedConvId(reply.conversationId);
       }
 
+      // Voice-first (web OFF): the bubble appears as soon as her voice can
+      // start; its text is still empty and is filled by turn.text below.
+      // Web ON: reply.response already carries the full line.
       setMessages((current) => {
         const next = [...current];
         for (let i = next.length - 1; i >= 0; i--) {
@@ -446,6 +450,34 @@ export default function App() {
       } else if (reply.speechUrl) {
         setStatus("Audio could not start. Check browser audio permissions and send again.");
       }
+
+      // The English display line. For web-ON replies it already landed with
+      // the reply (setting it again is a no-op); for voice-first replies it
+      // arrives a moment after she starts speaking. If it never arrives the
+      // stream was cut - the backend still stores it, so pick the turn up
+      // from the server's copy instead of showing an empty bubble.
+      void turn.text
+        .then(async (english) => {
+          if (english) {
+            setMessages((current) => {
+              const next = [...current];
+              for (let i = next.length - 1; i >= 0; i--) {
+                if (next[i].role === "assistant" && next[i].id === reply.assistantId) {
+                  next[i] = { ...next[i], content: english };
+                  break;
+                }
+              }
+              return next;
+            });
+          } else {
+            const fresh = await getMemory();
+            setMessages(fresh);
+          }
+        })
+        .catch(() => {
+          // The turn already failed loudly in the catch below; the text
+          // promise just never settles usefully.
+        });
     } catch (error) {
       setMessages((current) => [
         ...current,

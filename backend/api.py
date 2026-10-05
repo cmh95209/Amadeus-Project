@@ -25,6 +25,7 @@ import stats
 from tts import streamVoiceChunks, renderVoiceToPath
 
 import chat
+import json
 import threading
 import uuid
 import time
@@ -92,47 +93,95 @@ def api_key_status():
     response.headers["Cache-Control"] = "no-store"
     return response
 
-# pre:
-# - JSON body contains "user_input" as a string
-#
-# post:
-# - generates an assistant response and voice output
-# - returns English UI text to the client
-@application.route("/", methods=["POST"])
-def request_message():
-    if not has_api_key():
-        return jsonify({"message": "No API key. Add one in Settings."}), 400
-    print("[Flask] / route triggered")  
-    content = request.get_json()
-    user_input = content.get("user_input", "")
-
-    try:
-        pack, user_id, assistant_id, conv_id = getOutputPacked(user_input)
-    except Exception as exc:
-        print("[Flask] LLM failure:", repr(exc))
-        return jsonify({"message": _llm_error_message(exc)}), 502
-    print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
-    print("[Flask]: JPS:", pack.assistant_reply_JPS)
-    
-    # Give the browser a single-use speech id. The browser then opens the
-    # streaming WAV endpoint, so the same sound that reaches the speakers also
-    # drives the Live2D analyser/lip sync.
-    speech_id = uuid.uuid4().hex
+def _register_speech(speech_id, jps_text, assistant_id) -> None:
+    """Give the browser a single-use speech id. The browser then opens the
+    streaming WAV endpoint, so the same sound that reaches the speakers also
+    drives the Live2D analyser/lip sync. Entries expire after 5 minutes and
+    the table never grows past 20 pending speeches."""
     with _speech_requests_lock:
         now = time.monotonic()
         for expired in [key for key, (created, _, _) in _speech_requests.items() if now - created > 300]:
             _speech_requests.pop(expired, None)
-        _speech_requests[speech_id] = (now, pack.assistant_reply_JPS, assistant_id)
+        _speech_requests[speech_id] = (now, jps_text, assistant_id)
         while len(_speech_requests) > 20:
             _speech_requests.pop(next(iter(_speech_requests)))
 
-    return jsonify({
-        "response": pack.assistant_reply_ENG,
-        "speech_id": speech_id,
-        "user_id": user_id,
-        "assistant_id": assistant_id,
-        "conversation_id": conv_id,
-    })
+
+# pre:
+# - JSON body contains "user_input" as a string
+#
+# post (web access ON):
+# - generates an assistant response (the search loop's single final call
+#   writes both lines) and voice output
+# - returns the original single JSON: English UI text + speech id
+#
+# post (web access OFF, voice-first):
+# - call 1 (the Japanese line) is complete before this route returns, so her
+#   voice can start at once; call 2 (the English display line) runs in the
+#   background while she is talking
+# - the response is a two-event stream (text/event-stream):
+#     data: {"phase": "voice", "speech_id", "user_id", "assistant_id", "conversation_id"}
+#     data: {"phase": "text", "assistant_id", "response": "<English line>"}
+#   the second event is bounded (120 s); on timeout the Japanese line itself
+#   is the response, so the UI never shows an empty box
+@application.route("/", methods=["POST"])
+def request_message():
+    if not has_api_key():
+        return jsonify({"message": "No API key. Add one in Settings."}), 400
+    print("[Flask] / route triggered")
+    content = request.get_json()
+    user_input = content.get("user_input", "")
+
+    if chat.store.load_web_access():
+        # Web access ON: the reply is the original single call (both lines at
+        # once) and the client speaks the single-JSON protocol.
+        try:
+            pack, user_id, assistant_id, conv_id = getOutputPacked(user_input)
+        except Exception as exc:
+            print("[Flask] LLM failure:", repr(exc))
+            return jsonify({"message": _llm_error_message(exc)}), 502
+        print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
+        print("[Flask]: JPS:", pack.assistant_reply_JPS)
+
+        speech_id = uuid.uuid4().hex
+        _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+        return jsonify({
+            "response": pack.assistant_reply_ENG,
+            "speech_id": speech_id,
+            "user_id": user_id,
+            "assistant_id": assistant_id,
+            "conversation_id": conv_id,
+        })
+
+    # Web access OFF: voice-first (see the doc block above).
+    try:
+        turn = chat.getOutputPackedVoiceFirst(user_input)
+    except Exception as exc:
+        # Call 1 failed before the stream could start: the route has not
+        # switched to streaming yet, so the original JSON error protocol
+        # still applies.
+        print("[Flask] LLM failure (voice-first call 1):", repr(exc))
+        return jsonify({"message": _llm_error_message(exc)}), 502
+    print("\n[Flask]: JPS (voice-first call 1):", turn.pack.assistant_reply_JPS)
+
+    speech_id = uuid.uuid4().hex
+    _register_speech(speech_id, turn.pack.assistant_reply_JPS, turn.assistant_id)
+
+    def generate():
+        yield "data: " + json.dumps(
+            {"phase": "voice", "speech_id": speech_id, "user_id": turn.user_id,
+             "assistant_id": turn.assistant_id, "conversation_id": turn.conv_id},
+            ensure_ascii=False) + "\n\n"
+        # Wait (bounded) for the background English backfill; her voice is
+        # already playing by the time this line runs.
+        english = turn.wait_en(timeout=120.0)
+        yield "data: " + json.dumps(
+            {"phase": "text", "assistant_id": turn.assistant_id, "response": english},
+            ensure_ascii=False) + "\n\n"
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 @application.route("/speech/<speech_id>", methods=["GET"])
 def speech(speech_id):

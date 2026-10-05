@@ -90,6 +90,24 @@ class AmadeusPack(BaseModel):
         " Avoid long dashes and repeated punctuation.")
     )
     assistant_reply_ENG: str = Field(..., description="English translation of assistant_reply_JPS, shown in the UI for the user to read. May include stage directions.")
+
+
+class AmadeusReply(BaseModel):
+    """Voice-first call 1 output: ONLY the Japanese line she actually speaks.
+
+    The English display line is written by a separate, faster follow-up call
+    (getOutputPackedVoiceFirst -> _translate_reply_en), so her voice can start
+    while the translation is still being written. Same field constraints as
+    AmadeusPack.assistant_reply_JPS.
+    """
+    assistant_reply_JPS: str = Field(..., description=(
+        "Amadeus's dialogue written natively in Japanese, as she would actually speak it. "
+        "Must be plain spoken Japanese ONLY, for TTS - this step has no English field, so do "
+        "NOT append the English translation or any English line/sentence to it. "
+        "Allowed: Japanese characters, ASCII letters/digits if needed, and these punctuation marks only: 、。！？"
+        " Newlines are allowed. Do NOT include: parentheses/brackets/quotes/asterisks/emojis/markdown/ellipses (…)/colons/semicolons."
+        " Avoid long dashes and repeated punctuation."
+    ))
     
 
 # pre:
@@ -915,6 +933,71 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
     except Exception as e:
         print("[Amadeus] Salvage: Japanese translation failed:", repr(e))
     return AmadeusPack(assistant_reply_JPS=jps or eng, assistant_reply_ENG=eng)
+
+
+def _ensure_japanese_jps(jps: str, llm) -> str:
+    """String twin of _ensure_japanese for the voice-first JA-only call.
+
+    Cleans the TTS text the same way; if the result has no Japanese at all
+    (call 1 can have pure English, and unlike the pack-based guard there is no
+    English field to feed the translation pass), the raw text itself is the
+    translation source: it becomes her line, in Japanese.
+    """
+    cleaned = _clean_tts_text(jps or "")
+    if _has_japanese_script(cleaned):
+        return cleaned
+    try:
+        trans = llm.invoke([{
+            "role": "user",
+            "content": (
+                "Translate the following into natural spoken Japanese, in the voice of Amadeus "
+                "(a sharp, confident scientist who speaks casually to close friends). "
+                "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
+                + (cleaned or "")[:1500]
+            ),
+        }])
+        jps = _clean_tts_text(_strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)))
+        if _has_japanese_script(jps):
+            print("[Amadeus] Voice-first: JPS was not Japanese - repaired with a translation pass")
+            return jps
+    except Exception as e:
+        print("[Amadeus] Voice-first: Japanese repair failed:", repr(e))
+    return cleaned
+
+
+def _salvage_jps_plain_text(raw: str, llm) -> str:
+    """JA-only twin of _salvage_plain_text: whatever plain text the model
+    actually produced becomes the spoken Japanese line (cleaned; when it came
+    out in English it is translated to Japanese so her voice stays in Japanese -
+    this step has no English field to keep it in).
+
+    Raises ValueError only when there is literally no text at all - the same
+    honest "nothing came back" case the pack-based salvage treats as an error.
+    """
+    text = _strip_thinking(raw or "").strip()
+    if not text:
+        raise ValueError("The model returned no usable reply (no AmadeusReply and no text).")
+    if _has_japanese(text):
+        # She already spoke Japanese - use it as the TTS line.
+        return _ensure_japanese_jps(text, llm)
+    try:
+        trans = llm.invoke([{
+            "role": "user",
+            "content": (
+                "Translate the following into natural spoken Japanese, in the voice of Amadeus "
+                "(a sharp, confident scientist who speaks casually to close friends). "
+                "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
+                + text[:1500]
+            ),
+        }])
+        jps = _clean_tts_text(_strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)))
+        if _has_japanese_script(jps):
+            return jps
+    except Exception as e:
+        print("[Amadeus] Voice-first salvage: Japanese translation failed:", repr(e))
+    # Translation failed or returned nothing: voice the original text rather
+    # than going silent (same fallback the pack-based salvage uses).
+    return text
 
 
 # --- Rate-limit patience -------------------------------------------------------
@@ -2126,6 +2209,32 @@ _PACK_RULES = {
 }
 
 
+# Voice-first call 1 variant of the pack rules: the same honesty lines, but the
+# English field does not exist on this step (a separate fast call writes it),
+# so the model must never produce or append English here.
+_PACK_RULES_JA_ONLY = {
+    "role": "system",
+    "content": (
+        "Write only Amadeus's spoken dialogue, in assistant_reply_JPS. "
+        "Do not include narration, stage directions, actions, facial expressions, "
+        "body language, or inner thoughts. "
+        "This step has NO English field: do NOT write, append, or hint at any English "
+        "translation or English sentence - the English display line is handled by a "
+        "separate step that you are not involved in. "
+        "Write assistant_reply_JPS natively in Japanese: think and speak the way a native "
+        "Japanese speaker would — natural, idiomatic spoken Japanese, NOT a word-for-word "
+        "translation from English. "
+        "Every reply is a single complete message - nothing comes after it. "
+        "Never end a reply with a promise to check, look up, or follow up "
+        "('let me check', 'give me a second', 'hold on'): give the full "
+        "answer in this reply, or say plainly what you do not know. Never "
+        "state a specific time gap or date you were not given as measured - "
+        "if no measured time covers the gap, say you are not sure instead "
+        "of guessing a number."
+    ),
+}
+
+
 def _store_greeting_line(pack: "AmadeusPack") -> tuple[int, int]:
     """Persist a startup greeting as a normal assistant message.
 
@@ -2453,6 +2562,156 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 
 
 # pre:
+# - message_context is recent user/assistant messages (no system persona);
+#   internal_context is the previous turn's snapshot
+# - web access is OFF (the caller routes web-on turns to getResponsePacked -
+#   the search loop already makes several calls per turn, so splitting its
+#   final answer into two would buy nothing)
+#
+# post:
+# - voice-first call 1: ONE structured call (AmadeusReply) that produces only
+#   the Japanese line; every JA guard of the single-call path applies (TTS
+#   cleaning, Japanese repair, repetition cut, check-promise finish, the
+#   web-off honesty net); the returned pack carries that line in
+#   assistant_reply_JPS and an EMPTY assistant_reply_ENG - the English display
+#   line is written by call 2 (getOutputPackedVoiceFirst's background
+#   backfill) while her voice is already playing
+def getResponsePackedVoiceFirst(message_context, internal_context=None) -> AmadeusPack:
+    llm = get_llm(API_KEY, LLM_Model)
+
+    # Same prompt assembly as getResponsePacked, with the JA-only pack rules
+    # and NO_WEB_BLOCK (this path is web-OFF by construction).
+    last_user = next(
+        (m.get("content", "") for m in reversed(message_context) if m.get("role") == "user"),
+        "",
+    )
+    book_messages = store.load_character_book_messages(last_user)
+    try:
+        memory_block = cm_bridge.fetch_memory_block(store.load_active_conversation())
+    except Exception:
+        memory_block = None
+
+    messages = _merge_leading_system_messages(
+        store.load_default_personality_messages()
+        + book_messages
+        + ([memory_block] if memory_block else [])
+        + [internal_context if internal_context is not None else store.load_internal_context()]
+        + [_PACK_RULES_JA_ONLY]
+        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
+        + [NO_WEB_BLOCK]
+        + message_context
+    )
+
+    def _attempt(client):
+        # Deep-thinking ON: call 1 goes through the thinking client (ONE
+        # extra-considered call), exactly like the single-call path. Call 2 is
+        # deliberately a plain (non-thinking) call - a short translation does
+        # not need it, and speed is the point.
+        if store.load_deep_thinking():
+            think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True)
+            return think_llm.with_structured_output(AmadeusReply, method="function_calling").invoke(messages)
+        return client.with_structured_output(AmadeusReply, method="function_calling").invoke(messages)
+
+    def _jps_of(out) -> str:
+        if isinstance(out, AmadeusReply):
+            return out.assistant_reply_JPS or ""
+        if isinstance(out, dict):
+            return out.get("assistant_reply_JPS") or ""
+        return ""
+
+    def _out(jps: str) -> AmadeusPack:
+        # Every JA guard the single-call path applies - on the Japanese line
+        # only; if the honesty net swaps in its honest line, that line becomes
+        # the spoken line. The English field stays empty either way - the
+        # backfill translates the line she actually speaks, so UI and history
+        # always agree.
+        pack = _web_off_honesty_net(
+            AmadeusPack(assistant_reply_JPS=_ensure_japanese_jps(jps, llm),
+                        assistant_reply_ENG=""))
+        return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS,
+                           assistant_reply_ENG="")
+
+    try:
+        out = _attempt(llm)
+        if out is None:
+            # A clipped or malformed forced tool call can decode to NOTHING -
+            # same actionable error as the single-call path.
+            raise ValueError("structured reply came back empty - clipped "
+                             "mid-JSON? check the max-output-tokens setting")
+        return _out(_jps_of(out))
+    except Exception as e:
+        # Same ladder as the single-call path, with the JA-only twins: one
+        # clean retry after a rejected sampling parameter, one forced
+        # AmadeusReply retry, then salvage / honest fallback.
+        if maybe_strip_rejected_params(e, LLM_Model):
+            print("[Amadeus] Voice-first: sampling parameter rejected by server - retrying with reduced settings.")
+            try:
+                out = _attempt(get_llm(API_KEY, LLM_Model))
+                if out is not None:
+                    return _out(_jps_of(out))
+            except Exception:
+                pass  # the retry also failed; the ladder below handles it
+        print("[Amadeus] Voice-first: packed response parse failed:", repr(e))
+        # A local server can drop the connection; force a fresh client before
+        # the fallback attempts (single-call path, same reasoning).
+        reset_llm()
+        llm = get_llm(API_KEY, LLM_Model)
+        try:
+            final_llm = llm.bind_tools([convert_to_openai_tool(AmadeusReply)], tool_choice="required")
+            reply = _invoke_forced(final_llm, messages)
+        except Exception as e2:
+            # No text to salvage here: surface a clean, specific error and let
+            # getOutputPackedVoiceFirst remove the user turn.
+            print("[Amadeus] Voice-first: forced retry failed:", repr(e2))
+            raise
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusReply":
+            return _out(_jps_of(calls[0].get("args")))
+
+        raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+        if _repetition_cut(raw) is not None:
+            # Cut the loop out; if that leaves no usable line, serve the same
+            # static honest line the single-call path serves.
+            cleaned = _de_loop(raw)
+            if cleaned and _repetition_cut(cleaned) is None:
+                print("[Amadeus] Voice-first: forced call returned a repetition loop - cut out, salvaging the clean part.")
+                return _out(_salvage_jps_plain_text(cleaned, llm))
+            print("[Amadeus] Voice-first: repetition loop with no clean part - honest fallback.")
+            honest = _honest_plain_failure_pack()
+            return AmadeusPack(assistant_reply_JPS=honest.assistant_reply_JPS, assistant_reply_ENG="")
+        if _is_check_promise(raw):
+            # Same bounded finish-the-line follow-up as the single-call path.
+            print("[Amadeus] Voice-first: reply stalled on a check promise - finishing with one bounded follow-up.")
+            finish_convo = list(messages) + [
+                {"role": "assistant", "content": _strip_thinking(raw).strip()},
+                {"role": "user",
+                 "content": "(Your last message ended before giving an answer. "
+                             "Finish it now: give the complete answer in this "
+                             "reply. There is no follow-up turn - if you do not "
+                             "know something, say so plainly and answer with "
+                             "what you do know.)"},
+            ]
+            try:
+                finish_llm = llm.bind_tools(
+                    [convert_to_openai_tool(AmadeusReply)],
+                    tool_choice="required")
+                reply2 = _invoke_forced(finish_llm, finish_convo)
+                calls2 = getattr(reply2, "tool_calls", None) or []
+                if calls2 and calls2[0].get("name") == "AmadeusReply":
+                    return _out(_jps_of(calls2[0].get("args")))
+                raw2 = _strip_thinking(reply2.content if isinstance(reply2.content, str)
+                                       else str(reply2.content or "")).strip()
+                if raw2 and not _is_check_promise(raw2) and _repetition_cut(raw2) is None:
+                    print("[Amadeus] Voice-first: follow-up finished the reply as plain text; salvaging.")
+                    return _out(_salvage_jps_plain_text(raw2, llm))
+                print("[Amadeus] Voice-first: follow-up stalled too - serving the original line.")
+            except Exception as e3:
+                print("[Amadeus] Voice-first: check-promise follow-up failed; serving the original line:", repr(e3))
+        print("[Amadeus] Voice-first: forced call returned no AmadeusReply; salvaging plain text.")
+        return _out(_salvage_jps_plain_text(raw, llm))
+
+
+# pre:
 # - user_message is a non-empty string from the user
 # - SQLite memory store is available and writable
 # - getResponsePacked(message_context) is defined and functional
@@ -2497,6 +2756,176 @@ def getOutputPacked(user_message: str):
     # showing the conversation the turn was written to.
     conv_id = store.load_active_conversation()
     return pack, user_id, assistant_id, conv_id
+
+
+# ---------- VOICE-FIRST REPLY (web-OFF turns, 2026-07) ----------
+#
+# A reply is two deliverables: the Japanese line HER VOICE speaks, and the
+# English line the UI shows. The single-call path produced both before
+# anything happened, so her voice could not start until the translation was
+# decoded too. Voice-first splits that: call 1 writes and stores the Japanese
+# line (so the route can start TTS at once); call 2 - one short translation
+# call in a background thread - fills the English display field and the stored
+# row while she is already talking. Web-ON turns keep the single-call path
+# (the search loop already makes several calls; splitting its final answer
+# buys nothing). Regenerate/greetings keep it too (not latency-critical).
+
+class VoiceFirstTurn:
+    """State of one voice-first turn.
+
+    By the time the route receives this, call 1 is complete: the user and
+    assistant rows are stored (the assistant row's English text is still
+    empty), the spoken line is mirrored to CharacterMemory, and her voice can
+    start. wait_en() blocks until the background backfill stored the English
+    line (or the timeout expires, in which case the Japanese line itself is
+    returned so the UI never shows an empty box).
+    """
+
+    def __init__(self, pack: "AmadeusPack", user_id: int, assistant_id: int, conv_id: int):
+        self.pack = pack
+        self.user_id = user_id
+        self.assistant_id = assistant_id
+        self.conv_id = conv_id
+        self._en_event = threading.Event()
+        self._en_text = ""
+
+    def wait_en(self, timeout: float = 120.0) -> str:
+        self._en_event.wait(timeout)
+        return self._en_text or self.pack.assistant_reply_JPS or ""
+
+    def _set_en(self, text: str) -> None:
+        self._en_text = text or ""
+        self._en_event.set()
+
+
+def _voice_first_context_lines(context, max_lines: int = 4) -> list:
+    """A few labelled recent lines for the call-2 translation prompt: enough
+    for the English line to match the situation, without re-sending the whole
+    prompt. Assistant lines arrive content-first (her Japanese line when she
+    has one), which is exactly what the translator needs."""
+    lines = []
+    for m in reversed(context or []):
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if m.get("role") == "user":
+            lines.append("user: " + content[:300])
+        elif m.get("role") == "assistant":
+            lines.append("you: " + content[:300])
+        if len(lines) >= max_lines:
+            break
+    return list(reversed(lines))
+
+
+def _translate_reply_en(llm, jps: str, context_lines) -> str:
+    """Voice-first call 2: the English display line for the Japanese line call
+    1 already spoke. One short, fast call (JA line + a few context lines, not
+    the full prompt). Returns "" when nothing usable comes back - the caller
+    then shows the Japanese line itself, the same fallback the English guard
+    uses when its translation pass fails."""
+    lines = [
+        "You are writing the English line shown to the user in the chat UI for "
+        "one of Amadeus's replies. Translate her Japanese line into natural, "
+        "spoken English in her voice - keep her tone and meaning exactly. "
+        "Output ONLY the English text - no quotes, no Japanese, no commentary.",
+    ]
+    for line in context_lines or ():
+        if line and line.strip():
+            lines.append(line.strip()[:300])
+    lines.append("Japanese line she spoke:")
+    lines.append((jps or "").strip()[:1500])
+    lines.append("English line:")
+    reply = llm.invoke([{"role": "user", "content": "\n".join(lines)}])
+    content = reply.content if isinstance(reply.content, str) else str(reply.content)
+    en = _strip_thinking(content).strip().strip(chr(34)).strip()
+    if not en:
+        return ""
+    # A weaker model can echo the Japanese input back as the "translation";
+    # that would put Japanese in the English box - treat it as a failure so
+    # the real Japanese line is shown instead.
+    if not _has_latin(en):
+        return ""
+    return en
+
+
+def _backfill_english(turn: "VoiceFirstTurn", llm, context_lines) -> None:
+    """Call 2, in a background thread: write the English display line for the
+    Japanese line call 1 already stored, then publish it (the stored row and
+    the UI). Any failure degrades to showing the Japanese line itself - her
+    real words, just untranslated - so a slow or down model never holds her
+    voice hostage."""
+    jps = (turn.pack.assistant_reply_JPS or "").strip()
+    try:
+        en = _translate_reply_en(llm, jps, context_lines)
+    except Exception as exc:
+        print("[Amadeus] Voice-first: English backfill failed:", repr(exc))
+        en = ""
+    final = en or jps
+    try:
+        store.update_message_content(turn.assistant_id, final)
+    except Exception as exc:
+        print("[Amadeus] Voice-first: could not store the English line:", repr(exc))
+    turn._set_en(final)
+
+
+# pre:
+# - user_message is a non-empty string from the user
+# - web access is OFF (the route calls this only for web-off turns)
+#
+# post:
+# - appends the user message to memory; call 1 stores the assistant row with
+#   the Japanese line (English text still empty); mirrors both lines to
+#   CharacterMemory; schedules the trust rescore exactly like the single-call
+#   path
+# - a background thread runs call 2 (the English line) and updates the stored
+#   row; the returned turn's wait_en() publishes it to the route
+# - on call-1 failure the user turn is removed (the memory stays clean) and
+#   the exception propagates, exactly like getOutputPacked
+def getOutputPackedVoiceFirst(user_message: str) -> VoiceFirstTurn:
+    internal_context = store.load_internal_context()
+    user_id = store.append_message("user", user_message)
+    # CharacterMemory: mirror the persisted user turn (fire-and-forget).
+    cm_bridge.save_turn(store.load_active_conversation(), "user", user_message)
+    context = store.build_prompt_messages()
+    context_lines = _voice_first_context_lines(context)
+
+    try:
+        pack = getResponsePackedVoiceFirst(context, internal_context=internal_context)
+    except Exception:
+        # No reply came back (server unreachable, timeout, ...). Remove the
+        # user turn so memory never contains a message with no answer.
+        store.delete_message(user_id)
+        raise
+
+    # The English text starts empty; call 2 fills it (row + UI). Her future
+    # context reads the Japanese column, so the empty English field changes
+    # nothing about how she speaks next.
+    assistant_id = store.append_message(
+        "assistant", "", japanese=pack.assistant_reply_JPS
+    )
+    # CharacterMemory: mirror the line she actually spoke (same rule as the
+    # single-call path: the Japanese line when present).
+    cm_bridge.save_turn(store.load_active_conversation(), "assistant",
+                        (pack.assistant_reply_JPS or "").strip()
+                        or pack.assistant_reply_ENG)
+    maybe_schedule_trust_rescore()
+    turn = VoiceFirstTurn(pack, user_id, assistant_id, store.load_active_conversation())
+
+    try:
+        llm = get_llm(API_KEY, LLM_Model)
+    except Exception as exc:
+        # The Japanese line is stored and will be spoken; the English line
+        # degrades to the Japanese line rather than blocking her voice.
+        print("[Amadeus] Voice-first: model server unreachable for the English "
+              f"backfill: {exc!r}")
+        llm = None
+    if llm is not None:
+        threading.Thread(target=_backfill_english,
+                         args=(turn, llm, context_lines),
+                         daemon=True, name="voice-first-en").start()
+    else:
+        turn._set_en((pack.assistant_reply_JPS or "").strip())
+    return turn
 
 
 # pre:
