@@ -718,7 +718,7 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
         trans = llm.invoke([{
             "role": "user",
             "content": (
-                "Translate the following into natural spoken Japanese, in the voice of Makise Kurisu "
+                "Translate the following into natural spoken Japanese, in the voice of Amadeus "
                 "(a sharp, confident scientist who speaks casually to close friends). "
                 "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
                 + (pack.assistant_reply_ENG or "")[:1500]
@@ -905,7 +905,7 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
         trans = llm.invoke([{
             "role": "user",
             "content": (
-                "Translate the following into natural spoken Japanese, in the voice of Makise Kurisu "
+                "Translate the following into natural spoken Japanese, in the voice of Amadeus "
                 "(a sharp, confident scientist who speaks casually to close friends). "
                 "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
                 + text[:1500]
