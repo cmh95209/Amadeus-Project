@@ -2755,6 +2755,9 @@ def getOutputPacked(user_message: str):
     # The session this turn actually landed in, so the UI can verify it is
     # showing the conversation the turn was written to.
     conv_id = store.load_active_conversation()
+    # Rolling summary: fold whatever this new turn pushed out of the verbatim
+    # window (background worker; no-op while the window is not full).
+    store.maybe_roll_summary(conv_id)
     return pack, user_id, assistant_id, conv_id
 
 
@@ -2910,6 +2913,9 @@ def getOutputPackedVoiceFirst(user_message: str) -> VoiceFirstTurn:
                         or pack.assistant_reply_ENG)
     maybe_schedule_trust_rescore()
     turn = VoiceFirstTurn(pack, user_id, assistant_id, store.load_active_conversation())
+    # Rolling summary: fold whatever this new turn pushed out of the verbatim
+    # window (background worker; no-op while the window is not full).
+    store.maybe_roll_summary(turn.conv_id)
 
     try:
         llm = get_llm(API_KEY, LLM_Model)
@@ -3176,3 +3182,34 @@ def backfill_japanese_voice() -> None:
         print("[Amadeus] Backfill: complete")
     except Exception as exc:
         print(f"[Amadeus] Backfill error: {exc!r}")
+
+
+# ---------- ROLLING SUMMARY MERGE (tier-1 memory; registered on memory.py) ----------
+#
+# One SHORT plain call: fold the exchange that just left the verbatim window
+# into the per-conversation running summary. When the model server is down
+# (get_llm raises) or the reply is unusable, memory.py falls back to a plain
+# text fold, so the window always closes.
+
+def _merge_summary_llm(current_summary: str, new_exchange: str) -> str:
+    llm = get_llm(API_KEY, LLM_Model)
+    prompt = (
+        "You maintain a running summary of a chat conversation so its older "
+        "parts can be dropped from context without being forgotten. "
+        "CURRENT SUMMARY:\n" + (current_summary or "(none yet)") +
+        "\n\nNEW EXCHANGE TO FOLD IN:\n" + new_exchange[:3000] +
+        "\n\nMerge the new exchange into the summary: keep durable facts, "
+        "decisions, names, plans, and open questions; drop small talk and "
+        "anything already covered; write in the language the conversation "
+        "uses; plain prose, no headers, no quotes. Output ONLY the updated "
+        "summary, under 350 words."
+    )
+    reply = llm.invoke([{"role": "user", "content": prompt}])
+    content = reply.content if isinstance(reply.content, str) else str(reply.content)
+    text = _strip_thinking(content).strip().strip(chr(34)).strip()
+    if not text:
+        raise ValueError("model returned an empty summary")
+    return text
+
+
+store.set_summary_merger(_merge_summary_llm)

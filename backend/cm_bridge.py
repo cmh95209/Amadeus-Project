@@ -35,10 +35,14 @@ CM_TIMEOUT_SAVE = 3.0      # bounded worker; the reply path never waits on it
 CM_TIMEOUT_CONTEXT = 6.0   # bounded fetch; a slow sidecar degrades to no memory
 CM_MAX_CHARS = 2000        # hard cap on the spliced section (before the label)
 
+# Two-tier memory (2026-10-05): recall EXCLUDES the active conversation -
+# that one is already in the prompt (recent turns verbatim + rolling summary)
+# and re-recalling its own facts would double-inject them.
 _SECTION_LABEL = (
-    "LONG-TERM MEMORY (your own recollections of past conversations - "
-    "you already know this, it is not a document to look up; entries are "
-    "stamped with when they happened): "
+    "LONG-TERM MEMORY (your recollections from OTHER conversations and from "
+    "before this one started - you already know this, it is not a document "
+    "to look up; the current conversation is NOT in this section, it is in "
+    "your prompt; entries are stamped with when they happened): "
 )
 _TRUNCATED_NOTE = "\n[Memory section trimmed for length.]"
 
@@ -89,8 +93,13 @@ def fetch_memory_block(chat_id) -> dict | None:
     if chat_id is None:
         return None
     try:
+        # exclude_chat_id: memories learned from THIS conversation are out of
+        # scope for the block (the conversation is already in the prompt).
+        # The launcher always starts the matching sidecar, so both sides ship
+        # together; a hand-run older sidecar just ignores the parameter.
         query = urllib.parse.urlencode(
-            {"chat_id": str(chat_id), "memories": CM_MEMORIES})
+            {"chat_id": str(chat_id), "memories": CM_MEMORIES,
+             "exclude_chat_id": str(chat_id)})
         data = _get_json("/context?" + query, CM_TIMEOUT_CONTEXT)
         text = (data.get("context_text") or "").strip()
     except Exception as e:
