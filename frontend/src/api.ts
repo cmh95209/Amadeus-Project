@@ -74,7 +74,18 @@ async function parseResponse(response: Response) {
   return data;
 }
 
-export async function sendMessage(userInput: string): Promise<MessageReply> {
+export type MessageTurn = {
+  /** The turn as soon as her voice can start (web-ON: as soon as the single
+   * JSON reply lands). */
+  reply: MessageReply;
+  /** The English display line. Resolves when the backend's fast translation
+   * call lands (voice-first, web OFF - her voice is already playing by then;
+   * falls back to her Japanese line if the call fails or times out).
+   * Resolves immediately for web-ON replies, which carry it in one JSON. */
+  text: Promise<string>;
+};
+
+export async function sendMessage(userInput: string): Promise<MessageTurn> {
   const response = await fetch(`${API_BASE}/`, {
     method: "POST",
     headers: {
@@ -85,12 +96,19 @@ export async function sendMessage(userInput: string): Promise<MessageReply> {
     }),
   });
 
+  // Voice-first (web OFF) streams two events: "voice" (start audio at once)
+  // then "text" (the display line, filled by the backend's fast call 2).
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("text/event-stream")) {
+    return await readVoiceFirstStream(response);
+  }
+
   const data = await parseResponse(response);
   if (typeof data.response !== "string") {
     throw new Error("Backend returned an invalid response");
   }
 
-  return {
+  const reply = {
     response: data.response,
     speechUrl:
       typeof data.speech_id === "string"
@@ -101,6 +119,108 @@ export async function sendMessage(userInput: string): Promise<MessageReply> {
     conversationId:
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
   };
+  return { reply, text: Promise.resolve(reply.response) };
+}
+
+type VoiceFirstEvent = {
+  phase?: string;
+  speech_id?: string;
+  user_id?: number;
+  assistant_id?: number;
+  conversation_id?: number;
+  response?: string;
+};
+
+async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
+  if (!response.ok) {
+    const data = await parseResponse(response);
+    throw new Error(data?.message || `Request failed (${response.status})`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("This browser does not support streaming responses");
+  }
+
+  let resolveReply: ((reply: MessageReply) => void) | null = null;
+  let resolveText: ((text: string) => void) | null = null;
+  const replyPromise = new Promise<MessageReply>((r) => (resolveReply = r));
+  const textPromise = new Promise<string>((r) => (resolveText = r));
+
+  let reply: MessageReply | null = null;
+  let text = "";
+  let replySettled = false;
+  let textSettled = false;
+
+  const settleReply = () => {
+    if (!replySettled && reply && resolveReply) {
+      replySettled = true;
+      resolveReply(reply);
+    }
+  };
+  const settleText = (value: string) => {
+    if (!textSettled && resolveText) {
+      textSettled = true;
+      resolveText(value);
+    }
+  };
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // Events are "data: <json>" frames terminated by a blank line.
+      let cut: number;
+      while ((cut = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          let event: VoiceFirstEvent;
+          try {
+            event = JSON.parse(line.slice(6)) as VoiceFirstEvent;
+          } catch {
+            continue; // a torn frame - the server always terminates frames
+          }
+          if (event.phase === "voice") {
+            reply = {
+              response: "",
+              speechUrl:
+                typeof event.speech_id === "string"
+                  ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
+                  : undefined,
+              userId: typeof event.user_id === "number" ? event.user_id : undefined,
+              assistantId:
+                typeof event.assistant_id === "number" ? event.assistant_id : undefined,
+              conversationId:
+                typeof event.conversation_id === "number" ? event.conversation_id : undefined,
+            };
+            settleReply();
+          } else if (event.phase === "text") {
+            if (typeof event.response === "string") text = event.response;
+            settleText(text);
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  // The server always sends both events (the text event is bounded by a
+  // server-side timeout and then carries her Japanese line). If the stream
+  // still ends early, settle what arrived and surface the missing voice
+  // phase as an error.
+  settleReply();
+  settleText(text);
+  if (!replySettled) {
+    throw new Error("The backend stream ended before the voice event");
+  }
+
+  const resolvedReply = await replyPromise;
+  return { reply: resolvedReply, text: textPromise };
 }
 
 export type GreetingReply = {
