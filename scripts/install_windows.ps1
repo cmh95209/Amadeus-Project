@@ -28,6 +28,12 @@
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faster
+# Newer Miniconda (25.1 and up - what this installer installs) ships a
+# plugin that refuses to build environments unattended until Anaconda's
+# channel Terms of Service are accepted (CondaToSNonInteractiveError).
+# This variable tells that plugin to accept them automatically, so the
+# install never stops waiting for a human. Older conda ignores it.
+$env:CONDA_PLUGINS_AUTO_ACCEPT_TOS = "yes"
 
 $InstallDir = Join-Path $env:USERPROFILE "Amadeus"
 $LogPath    = Join-Path $InstallDir "install_log.txt"
@@ -151,6 +157,11 @@ try {
     }
     $conda = Join-Path $condaHome "Scripts\conda.exe"
     Log ("  Using conda: " + $conda)
+    # Record acceptance of any channel Terms of Service, in case this
+    # conda is new enough (Miniconda 25.1+) to require them. No-op on
+    # older conda, which has no 'tos' command.
+    & $conda tos accept 2>$null | Out-Null
+    Log "  Conda terms of service handled (required by newer conda before it will build environments unattended)."
 
     if (Get-Command node -ErrorAction SilentlyContinue) { Log "  Node.js already present." "Green" }
     else { Install-Pkg "Node.js" "OpenJS.NodeJS.LTS"; Refresh-Path }
