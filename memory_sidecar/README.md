@@ -1,6 +1,6 @@
 # memory_sidecar - long-term memory for Amadeus
 
-A separate local service (127.0.0.1:9870) that lets Kurisu remember
+A separate local service (127.0.0.1:9870) that lets Amadeus remember
 you across conversations: it learns facts, episodes and a running
 summary from mirrored turns and renders a memory block into the
 app's prompt.

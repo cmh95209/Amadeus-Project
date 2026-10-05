@@ -59,8 +59,18 @@ PORT = 9870
 USER_ID = "the user"
 EXTRACT_INTERVAL = 10               # learn after every N new user turns
 DATA_DIR = os.path.join(PROJECT_ROOT, "backend", "data", "character_memory")
-ASSETS = os.path.join(HERE, "assets", "Kurisu")
+ASSETS = os.path.join(HERE, "assets", "Amadeus")
 SEED_DIR = os.path.join(HERE, "seed_index")
+# Persona blurb for the memory extractor (2026-10-05, decision D7): without it
+# the extractor prompt knows only the character's NAME, so extracted memories
+# can attribute Amadeus's role to Kurisu. Works with lore recall OFF.
+PERSONA_BLURB = (
+    "Amadeus is an AI assistant built on the memories and personality of "
+    "Makise Kurisu, a young neuroscientist. She is a separate individual from "
+    "Kurisu: Kurisu is her source - the person she was built from - not the "
+    "person she is. In these conversations the user is talking to Amadeus; "
+    "Kurisu is only ever referenced as her source."
+)
 # LLM target: the app's own settings (same files the backend reads), so
 # the sidecar always follows whatever server/model the app talks to.
 SERVER_FILE = os.path.join(PROJECT_ROOT, "backend", "llm_server.txt")
@@ -228,7 +238,8 @@ memories = [
     EmotionStatus(store),
     UserDirectiveMemory(store, HybridSearch(_emb)),
 ]
-agent = CharacterAgent(directory=ASSETS, name="Kurisu", save_directory=DATA_DIR)
+agent = CharacterAgent(directory=ASSETS, name="Amadeus", save_directory=DATA_DIR,
+                       persona=PERSONA_BLURB)
 agent.load(llm=get_llm(), embedder=_emb, memories=memories)
 t0 = time.time()
 agent.build()
@@ -316,7 +327,7 @@ def health():
     un = sum(len(c.unextracted()) for c in agent.list_chats())
     server, model, key = _read_app_llm()
     ok, _loaded = llm_ready(server, model, key, timeout=3.0)
-    return {"ok": True, "service": "amadeus-cm-sidecar", "character": "Kurisu",
+    return {"ok": True, "service": "amadeus-cm-sidecar", "character": "Amadeus",
             "port": PORT, "llm": {"base": server, "model": model, "ready": ok},
             "chats": len(agent.list_chats()), "unextracted": un,
             "extracting": sorted(_extracting_chats), "pid": os.getpid()}
