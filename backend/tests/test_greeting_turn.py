@@ -44,6 +44,12 @@ class GapPhraseTests(unittest.TestCase):
         self.assertEqual(P(9 * self.H), "several hours ago")
         self.assertEqual(P(15 * self.H), "about a day ago")
         self.assertEqual(P(30 * self.H), "a day or two ago")
+        # The 2026-10-05 hole: 36-48 h used to fall through every branch and
+        # come out "about a week ago" (the phrase the 2026-10-05 15:59
+        # greeting shipped for a 40.8 h gap).
+        self.assertEqual(P(36 * self.H), "a day or two ago")
+        self.assertEqual(P(40 * self.H), "a day or two ago")
+        self.assertEqual(P(47 * self.H), "a day or two ago")
         self.assertEqual(P(2 * self.D), "two days ago")
         self.assertEqual(P(3 * self.D), "a couple of days ago")
         self.assertEqual(P(4 * self.D), "a couple of days ago")

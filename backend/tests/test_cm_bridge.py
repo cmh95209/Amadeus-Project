@@ -12,8 +12,11 @@ Guards the hard guarantees of cm_bridge + the chat.py splice:
    rule is preserved by _merge_leading_system_messages);
 4. save_turn is fire-and-forget and silent: it never raises when the
    service is down, and it posts exactly the /save contract payload;
-5. the greeting path is scope-guarded: generate_greeting contains no
-   memory-splice code (the splice lives only in getResponsePacked).
+5. the greeting path is scope-guarded: since the 2026-10-05 greeting
+   rework it may READ the recall block (fetch_memory_block, mirroring the
+   reply path - sidecar down/empty degrades to None) but must never WRITE
+   to the sidecar (save_turn stays out of generate_greeting: greeting
+   lines are synthetic and mirroring them would pollute extraction).
 
 All LLM calls are stubbed; the sidecar is a local HTTP stub (stdlib
 http.server) or a dead port. No network, no live data, no new deps.
@@ -280,13 +283,21 @@ class BridgeSaveContractTests(unittest.TestCase):
 
 
 class GreetingScopeGuardTests(unittest.TestCase):
-    """The memory splice must never reach the greeting machinery."""
+    """Since the 2026-10-05 greeting rework, greetings READ the recall
+    block (mirroring the reply path) but must never WRITE to the sidecar:
+    a greeting line is synthetic (no user turn behind it), and mirroring it
+    into the memory store would let it be recalled in other conversations -
+    extraction pollution. The write side (save_turn) stays out of
+    generate_greeting entirely."""
 
-    def test_generate_greeting_has_no_splice_code(self):
+    def test_generate_greeting_reads_but_never_writes(self):
         import inspect
         source = inspect.getsource(chat.generate_greeting)
-        self.assertNotIn("cm_bridge", source)
-        self.assertNotIn("fetch_memory_block", source)
+        # Reading is allowed (and expected: the same block her replies get).
+        self.assertIn("fetch_memory_block", source)
+        # Writing is the extraction-pollution guard: never in the greeting
+        # path.
+        self.assertNotIn("save_turn", source)
 
     def test_splice_lives_only_in_getResponsePacked(self):
         import inspect

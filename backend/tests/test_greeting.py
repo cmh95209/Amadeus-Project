@@ -113,6 +113,10 @@ class GreetingGenerationTests(unittest.TestCase):
         fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
             "role": "system", "content": VOICELINE_MARK + " (trust 62)"})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
+        # Sidecar out of the test (2026-10-05): generate_greeting now reads
+        # the recall block like replies do; None keeps the prompt
+        # deterministic instead of hitting a live (or dead) sidecar.
+        fake_bridge = SimpleNamespace(fetch_memory_block=lambda *a, **k: None)
         with tempfile.TemporaryDirectory() as directory:
             mem_db = str(Path(directory) / "memory.db")
             with patch.object(chat, "get_llm", lambda *a, **k: fake), \
@@ -120,6 +124,7 @@ class GreetingGenerationTests(unittest.TestCase):
                  patch.object(chat, "_finalize", lambda pack, llm: pack), \
                  patch.object(chat, "ja_voice", fake_ja), \
                  patch.object(chat, "stats", fake_stats), \
+                 patch.object(chat, "cm_bridge", fake_bridge), \
                  patch.object(store, "PATH_TO_MEMORY", mem_db), \
                  patch.object(store, "load_default_personality_messages",
                               return_value=[{"role": "system",
