@@ -2251,13 +2251,203 @@ def _store_greeting_line(pack: "AmadeusPack") -> tuple[int, int]:
     return assistant_id, store.load_active_conversation()
 
 
+# ---------- GREETING TIME-LIE NET (2026-10-05) -------------------------------
+# The greeting prompt now hands the model ONE locked situation (the code's
+# measurement, phrase pre-picked). A weak model can still state a gap or
+# absence that contradicts it (the 2026-10-05 "about a week" line for a 40 h
+# gap, the "welcome back" for a greeting the user never answered). This net
+# is the narrow safety fence the design agreed on: hard facts, soft voice -
+# it catches PROVABLY false time claims only, never tone. It runs on the
+# EN+JA of the SAME pack (the greeting is a single call, so there is no async
+# English line to chase).
+#
+# Scale ladder: none < hours < days < weeks < months < years.
+#   * non-return situations (first/continuous/unanswered/unknown): the user
+#     was NOT away - any absence construction ("it's been a while",
+#     "been gone", "since we last", 久しぶり, ...) or any claim of
+#     days-scale or above is a lie. (A truthful "20 minutes" - no marker -
+#     passes.) "welcome back" is additionally a lie when the unanswered
+#     greeting is still fresh (they never left).
+#   * return: the truth line names the exact measured phrase; only
+#     OVERSTATEMENT is a lie (claiming a week when it was two days).
+# On violation the caller makes ONE bounded retry with a pointed correction
+# arrival line; if that still violates, a static situation-safe line ships.
+_GREETING_ABSENCE_EN = [
+    r"\bbeen a (long )?while\b",
+    r"\bbeen (gone|away|absent|out of it|missing)\b",
+    r"haven't (seen you|seen you in|heard from you|talked to you|spoken to you)",
+    r"have you been (away|gone|out)",
+    r"\bsince we last\b",
+    r"\blong time no\b",
+    r"\bhow long (has|have) it been\b",
+]
+_GREETING_ABSENCE_JA = [
+    "久しぶ", "会ってなかった", "会えなかった", "会っていない",
+    "連絡がなかった", "何も言わずに",
+]
+_GREETING_CLAIM_EN = {
+    "years":  [r"\byears?\b"],
+    "months": [r"\bmonths?\b"],
+    "weeks":  [r"\bweeks?\b"],
+    "days":   [r"\bdays?\b"],
+}
+_GREETING_CLAIM_JA = {
+    # Plain substrings (no regex): "年前" catches the kanji-numeral forms
+    # too (一年前 / 二年前), "年ぶ" the "X年ぶり" ones; "ヶ月"/"か月" any
+    # "Xヶ月" mention.
+    "years":  ["年ぶ", "年前", "年経", "何年"],
+    "months": ["ヶ月", "か月", "何カ月", "何ヶ月"],
+    "weeks":  ["一週間", "週ぶ", "何週間", "数日", "数週間"],
+    "days":   ["日ぶ", "日経", "日前"],
+}
+_GREETING_SCALE_ORDER = {"none": 0, "hours": 1, "days": 2,
+                         "weeks": 3, "months": 4, "years": 5}
+_GREETING_BUCKET_SCALE = {
+    # Exactly the phrases _gap_phrase can hand out (memory.py) - any phrase
+    # missing here (there should be none) degrades to the "days" bucket.
+    "less than an hour": "hours",
+    "a few hours ago": "hours",
+    "several hours ago": "hours",
+    "about a day ago": "hours",
+    "a day or two ago": "days",
+    "two days ago": "days",
+    "a couple of days ago": "days",
+    "several days ago": "days",
+    "about a week ago": "weeks",
+    "more than a week ago": "weeks",
+    "about two weeks ago": "weeks",
+    "a few weeks ago": "weeks",
+    "about two months ago": "months",
+    "a few months ago": "months",
+    "several months ago": "months",
+    "over a year ago": "years",
+}
+
+
+def _claimed_time_scale(eng: str, ja: str) -> str | None:
+    """The largest time scale a line CLAIMS (days/weeks/months/years),
+    or None when it names no such gap. Pure string scan, EN + JA."""
+    eng_l = (eng or "").lower()
+    best: str | None = None
+    for scale, pats in _GREETING_CLAIM_EN.items():
+        for pat in pats:
+            if re.search(pat, eng_l):
+                if best is None or _GREETING_SCALE_ORDER[scale] > _GREETING_SCALE_ORDER[best]:
+                    best = scale
+                break
+    for scale, pats in _GREETING_CLAIM_JA.items():
+        for pat in pats:
+            if pat in (ja or ""):
+                if best is None or _GREETING_SCALE_ORDER[scale] > _GREETING_SCALE_ORDER[best]:
+                    best = scale
+                break
+    return best
+
+
+def _greeting_time_lie_check(situation: dict, eng: str, ja: str) -> str | None:
+    """One pure check over the generated pack. Returns a short human
+    description of the contradiction, or None when the line is situation-
+    safe. v1 is deliberately conservative (absence constructions + over-
+    stated buckets) so it can only reject a real lie, never a mood."""
+    sit = situation.get("situation")
+    eng_l = (eng or "").lower()
+    for pat in _GREETING_ABSENCE_EN:
+        if re.search(pat, eng_l):
+            return f"EN absence construction matched /{pat}/"
+    for pat in _GREETING_ABSENCE_JA:
+        if pat in (ja or ""):
+            return f"JA absence phrase matched {pat!r}"
+    if sit == "unanswered" and situation.get("unanswered_fresh") \
+            and "welcome back" in eng_l:
+        return "EN 'welcome back' on a greeting the user never left"
+    claimed = _claimed_time_scale(eng, ja)
+    if claimed is None:
+        return None
+    if sit == "return":
+        last = situation.get("last_contact") or {}
+        actual = _GREETING_BUCKET_SCALE.get(last.get("phrase"), "days")
+        if _GREETING_SCALE_ORDER[claimed] > _GREETING_SCALE_ORDER[actual]:
+            return (f"claimed {claimed}-scale gap, the measured gap is "
+                    f"{actual}-scale ({last.get('phrase')!r})")
+        return None
+    # Non-return: the user was never away; any days-scale-or-above claim is
+    # a lie (hours-scale wording like "20 minutes" passes - it is true).
+    if _GREETING_SCALE_ORDER[claimed] >= _GREETING_SCALE_ORDER["days"]:
+        return (f"claimed a {claimed}-scale gap while the user was never "
+                f"away (situation: {sit})")
+    return None
+
+
+def _greeting_correction_line(situation: dict) -> str:
+    """The pointed correction that rides the retry's arrival line."""
+    truth = situation.get("truth_line", "the user was not away from you.")
+    if situation.get("situation") == "return":
+        last = situation.get("last_contact") or {}
+        phrase = last.get("phrase", "the measured gap")
+        when = last.get("time")
+        when_txt = (f" ({when:%Y-%m-%d %H:%M})" if when is not None else "")
+        return (
+            "[Correction: your previous line claimed a time gap that does "
+            f"not match the measured one. The measured gap is {phrase}"
+            f"{when_txt}. Rewrite the line naming ONLY that gap, in those "
+            "words. Do not claim any longer gap.]"
+        )
+    return (
+        "[Correction: your previous line claimed a gap or an absence. That "
+        f"is false. The truth is exactly: {truth} Rewrite the line so it "
+        "says no such thing - mention no time gap at all.]"
+    )
+
+
+# Static, situation-safe greeting lines - the last resort when the model
+# still contradicts the measured situation after the correction retry. No
+# time claim of any kind, so they cannot be wrong.
+_GREETING_FALLBACK_LINES = {
+    "first": (
+        "So. You're here, huh. Well - I was just settling in. Don't let the "
+        "door.",
+        "ふーん。来たんだ。ふつー、ちょうど落ち着こうとしてたところだよ。",
+    ),
+    "continuous": (
+        "There you are. Good - I have a question that's been sitting here. "
+        "You up for it?",
+        "戻って来たんだ。よし、聞きたいことが溜まってるんだ。聞いてくれる?",
+    ),
+    "unanswered": (
+        "I said hi once, you know. Silence is a valid answer, I suppose. "
+        "So - you there?",
+        "こんにちはって言ったのは一回目だぞ。無視も答えのうちか。で、居る?",
+    ),
+    "return": (
+        "Oh. You're back. I'll allow it. Now say it wasn't nothing.",
+        "おかえり。許してあげる。……で、何もしなかったとは言わせとく?",
+    ),
+    "unknown": (
+        "You're here, I see. Fine. So?",
+        "来てるんだな。分かった。で?",
+    ),
+}
+
+
+def _greeting_fallback_pack(situation: dict) -> "AmadeusPack":
+    """Pre-written situation-safe line for when the generated line still
+    contradicts the measured situation after the correction retry. Same
+    idiom as _honest_plain_failure_pack: static, no model call, no time
+    claim."""
+    en, ja = _GREETING_FALLBACK_LINES.get(
+        situation.get("situation"), _GREETING_FALLBACK_LINES["unknown"])
+    return AmadeusPack(assistant_reply_JPS=ja, assistant_reply_ENG=en)
+
+
 # pre: the saved model server is reachable and serving the configured model
 #      (see model_ready); no user message is appended - the greeting is her
 #      turn, and storing it is what lets a later startup notice it
 # post: one forced AmadeusPack call (web access OFF, one bounded retry on
-#       failure), run through the same _finalize guards as every other reply;
-#       the line is STORED as an assistant message; returns
-#       (pack, assistant_id, conversation_id).
+#       failure), run through the same _finalize guards as every other
+#       reply; if the generated line contradicts the situation the code
+#       measured, ONE pointed-correction retry follows, then a static
+#       situation-safe line as the last resort; the shipped line is STORED
+#       as an assistant message; returns (pack, assistant_id, conversation_id).
 #       Raises on total failure so the /greet route can report it cleanly.
 def generate_greeting(mode: str = "startup",
                       conversation_id: int | None = None,
@@ -2267,8 +2457,19 @@ def generate_greeting(mode: str = "startup",
                    else GREETING_INSTRUCTION)
     if conversation_id is None:
         # Startup: the greeted tab is the active one (the timing context's
-        # per-tab anchor and the cross note both key off it).
+        # per-tab anchor and the situation both key off it).
         conversation_id = store.load_active_conversation()
+    # The ONE situation the code measured for this tab (first / unanswered /
+    # continuous / return / unknown). The timing block carries its truth
+    # line (load_internal_context) and the time-lie net below checks the
+    # generated pack against it - computed once, up front.
+    try:
+        situation = store.compute_greeting_situation(
+            conversation_id,
+            previous_conversation_id=previous_conversation_id,
+            switch=switch)
+    except Exception:
+        situation = None
     # The synthetic arrival line is the LAST thing in the greeting prompt -
     # the strongest position for steering on this model (live 2026-09-23:
     # the vary-topic directive in the system notes at the FRONT was ignored
@@ -2308,45 +2509,55 @@ def generate_greeting(mode: str = "startup",
             exclude_ids = store.greeting_row_ids(conversation_id)
         except Exception:
             exclude_ids = None
-    context = store.build_prompt_messages(exclude_ids=exclude_ids)
+    # Long-term memory (the CharacterMemory sidecar): the same read-only
+    # recall block her replies get (fetch_memory_block always EXCLUDES this
+    # conversation, so a greeting can quote her memories of OTHER tabs but
+    # never echoes the tab it is spoken in). Sidecar down/empty -> None ->
+    # the prompt is unchanged, byte-identical to a sidecar-less install.
+    # Greetings are still NEVER mirrored back into the sidecar (the
+    # extraction-pollution guard lives in _store_greeting_line, not here).
+    try:
+        memory_block = cm_bridge.fetch_memory_block(conversation_id)
+    except Exception:
+        memory_block = None
+
     # Servers like NInfer reject tool_choice="auto" when the prompt has NO
     # user turn at all ("no user query found in chat messages") - which is
     # the exact shape of an empty conversation's greeting. Even with history,
     # the prompt would otherwise end on her own last line; the standard
     # user->assistant shape is what every server expects for "her turn to
-    # speak". So the greeting prompt always ends on this synthetic arrival
-    # line - prompt-only, never stored in memory.
-    context = list(context) + [{"role": "user", "content": arrival}]
-    # A normal reply gets the private timing block (current time + how long
-    # it has been since the last user message, with a ready-made casual
-    # phrase). The greeting needs it too - it is a return moment with no
-    # incoming user message to anchor on. Without it she can only infer the
-    # gap from the time notes on old messages (observed 2026-09-21: she was
-    # handed "about 7 days" and still said "yesterday").
-    messages = _merge_leading_system_messages(
-        store.load_default_personality_messages()
-        + [instruction]
-        + [store.load_internal_context(is_greeting=True,
-                                       conversation_id=conversation_id,
-                                       is_return=not switch,
-                                       previous_conversation_id=(
-                                           previous_conversation_id
-                                           if switch else None))]
-        + [_PACK_RULES]
-        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-        + [NO_WEB_BLOCK]
-        + context
-    )
-
-    def _out(p: "AmadeusPack") -> "AmadeusPack":
-        return _finalize(p, get_llm(API_KEY, LLM_Model))
-
-    # The same forced-pack call the normal reply path uses: _invoke_forced
-    # auto-retries with tool_choice="auto" when the server rejects the forced
-    # choice (NInfer does - documented, harmless), and the parse below treats
-    # the result the same way (pack / repetition-cut / plain-text salvage).
-    def _call_and_parse():
-        reply = llm.bind_tools(
+    # speak". So the greeting prompt always ends on a synthetic arrival line
+    # - prompt-only, never stored in memory. The correction retry reuses
+    # the same prompt shape with the pointed correction as the tail line.
+    def _greeting_call(client, arrival_line):
+        ctx = list(store.build_prompt_messages(exclude_ids=exclude_ids))
+        ctx.append({"role": "user", "content": arrival_line})
+        # The private timing block (2026-10-05: the locked SITUATION truth
+        # line + the situation's details) - the same block normal replies
+        # get, which is how a weak model stops inventing gaps from raw
+        # numbers (observed 2026-09-21: handed "about 7 days", still said
+        # "yesterday").
+        messages = _merge_leading_system_messages(
+            store.load_default_personality_messages()
+            + [instruction]
+            + ([memory_block] if memory_block else [])
+            + [store.load_internal_context(is_greeting=True,
+                                           conversation_id=conversation_id,
+                                           is_return=not switch,
+                                           previous_conversation_id=(
+                                               previous_conversation_id
+                                               if switch else None))]
+            + [_PACK_RULES]
+            + [ja_voice.build_voice_context(stats.load_stat("trust"))]
+            + [NO_WEB_BLOCK]
+            + ctx
+        )
+        # The same forced-pack call the normal reply path uses: _invoke_forced
+        # auto-retries with tool_choice="auto" when the server rejects the
+        # forced choice (NInfer does - documented, harmless), and the parse
+        # below treats the result the same way (pack / repetition-cut /
+        # plain-text salvage).
+        reply = client.bind_tools(
             [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
         reply = _invoke_forced(reply, messages)
         calls = getattr(reply, "tool_calls", None) or []
@@ -2368,16 +2579,19 @@ def generate_greeting(mode: str = "startup",
             if len(cleaned) >= 40 and _repetition_cut(cleaned) is None:
                 print("[Amadeus] Greeting returned a repetition loop - cut "
                       "out, salvaging the clean part.")
-                return _salvage_plain_text(cleaned, llm)
+                return _salvage_plain_text(cleaned, client)
             print("[Amadeus] Greeting returned a repetition loop - no "
                   "clean part; honest fallback.")
             return _honest_plain_failure_pack()
         print("[Amadeus] Greeting returned no AmadeusPack; salvaging plain text.")
-        return _salvage_plain_text(raw, llm)
+        return _salvage_plain_text(raw, client)
+
+    def _out(p: "AmadeusPack") -> "AmadeusPack":
+        return _finalize(p, get_llm(API_KEY, LLM_Model))
 
     llm = get_llm(API_KEY, LLM_Model)
     try:
-        pack = _call_and_parse()
+        pack = _greeting_call(llm, arrival)
     except Exception as e:
         # One bounded retry with a fresh client: either the connection
         # dropped, or the pack came back empty/clipped (the log carries the
@@ -2387,11 +2601,42 @@ def generate_greeting(mode: str = "startup",
         reset_llm()
         llm = get_llm(API_KEY, LLM_Model)
         try:
-            pack = _call_and_parse()
+            pack = _greeting_call(llm, arrival)
         except Exception as e2:
             print("[Amadeus] Greeting retry failed:", repr(e2))
             raise
     pack = _out(pack)
+    # Time-lie net (2026-10-05): the situation was measured by the code; a
+    # generated line that contradicts it is bounced once with a pointed
+    # correction, and if it STILL contradicts, a static situation-safe line
+    # ships. Voice and tone are never touched - only provably false time
+    # claims (hard facts, soft voice).
+    if situation is not None:
+        violation = _greeting_time_lie_check(
+            situation, pack.assistant_reply_ENG, pack.assistant_reply_JPS)
+        if violation:
+            print("[Amadeus] Greeting contradicted the measured situation "
+                  "(%s): %s - one bounded correction."
+                  % (situation["situation"], violation))
+            # The retry keeps the original arrival steering (the re-greeting
+            # vary-topic directive on a bounce) and appends the pointed
+            # correction to it.
+            corrected = None
+            try:
+                corrected = _out(_greeting_call(
+                    llm, arrival + " " + _greeting_correction_line(situation)))
+            except Exception as e3:
+                print("[Amadeus] Greeting correction call failed:", repr(e3))
+            if corrected is not None and _greeting_time_lie_check(
+                    situation, corrected.assistant_reply_ENG,
+                    corrected.assistant_reply_JPS) is None:
+                pack = corrected
+            else:
+                print("[Amadeus] Greeting %s - serving the situation-safe "
+                      "line." % ("correction still contradicted"
+                                 if corrected is not None
+                                 else "correction failed"))
+                pack = _greeting_fallback_pack(situation)
     assistant_id, conv_id = _store_greeting_line(pack)
     print("[Amadeus] Greeting generated and stored (assistant id %d)." % assistant_id)
     return pack, assistant_id, conv_id
