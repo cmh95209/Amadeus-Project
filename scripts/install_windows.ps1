@@ -1,9 +1,15 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.2  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.3  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.3 (October 2026):
+#   - The installer no longer tries to connect Amadeus to a model server
+#     while it installs (the fresh-install test showed that step could stop
+#     the whole install). Connecting your model - local or cloud - happens
+#     when Amadeus first opens, or any time in Settings -> Connection.
 #
 #  WHAT'S NEW IN v4.2 (October 2026):
 #   - The voice engine no longer needs a C compiler on a fresh PC: its
@@ -45,8 +51,8 @@
 #     (never touches a folder that has unsaved local changes).
 #   - No longer overwrites backend/llm.py - the project now ships a smarter
 #     one that re-finds your model server after Unsloth restarts.
-#   - If your model server is running during install, its address is saved
-#     automatically (and its model list is shown).
+#   - (Superseded in v4.3: the installer no longer auto-saves a model
+#     server address - Amadeus asks for it when you first open her.)
 #   - Updated package list + a startup smoke test for the backend.
 #
 #  HOW TO RUN (same every time - it picks up where it left off):
@@ -123,36 +129,13 @@ function Ensure-Env($name, $py="3.10"){
     if ($LASTEXITCODE -ne 0) { throw ("Could not create the '" + $name + "' Python environment.") }
 }
 
-# --- v2 helpers: is a model server actually answering? -----------------------
-function Test-TcpPort($host, $port){
-    try {
-        $c = New-Object System.Net.Sockets.TcpClient
-        $ar = $c.BeginConnect($host, $port, $null, $null)
-        if (-not $ar.WaitOne(1500)) { $c.Close(); return $false }
-        $ok = $c.Connected
-        $c.Close()
-        return $ok
-    } catch { return $false }
-}
-function Test-UrlAlive($url){
-    try { $u = [Uri]$url; return (Test-TcpPort $u.Host $u.Port) } catch { return $false }
-}
-# Ask an OpenAI-compatible server for its model list (empty if it does not answer).
-function Get-LlmModels($baseUrl){
-    try {
-        $r = Invoke-RestMethod -Uri ($baseUrl.TrimEnd('/') + '/models') -TimeoutSec 5 -ErrorAction Stop
-        if ($r.data) { return @($r.data | ForEach-Object { $_.id }) }
-    } catch {}
-    return @()
-}
-
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.2) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.3) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.2  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.3  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -381,56 +364,8 @@ try {
     if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else { Log "  Frontend ready." "Green" }
     Pop-Location
 
-    # ---------- STEP 10: wire in the local (Unsloth) model ----------
-    # v2 NOTE: we do NOT overwrite backend/llm.py any more - the project ships
-    # a smarter one that re-finds your server after Unsloth restarts. We only
-    # make sure llm_server.txt points at a live server when we can find one.
-    Step 10 "Connecting Amadeus to your local model server"
-    $serverFile = Join-Path $backend "llm_server.txt"
-    if (-not (Test-Path $serverFile)) { [System.IO.File]::WriteAllText($serverFile, "http://localhost:8000/v1") }
-    $configured = ((Get-Content $serverFile -ErrorAction SilentlyContinue) | Select-Object -First 1).Trim()
-    $connected = $false
-    if ($configured -and (Test-UrlAlive $configured)) {
-        Log ("  Your saved server (" + $configured + ") is answering right now.") "Green"
-        $models = Get-LlmModels $configured
-        if ($models.Count -gt 0) { Log ("  Models it offers: " + ($models -join ", ")) "Green" }
-        $connected = $true
-    } else {
-        if ($configured) { Log ("  Your saved server (" + $configured + ") is not answering yet.") "Yellow" }
-        else             { Log "  No server address saved yet." "Yellow" }
-        # Probe the ports local model servers usually listen on.
-        foreach ($p in @(8080, 8888, 8000)) {
-            if (Test-TcpPort "localhost" $p) {
-                $candidate = "http://localhost:$p/v1"
-                $models = Get-LlmModels $candidate
-                if ($models.Count -gt 0) {
-                    [System.IO.File]::WriteAllText($serverFile, $candidate)
-                    Log ("  Found a live model server on port " + $p + " (models: " + ($models -join ", ") + ").") "Green"
-                    Log ("  Saved it to backend\llm_server.txt.") "Green"
-                    $connected = $true
-                    break
-                } else {
-                    Log ("  Port " + $p + " is open but does not answer like a model API - leaving your settings alone.") "Yellow"
-                }
-            }
-        }
-        if (-not $connected) {
-            Log "  No live model server found right now - that is normal if Unsloth is not open."
-            Log "  Amadeus will keep looking on its own; you can also set the address manually later."
-        }
-    }
-    $modelFile = Join-Path $backend "data\llm_model.txt"
-    if (Test-Path $modelFile) {
-        $defaultModel = ((Get-Content $modelFile | Select-Object -First 1).Trim())
-        if ($defaultModel) {
-            Log ("  Default model name Amadeus will ask for: " + $defaultModel + "   (in backend\data\llm_model.txt)")
-        } else {
-            Log "  No default model is set - you will choose yours in Settings -> Connection."
-        }
-    }
-
     # ---------- DONE ----------
-    Step 11 "ALL DONE!"
+    Step 10 "ALL DONE!"
     Log "" "Green"
     Log "Everything is installed. Here is what to do next:" "Green"
     Log "  1) If you don't have Unsloth Desktop yet, get it from https://unsloth.ai"
