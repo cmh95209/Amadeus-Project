@@ -105,9 +105,14 @@ def _read_app_llm():
             return v or default
         except OSError:
             return default
+    # Defaults only if a file is missing/empty - the app always writes them, so
+    # this is belt-and-braces. The server guess is the standard local-LLM
+    # loopback; the MODEL and KEY must NOT guess a specific name/key (2026-10-07:
+    # the dev machine's model name leaked into fresh-install logs) - unset stays
+    # unset, and every consumer below says "not configured" instead.
     return (_read(SERVER_FILE, "http://127.0.0.1:8080/v1"),
-            _read(MODEL_FILE, "qwen3.8-27b-nvfp4"),
-            _read(KEY_FILE, "unsloth"))
+            _read(MODEL_FILE, ""),
+            _read(KEY_FILE, ""))
 
 
 def llm_ready(server, model, key, timeout=5.0):
@@ -130,6 +135,12 @@ def startup_llm_note():
     Never fatal - the service starts either way; learning just resumes
     once the model is loaded (llm_ready guards every learning batch)."""
     server, model, key = _read_app_llm()
+    if not model:
+        log("LLM target not configured yet (no model selected in the app) - "
+            "starting anyway; long-term memory begins learning once the user "
+            "connects a model in Settings (the app's LLM settings are re-read "
+            "on every learning batch).")
+        return
     ok, loaded = llm_ready(server, model, key)
     if ok:
         log(f"LLM target OK: {server} model={model} (loaded: {loaded})")
@@ -223,7 +234,11 @@ def get_llm():
                                         temperature=0.0, max_tokens=2048,
                                         timeout=240.0))
         _llm_sig = sig
-        log(f"LLM client -> {server} model={model}")
+        if model:
+            log(f"LLM client -> {server} model={model}")
+        else:
+            log("LLM client pending: no model selected yet (it follows the "
+                "app's settings and is rebuilt on the next learning batch)")
     return _llm
 
 
@@ -281,15 +296,22 @@ def _start_background_extract(chat_id: str) -> bool:
                     break
                 ok = False
                 server, model, key = _read_app_llm()
-                for _attempt in range(5):   # bounded wait: the model server
-                    ok, _loaded = llm_ready(server, model, key)  # may start after the app
-                    if ok:
-                        break
-                    time.sleep(30)
+                ok = bool(model)   # an unconfigured target is never "ready"
+                if ok:
+                    for _attempt in range(5):   # bounded wait: the model server
+                        ok, _loaded = llm_ready(server, model, key)  # may start after the app
+                        if ok:
+                            break
+                        time.sleep(30)
                 if not ok:
-                    log(f"extraction paused for chat {chat_id}: LLM not ready "
-                        f"({server} model={model}) - turns stay queued; they "
-                        f"resume on the next learning trigger")
+                    if model:
+                        log(f"extraction paused for chat {chat_id}: LLM not ready "
+                            f"({server} model={model}) - turns stay queued; they "
+                            f"resume on the next learning trigger")
+                    else:
+                        log(f"extraction paused for chat {chat_id}: no model "
+                            f"selected yet - turns stay queued; they resume once "
+                            f"the user connects a model in Settings")
                     break
                 agent.llm = get_llm()   # follow any app-side server switch
                 agent.extract(target=chat)
