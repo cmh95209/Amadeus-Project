@@ -3,6 +3,7 @@ scipy
 tensorboard
 librosa==0.10.2
 numba
+resampy
 pytorch-lightning>=2.4
 gradio<5
 ffmpeg-python
