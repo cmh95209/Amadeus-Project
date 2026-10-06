@@ -1,9 +1,17 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.1  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.1 (October 2026):
+#   - Fixed the winget name for Miniconda: Anaconda renamed the package in
+#     winget's catalog (the old "ContinuumAnalytics.Miniconda3" is gone,
+#     which stopped fresh installs on machines with current winget). The
+#     installer now tries the new name first, the old name second (for
+#     machines whose winget still knows only the old one), and then its
+#     official-download fallback - one of the three always delivers.
 #
 #  WHAT'S NEW IN v4 (October 2026):
 #   - The Miniconda step is now bulletproof: if your PC's winget cannot
@@ -132,12 +140,12 @@ function Get-LlmModels($baseUrl){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.1) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.1  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -173,7 +181,11 @@ try {
     }
     if ($found = Find-CondaHome) { Log "  Miniconda already present." "Green"; $condaHome = $found }
     else {
-        Install-Pkg "Miniconda" "ContinuumAnalytics.Miniconda3"
+        # Anaconda renamed the winget package in 2026: current catalogs know
+        # "Anaconda.Miniconda3", older ones only "ContinuumAnalytics.Miniconda3"
+        # (removed from the community source). Try the new name, then the old.
+        Install-Pkg "Miniconda" "Anaconda.Miniconda3"
+        if (-not (Find-CondaHome)) { Install-Pkg "Miniconda" "ContinuumAnalytics.Miniconda3" }
         if (-not (Find-CondaHome)) {
             # winget could not deliver Miniconda on this machine. Its package
             # lookup is unreliable on some fresh systems (e.g. Windows
