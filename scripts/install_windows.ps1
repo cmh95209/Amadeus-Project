@@ -1,9 +1,17 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.4  (resumable / safe to re-run)
-#  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.5  (resumable / safe to re-run)
+#  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.5 (October 2026):
+#   - The fresh-install test found the voice engine crashing on launch on a
+#     clean machine: its text processing needed jieba_fast, a package that
+#     only ships as a source build (needs a C compiler most fresh PCs do
+#     not have). The installer now applies the COMPLETE proven set of voice
+#     patches (five files) to the GPT-SoVITS copy - the exact code the
+#     voice engine is proven to run with, no compiler required.
 #
 #  WHAT'S NEW IN v4.4 (October 2026):
 #   - Cleaner output: conda's "a newer version of conda exists" banners are
@@ -140,12 +148,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.4) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.5) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.4  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.5  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -266,16 +274,21 @@ try {
     Step 4 "Downloading the voice engine (GPT-SoVITS)"
     $gpt = Join-Path $proj "GPT-SoVITS"
     Ensure-Clone "https://github.com/RVC-Boss/GPT-SoVITS.git" $gpt $null @("requirements.txt","extra-req.txt")
-    # Apply this project's voice patches to the GPT-SoVITS copy: a prebuilt
-    # Japanese text helper (no C compiler needed on fresh PCs - building the
-    # original package from source fails on machines with modern CMake) and a
-    # soft-fail import so voice keeps working even if that helper is absent.
-    # The files are committed in this project's repo and match the setup that
-    # is proven in daily use.
+    # Apply this project's voice patches to the GPT-SoVITS copy. The files
+    # are committed in this project's repo and mirror the exact setup that is
+    # proven in daily use: a prebuilt/optional Japanese text helper and pure
+    # python text segmentation, so a fresh PC never needs a C compiler. The
+    # copy preserves the folder structure.
     $voicePatch = Join-Path $proj "scripts\voice-patch"
-    Copy-Item (Join-Path $voicePatch "requirements.txt") (Join-Path $gpt "requirements.txt") -Force
-    Copy-Item (Join-Path $voicePatch "japanese.py") (Join-Path $gpt "GPT_SoVITS\text\japanese.py") -Force
-    Log "  Voice patches applied (prebuilt Japanese text helper - no compiler needed)." "Green"
+    $patched = @(Get-ChildItem -Path $voicePatch -Recurse -File)
+    foreach ($pf in $patched) {
+        $rel = $pf.FullName.Substring($voicePatch.Length).TrimStart("\")
+        $dest = Join-Path $gpt $rel
+        $destDir = Split-Path $dest -Parent
+        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+        Copy-Item -LiteralPath $pf.FullName -Destination $dest -Force
+    }
+    Log ("  Voice patches applied (" + $patched.Count + " files - no C compiler needed).") "Green"
 
     # ---------- STEP 5: backend env ----------
     Step 5 "Setting up the Amadeus Python environments"
