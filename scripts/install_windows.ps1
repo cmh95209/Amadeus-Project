@@ -1,9 +1,16 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v3  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4 (October 2026):
+#   - The Miniconda step is now bulletproof: if your PC's winget cannot
+#     find or install Miniconda (seen on some fresh systems, e.g. Windows
+#     Sandbox), the installer automatically falls back to Anaconda's own
+#     official download - the same program, through a link that never
+#     changes, with no extra steps for you.
 #
 #  WHAT'S NEW IN v3 (October 2026):
 #   - Installs the long-term memory update: Amadeus remembers you across
@@ -125,12 +132,12 @@ function Get-LlmModels($baseUrl){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v3) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v3  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -156,15 +163,38 @@ try {
     else { Install-Pkg "Git" "Git.Git"; Refresh-Path }
 
     $condaHome = Join-Path $env:USERPROFILE "miniconda3"
-    if (Test-Path (Join-Path $condaHome "Scripts\conda.exe")) { Log "  Miniconda already present." "Green" }
+    function Find-CondaHome {
+        # The first location that actually contains a working conda, or $null.
+        $spots = @((Join-Path $env:USERPROFILE "miniconda3"),
+                   (Join-Path $env:LOCALAPPDATA "Continuum\miniconda3"),
+                   "C:\ProgramData\miniconda3")
+        foreach ($a in $spots) { if (Test-Path (Join-Path $a "Scripts\conda.exe")) { return $a } }
+        return $null
+    }
+    if ($found = Find-CondaHome) { Log "  Miniconda already present." "Green"; $condaHome = $found }
     else {
         Install-Pkg "Miniconda" "ContinuumAnalytics.Miniconda3"
-        if (-not (Test-Path (Join-Path $condaHome "Scripts\conda.exe"))) {
-            foreach ($a in @((Join-Path $env:LOCALAPPDATA "Continuum\miniconda3"), "C:\ProgramData\miniconda3")) {
-                if (Test-Path (Join-Path $a "Scripts\conda.exe")) { $condaHome = $a; Log ("  Found Miniconda at " + $a) "Yellow"; break }
+        if (-not (Find-CondaHome)) {
+            # winget could not deliver Miniconda on this machine. Its package
+            # lookup is unreliable on some fresh systems (e.g. Windows
+            # Sandbox), so fall back to Anaconda's own official download:
+            # the permanent "-latest" file, always the current version, a
+            # link that never disappears. Same program, fully automatic.
+            Log "  winget could not install Miniconda here - falling back to Anaconda's official download (the same program, just a different door)." "Yellow"
+            $mcUrl = "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+            $mcExe = Join-Path $env:TEMP "Miniconda3-latest-Windows-x86_64.exe"
+            try {
+                Log "  Downloading Miniconda from Anaconda (about 125 MB, can take a few minutes)..."
+                Log ("  from: " + $mcUrl)
+                Invoke-WebRequest $mcUrl -OutFile $mcExe -UseBasicParsing -TimeoutSec 3600
+                Start-Process -Wait $mcExe -ArgumentList ("/S /D=`"" + $condaHome + "`"")
+            } catch {
+                Log ("  Miniconda download/install failed: " + $_.Exception.Message) "Red"
+            } finally {
+                Remove-Item $mcExe -Force -ErrorAction SilentlyContinue
             }
         }
-        if (-not (Test-Path (Join-Path $condaHome "Scripts\conda.exe"))) { Die "Could not find Miniconda after installing it. Look at this window and the log." }
+        if (-not ($condaHome = Find-CondaHome)) { Die "Could not find Miniconda after installing it. Look at this window and the log." }
     }
     $conda = Join-Path $condaHome "Scripts\conda.exe"
     Log ("  Using conda: " + $conda)
