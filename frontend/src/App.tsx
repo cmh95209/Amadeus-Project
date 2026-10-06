@@ -250,14 +250,18 @@ export default function App() {
       const g = await getGreeting(justSaved);
       if (g.ceremony) setCeremonyState(g.ceremony); // gate + note follow this
       const line = g.response;
-      if (!g.ready || !line) return; // model not up yet; the probe re-fires
+      if (!line) return; // nothing to say this probe; it re-fires
       // The ceremony wait-lines (intro / trying / reminder) are spoken but
       // do NOT finish the ceremony - they keep the box locked and the
       // probes going. A wake-up, the fallback, or an ordinary greeting
       // ends it and unlocks the box (and counts as "greeted" for this
-      // session, so a refresh never re-fires it).
+      // session, so a refresh never re-fires it). The wait-lines arrive with
+      // ready=false (the model is down by definition on a fresh install) and
+      // still must be shown: they are what teach a first-time user to
+      // connect their model.
       const ceremonialWait =
         g.kind === "intro" || g.kind === "trying" || g.kind === "reminder";
+      if (!g.ready && !ceremonialWait) return; // model not up; probe re-fires
       if (!ceremonialWait) {
         greetedThisSession.current = true;
         sessionStorage.setItem("amadeusGreeted", "1");
