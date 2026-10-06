@@ -14,3 +14,9 @@ dateparser==1.4.3
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
 sentence-transformers==6.1.0
+# Locked below: sentence-transformers pulls these in WITHOUT pinning them.
+# Pinning keeps every fresh install byte-for-byte on the same versions the
+# validated 3.13 venv runs (an unpinned "latest" can drift forward and
+# change install or runtime behaviour on machines built later).
+torch==2.14.1
+transformers==5.18.0
