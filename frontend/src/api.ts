@@ -254,7 +254,32 @@ async function fetchGreetingReport(path: string, justSaved = false): Promise<Gre
   }
   const ceremony = typeof data.ceremony === "string" ? data.ceremony : undefined;
   if (!data.ready) {
-    return { ready: false, reason: typeof data.reason === "string" ? data.reason : undefined, ceremony };
+    // A fixed first-launch wait-line (intro / trying / reminder) ships in the
+    // report even while the model is DOWN: those lines need no model, and on a
+    // fresh install the model is down until the user connects it - which is
+    // exactly what the intro line teaches. Carry the line through instead of
+    // dropping it (2026-10-07: the fresh-box run lost the welcome this way).
+    const kind = typeof data.kind === "string" ? data.kind : undefined;
+    const isWaitLine =
+      (kind === "intro" || kind === "trying" || kind === "reminder") &&
+      typeof data.response === "string";
+    if (!isWaitLine) {
+      return { ready: false, reason: typeof data.reason === "string" ? data.reason : undefined, ceremony };
+    }
+    return {
+      ready: false,
+      reason: typeof data.reason === "string" ? data.reason : undefined,
+      response: data.response,
+      speechUrl:
+        typeof data.speech_id === "string"
+          ? `${API_BASE}/speech/${encodeURIComponent(data.speech_id)}`
+          : undefined,
+      assistantId: typeof data.assistant_id === "number" ? data.assistant_id : undefined,
+      conversationId:
+        typeof data.conversation_id === "number" ? data.conversation_id : undefined,
+      ceremony,
+      kind,
+    };
   }
   if (typeof data.response !== "string") {
     throw new Error("Backend returned an invalid greeting");

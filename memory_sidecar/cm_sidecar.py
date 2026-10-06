@@ -57,6 +57,15 @@ sys.path.insert(0, os.path.join(HERE, "lib"))   # vendored character_memory 0.1.
 os.environ.setdefault("USERPROFILE", r"C:\Users\xlhhm")
 os.environ.setdefault("HOME", r"C:\Users\xlhhm")
 os.environ.setdefault("LOCALAPPDATA", r"C:\Users\xlhhm\AppData\Local")
+# Low-RAM machines (e.g. the 18 GB test sandbox): the math libraries
+# (OpenBLAS/OMP/MKL, used by numpy + the in-process embedder) default to one
+# thread PER CPU CORE, and the per-thread buffers exhaust memory while the
+# 0.6 B embedder loads - the sidecar died at startup on the fresh-box run
+# (2026-10-07). Four threads is plenty for its workload; setdefault lets a
+# tuned environment override.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
 
 HOST = "127.0.0.1"
 PORT = 9870

@@ -61,7 +61,7 @@ def _now():
 
 def _conn():
     os.makedirs(os.path.dirname(PATH_TO_STATS), exist_ok=True)
-    conn = sqlite3.connect(PATH_TO_STATS)
+    conn = sqlite3.connect(PATH_TO_STATS, timeout=30.0)
     c = conn.cursor()
     c.execute(
         "CREATE TABLE IF NOT EXISTS stats (" "key TEXT PRIMARY KEY, value REAL NOT NULL, updated_at TEXT)"

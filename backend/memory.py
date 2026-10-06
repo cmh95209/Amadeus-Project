@@ -13,6 +13,15 @@ from pathlib import Path
 DATA_DIR = "data"
 
 PATH_TO_MEMORY = os.path.join(DATA_DIR, "memory.db")
+
+def _connect_db():
+    """Every connection waits up to 30 s for a database lock instead of
+    failing. On a fresh install the FIRST request migrates the tables
+    (ALTER + backfill), holding an exclusive lock briefly, while the startup
+    page fires several requests at once (conversations, greet, ...): they
+    must queue, not 500 (2026-10-07 fresh-box run).
+    """
+    return sqlite3.connect(PATH_TO_MEMORY, timeout=30.0)
 PATH_TO_PERSONALITY = os.path.join(DATA_DIR, "personality.txt")
 PATH_TO_API_KEY = os.path.join(DATA_DIR, "api_key.txt")
 PATH_TO_LLM_MODEL = os.path.join(DATA_DIR, "llm_model.txt")
@@ -442,7 +451,7 @@ def load_conversation_anchor(conversation_id: int,
           message or the time is unusable. Does not modify memory.
     """
     now_local = (now or datetime.now()).astimezone()
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -488,7 +497,7 @@ def load_last_assistant_line(conversation_id: int,
     memory.
     """
     now_local = (now or datetime.now()).astimezone()
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -538,7 +547,7 @@ def recent_greeting_count(conversation_id: int, now: datetime | None = None,
     now_local = (now or datetime.now().astimezone()).astimezone()
     cutoff = (now_local - timedelta(seconds=window_seconds)
               ).strftime("%Y-%m-%d %H:%M")
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -562,7 +571,7 @@ def greeting_row_ids(conversation_id: int) -> List[int]:
     copies verbatim - live 2026-09-22/23) while the timing block still
     carries the facts about them.
     """
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -598,7 +607,7 @@ def previous_contact_timing(now: datetime | None = None) -> Dict[str, object] | 
         active = _active_conv_id(None)
     except Exception:
         return None
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -671,7 +680,7 @@ def other_conversation_facts(now: datetime | None = None) -> Dict[str, object]:
     MAX_CONTENT_CHARS = 120
     MAX_DIGEST_CHARS = 220
     now_local = (now or datetime.now().astimezone()).astimezone()
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -742,7 +751,7 @@ def _has_any_user_message() -> bool:
     greeting never frames a real absence as a first meeting. Never modifies
     memory.
     """
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -1018,7 +1027,7 @@ def load_previous_tab_summary(previous_conversation_id: int | None = None,
     pid = int(previous_conversation_id)
     if exclude_conversation_id is not None and pid == int(exclude_conversation_id):
         return None
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_messages_table(c)
@@ -1543,7 +1552,7 @@ def _rolling_summary_state(conversation_id=None) -> tuple:
     """(summary_text, last covered message id) for one conversation (active
     when None). ("", 0) when the conversation is unknown or unsummarized."""
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     _ensure_conversations(c)
@@ -1558,7 +1567,7 @@ def _rolling_summary_state(conversation_id=None) -> tuple:
 
 
 def _set_rolling_summary(conversation_id: int, text: str, covers_id: int) -> None:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     _ensure_conversations(c)
@@ -1606,7 +1615,7 @@ def _conversation_turns(conversation_id=None) -> List[Dict[str, object]]:
     turn). Only ACTIVE versions count, exactly like the prompt.
     """
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     rows = c.execute(
@@ -1884,7 +1893,7 @@ def _message_item(row) -> Dict[str, str]:
 def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
     # conversation_id None means "the active session"
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
 
     _ensure_messages_table(c)
@@ -1926,7 +1935,7 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 def append_message(_role: str, _content: str, conversation_id=None, japanese=None,
                    is_greeting=False) -> int:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
 
@@ -1966,7 +1975,7 @@ def append_message(_role: str, _content: str, conversation_id=None, japanese=Non
 #       message behind it, so regenerate/undo/version logic keeps its own
 #       lane and never folds it into a neighboring reply's version stack
 def get_message_is_greeting(message_id) -> bool:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     row = c.execute(
@@ -1981,7 +1990,7 @@ def get_message_is_greeting(message_id) -> bool:
 #       other sessions are untouched
 def reset_memory(conversation_id=None) -> None:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
 
@@ -1994,7 +2003,7 @@ def reset_memory(conversation_id=None) -> None:
 # pre: message_id exists; audio_path is a backend-relative file path (e.g. "generated/voice_12.wav")
 # post: the row's audio column stores that path so the line can be replayed later
 def set_message_audio(message_id: int, audio_path: str) -> None:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("UPDATE messages SET audio = ? WHERE id = ?", (audio_path, message_id))
@@ -2005,7 +2014,7 @@ def set_message_audio(message_id: int, audio_path: str) -> None:
 # pre: message_id may or may not exist
 # post: the message text is replaced; returns True when a row was changed
 def update_message_content(message_id: int, content: str) -> bool:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("UPDATE messages SET content = ? WHERE id = ?", (content, message_id))
@@ -2018,7 +2027,7 @@ def update_message_content(message_id: int, content: str) -> bool:
 # pre: message_id may or may not exist
 # post: the row is deleted; returns True when a row was removed
 def delete_message(message_id: int) -> bool:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("DELETE FROM messages WHERE id = ?", (message_id,))
@@ -2032,7 +2041,7 @@ def delete_message(message_id: int) -> bool:
 # post: returns the newest row of that session as {"id","role","content"} or None
 def get_last_message(conversation_id=None):
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     row = c.execute(
@@ -2048,7 +2057,7 @@ def get_last_message(conversation_id=None):
 # pre: message_id exists
 # post: the row's active flag is set (1 = the viewed version, 0 = hidden version)
 def set_message_active(message_id: int, active: bool) -> None:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("UPDATE messages SET active = ? WHERE id = ?", (1 if active else 0, int(message_id)))
@@ -2060,7 +2069,7 @@ def set_message_active(message_id: int, active: bool) -> None:
 # post: that row becomes the viewed version of its reply turn; every sibling
 #       version in the same turn is hidden; returns the activated id or None
 def activate_version(message_id: int):
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     row = c.execute(
@@ -2094,7 +2103,7 @@ def activate_version(message_id: int):
 #       session is empty or ends with a user message
 def get_trailing_turn(conversation_id=None) -> List[int]:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     cids = c.execute(
@@ -2110,7 +2119,7 @@ def get_trailing_turn(conversation_id=None) -> List[int]:
 #       or None when there is nothing before them
 def get_message_before(exclude_ids, conversation_id=None):
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     if exclude_ids:
@@ -2140,7 +2149,7 @@ def get_message_before(exclude_ids, conversation_id=None):
 #       {"action": "deleted", "deleted_id": <newest id>, "deleted_ids": [...]}
 def undo_last_assistant(conversation_id=None):
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     last = c.execute(
@@ -2243,7 +2252,7 @@ def load_active_conversation_raw() -> str | None:
 
 def load_active_conversation() -> int:
     """Return the active session id, creating a fresh one when nothing is stored."""
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     conv_id = _active_conv_id_from_conn(c)
@@ -2267,7 +2276,7 @@ def save_active_conversation(conversation_id: int) -> None:
 
 
 def list_conversations() -> List[Dict]:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     rows = c.execute(
@@ -2290,7 +2299,7 @@ def list_conversations() -> List[Dict]:
 
 def create_conversation(title: str | None = None) -> int:
     clean = (title or "").strip()
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("INSERT INTO conversations (title) VALUES (?)", (clean[:60] or "New chat",))
@@ -2302,7 +2311,7 @@ def create_conversation(title: str | None = None) -> int:
 
 
 def set_active_conversation(conversation_id: int) -> int:
-    conv = sqlite3.connect(PATH_TO_MEMORY)
+    conv = _connect_db()
     c = conv.cursor()
     _ensure_messages_table(c)
     row = c.execute("SELECT id FROM conversations WHERE id = ?", (int(conversation_id),)).fetchone()
@@ -2317,7 +2326,7 @@ def rename_conversation(conversation_id: int, title: str) -> bool:
     clean = (title or "").strip()
     if not clean:
         raise ValueError("Title must not be empty")
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("UPDATE conversations SET title = ? WHERE id = ?", (clean[:60], int(conversation_id)))
@@ -2329,7 +2338,7 @@ def rename_conversation(conversation_id: int, title: str) -> bool:
 
 def delete_conversation(conversation_id: int) -> bool:
     conv = int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     count = c.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
@@ -2352,7 +2361,7 @@ def delete_conversation(conversation_id: int) -> bool:
     conn.close()
 
     if active_saved == conv:
-        next_conn = sqlite3.connect(PATH_TO_MEMORY)
+        next_conn = _connect_db()
         c2 = next_conn.cursor()
         _ensure_conversations(c2)
         nxt = c2.execute("SELECT id FROM conversations ORDER BY updated_at DESC, id ASC LIMIT 1").fetchone()
@@ -2369,7 +2378,7 @@ def delete_conversation(conversation_id: int) -> bool:
 #       otherwise has no dates); the latest user message stays clean.
 def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[str, str]]:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     # The model only ever sees the ACTIVE version of each reply, so her context
@@ -2412,7 +2421,7 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
 # pre: message_id exists; japanese_text is the line she actually spoke
 # post: stored on the row so future context and backfill state are correct
 def set_message_japanese(message_id: int, japanese_text: str) -> None:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     c.execute("UPDATE messages SET japanese = ? WHERE id = ?", (japanese_text, message_id))
@@ -2424,7 +2433,7 @@ def set_message_japanese(message_id: int, japanese_text: str) -> None:
 # post: returns them in chronological order, each with the user message that
 #       triggered it, so the startup backfill can re-voice them in order
 def get_unvoiced_assistant_messages() -> List[Dict[str, str]]:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     rows = c.execute(
@@ -2463,7 +2472,7 @@ def prune_voice_files(keep_n: int | None = None) -> List[str]:
     to_delete = found[keep_n:]
     if not to_delete:
         return []
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     deleted: List[str] = []
@@ -2498,7 +2507,7 @@ def delete_voice_file(message_id: int) -> str | None:
 # post: the saved Japanese voice line of an assistant row, or None when the row
 #       is missing, is not an assistant, or has no line left to speak
 def get_message_japanese(message_id: int) -> str | None:
-    conn = sqlite3.connect(PATH_TO_MEMORY)
+    conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
     row = c.execute(
