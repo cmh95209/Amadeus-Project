@@ -1,9 +1,16 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.2  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.2 (October 2026):
+#   - The voice engine no longer needs a C compiler on a fresh PC: its
+#     Japanese text helper now installs as a prebuilt wheel (building the
+#     original package from source fails on machines with modern CMake), and
+#     if that one package is ever unavailable the install continues without
+#     it - voice still works. Found by the fresh-install test.
 #
 #  WHAT'S NEW IN v4.1 (October 2026):
 #   - Fixed the winget name for Miniconda: Anaconda renamed the package in
@@ -140,12 +147,12 @@ function Get-LlmModels($baseUrl){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.1) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.2) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.1  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.2  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -260,6 +267,16 @@ try {
     Step 4 "Downloading the voice engine (GPT-SoVITS)"
     $gpt = Join-Path $proj "GPT-SoVITS"
     Ensure-Clone "https://github.com/RVC-Boss/GPT-SoVITS.git" $gpt $null @("requirements.txt","extra-req.txt")
+    # Apply this project's voice patches to the GPT-SoVITS copy: a prebuilt
+    # Japanese text helper (no C compiler needed on fresh PCs - building the
+    # original package from source fails on machines with modern CMake) and a
+    # soft-fail import so voice keeps working even if that helper is absent.
+    # The files are committed in this project's repo and match the setup that
+    # is proven in daily use.
+    $voicePatch = Join-Path $proj "scripts\voice-patch"
+    Copy-Item (Join-Path $voicePatch "requirements.txt") (Join-Path $gpt "requirements.txt") -Force
+    Copy-Item (Join-Path $voicePatch "japanese.py") (Join-Path $gpt "GPT_SoVITS\text\japanese.py") -Force
+    Log "  Voice patches applied (prebuilt Japanese text helper - no compiler needed)." "Green"
 
     # ---------- STEP 5: backend env ----------
     Step 5 "Setting up the Amadeus Python environments"
@@ -308,9 +325,21 @@ try {
     & $conda run -n GPTSoVits pip install -r extra-req.txt --no-deps 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
     & $conda run -n GPTSoVits pip install -r requirements.txt 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        $tail = (Get-Content $pipLog -Tail 15) -join "`n"
-        throw "The voice engine packages failed to install. The last lines of the error are in voice_pip.log (your Amadeus folder):`n$tail"
+        # Last resort: install everything except the Japanese text helper
+        # (pyopenjtalk). The patched voice code treats it as optional, so
+        # voice still works without it.
+        $reqAll  = Join-Path $gpt "requirements.txt"
+        $reqCore = Join-Path $gpt "requirements-core.txt"
+        Get-Content $reqAll | Where-Object { $_ -notmatch "pyopenjtalk" } | Set-Content -Path $reqCore -Encoding ascii
+        Log "  Retrying the voice packages without the optional Japanese text helper..." "Yellow"
+        & $conda run -n GPTSoVits pip install -r $reqCore 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Log "  Voice packages installed (Japanese text helper skipped - voice still works)." "Yellow"
+        } else {
+            Pop-Location
+            $tail = (Get-Content $pipLog -Tail 15) -join "`n"
+            throw "The voice engine packages failed to install. The last lines of the error are in voice_pip.log (your Amadeus folder):`n$tail"
+        }
     }
     Pop-Location
 
