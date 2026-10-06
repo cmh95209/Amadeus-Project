@@ -230,20 +230,31 @@ export type GreetingReply = {
   speechUrl?: string;
   assistantId?: number;
   conversationId?: number;
+  /** Where the first-launch ceremony stands ("intro" | "connecting" |
+   *  "done"); absent from backends that predate the ceremony. */
+  ceremony?: string;
+  /** Which line this report carries: "intro" | "trying" | "reminder"
+   *  (ceremony wait-lines that do NOT finish the ceremony), "wake" |
+   *  "fallback" (ceremony finished), or absent (ordinary greeting). */
+  kind?: string;
 };
 
-async function fetchGreetingReport(path: string): Promise<GreetingReply> {
+async function fetchGreetingReport(path: string, justSaved = false): Promise<GreetingReply> {
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    // just_saved tells the backend the user JUST saved connection settings
+    // (a fresh attempt: re-say "checking the line", restart its reminder
+    // clock) - the 30 s probes send nothing.
+    body: JSON.stringify(justSaved ? { just_saved: true } : {}),
   });
   const data = await parseResponse(response);
   if (typeof data.ready !== "boolean") {
     throw new Error("Backend returned an invalid greeting report");
   }
+  const ceremony = typeof data.ceremony === "string" ? data.ceremony : undefined;
   if (!data.ready) {
-    return { ready: false, reason: typeof data.reason === "string" ? data.reason : undefined };
+    return { ready: false, reason: typeof data.reason === "string" ? data.reason : undefined, ceremony };
   }
   if (typeof data.response !== "string") {
     throw new Error("Backend returned an invalid greeting");
@@ -258,11 +269,13 @@ async function fetchGreetingReport(path: string): Promise<GreetingReply> {
     assistantId: typeof data.assistant_id === "number" ? data.assistant_id : undefined,
     conversationId:
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
+    ceremony,
+    kind: typeof data.kind === "string" ? data.kind : undefined,
   };
 }
 
-export async function getGreeting(): Promise<GreetingReply> {
-  return fetchGreetingReport(`${API_BASE}/greet`);
+export async function getGreeting(justSaved = false): Promise<GreetingReply> {
+  return fetchGreetingReport(`${API_BASE}/greet`, justSaved);
 }
 
 export async function getConversationGreeting(id: number): Promise<GreetingReply> {
@@ -528,6 +541,24 @@ export async function setLLMServer(address: string): Promise<string> {
     })
   );
   return typeof data.address === "string" ? data.address : address;
+}
+
+/** What the user goes by ("" = not set). Personal, like the other
+ *  connection settings. */
+export async function getUsername(): Promise<string> {
+  const data = await parseResponse(await fetch(`${API_BASE}/getUsername`, { cache: "no-store" }));
+  return typeof data.username === "string" ? data.username : "";
+}
+
+export async function setUsername(name: string): Promise<string> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/setUsername`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: name }),
+    })
+  );
+  return typeof data.username === "string" ? data.username : name;
 }
 
 export async function testConnection(): Promise<ConnectionStatus> {
