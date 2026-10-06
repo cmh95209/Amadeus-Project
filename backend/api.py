@@ -16,8 +16,11 @@ from chat import (
     setPersonality,
     getPersonality,
     reset_llm,
+    AmadeusPack,
+    _store_greeting_line,
 )
 
+import ceremony
 import llm
 import memory
 import stats
@@ -37,6 +40,10 @@ CORS(application)
 
 _speech_requests: dict[str, tuple[float, str, int | None]] = {}
 _speech_requests_lock = threading.Lock()
+# One wake-up at a time (see _serve_wake_up): generation takes seconds, and
+# a settings-save re-fire landing mid-generation would otherwise start a
+# second wake-up and double her first line.
+_wake_gate = threading.Lock()
 _reaction_audio_dir = Path(__file__).resolve().parent / "assets" / "reaction_audio"
 
 
@@ -570,6 +577,30 @@ def set_llm_server():
     return jsonify({"status": "ok", "address": saved})
 
 
+# pre: none
+# post: returns the user's saved name ('' = not set - she may still learn
+#       one from conversation, but the Settings value always outranks it)
+@application.route("/getUsername", methods=["GET"])
+def get_username():
+    response = jsonify({"username": memory.load_username()})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# pre: JSON body contains "username" (a string; '' clears the name)
+# post: the name is persisted (data/username.txt, personal - never in git)
+#       and takes effect in the prompt from the next turn on (replies AND
+#       greetings)
+@application.route("/setUsername", methods=["POST"])
+def set_username():
+    data = request.get_json(silent=True)
+    name = data.get("username") if isinstance(data, dict) else None
+    if not isinstance(name, str):
+        return jsonify({"message": "Missing 'username' field"}), 400
+    saved = memory.save_username(name)
+    return jsonify({"status": "ok", "username": saved})
+
+
 def _model_in_list(model_name: str, server_models: list[str]) -> bool:
     """Does the configured model match anything the server advertises?
 
@@ -728,35 +759,152 @@ def model_ready() -> Dict[str, object]:
     return {"ready": True, "reason": ""}
 
 
-# pre: the configured model is servable (see model_ready) and an API key set
-def _mint_speech_id(pack, assistant_id) -> str:
-    """Mint a single-use speech id for a stored assistant line (the same
-    mechanism /greet uses for the startup greeting)."""
+def _mint_speech_id_text(ja_text, assistant_id) -> str:
+    """Register a single-use speech id for an EXPLICIT Japanese text (the
+    same table the /speech/<id> streaming endpoint reads)."""
     speech_id = uuid.uuid4().hex
     with _speech_requests_lock:
         now = time.monotonic()
         for key in [k for k, (created, _, _) in _speech_requests.items()
                     if now - created > 300]:
             _speech_requests.pop(key, None)
-        _speech_requests[speech_id] = (now, pack.assistant_reply_JPS, assistant_id)
+        _speech_requests[speech_id] = (now, ja_text, assistant_id)
         while len(_speech_requests) > 20:
             _speech_requests.pop(next(iter(_speech_requests)))
     return speech_id
 
 
-# post: generates AND stores one startup greeting as a normal assistant
-#       message, mints a single-use speech id for its Japanese line (the same
-#       voice mechanism a normal reply uses), and returns the English line for
-#       the UI. If the model is not ready yet, returns 200 with ready=false so
-#       the client can wait (and re-fire when the model comes up) instead of
-#       treating it as an error.
+# pre: the configured model is servable (see model_ready) and an API key set
+def _mint_speech_id(pack, assistant_id) -> str:
+    """Mint a single-use speech id for a stored assistant line (the same
+    mechanism /greet uses for the startup greeting)."""
+    return _mint_speech_id_text(pack.assistant_reply_JPS, assistant_id)
+
+
+def _connection_settings_present() -> bool:
+    """The minimum saved-settings signal for the first-launch ceremony:
+    a real model name. The server address may be empty (= auto-detect the
+    local ports) and the API key may be empty (servers that need no key),
+    so the model name is what makes "settings saved" true."""
+    model = getLLMModel()
+    return bool(model) and model != "No Model Selected."
+
+
+def _serve_ceremony_line(kind: str, ready: Dict[str, object],
+                         new_state: str):
+    """Deliver one of the fixed first-launch lines (intro / trying /
+    reminder): store it as a greeting line, mint the speech id from the
+    SPOKEN text (separate from the shown Japanese for these lines - see
+    ceremony.py), and return the /greet JSON with the ceremony fields.
+    These lines never touch the model, so a fresh install can speak them
+    with nothing configured yet."""
+    en, ja_display, ja_voice = ceremony.line(kind)
+    pack = AmadeusPack(assistant_reply_ENG=en, assistant_reply_JPS=ja_display)
+    assistant_id, conv_id = _store_greeting_line(pack)
+    ceremony.note(kind, new_state)
+    speech_id = _mint_speech_id_text(ja_voice, assistant_id)
+    return jsonify({
+        "ready": bool(ready["ready"]),
+        "response": en,
+        "speech_id": speech_id,
+        "assistant_id": assistant_id,
+        "conversation_id": conv_id,
+        "ceremony": new_state,
+        "kind": kind,
+    })
+
+
+def _serve_wake_up():
+    """Deliver the wake-up line and end the ceremony for good.
+
+    The line is GENERATED (not fixed), through the same guard ladder as
+    every other greeting - one forced call, one bounded retry, the
+    time-lie net. If generation fails on a reachable model, the static
+    fallback line ships instead: she is never left silent, and the chat
+    box unlocks only after a line actually lands."""
+    if not _wake_gate.acquire(blocking=False):
+        # A wake-up is already being generated (e.g. a settings-save
+        # re-fired the probe mid-generation): stay silent - the in-flight
+        # call ships the line and flips the state to done, and the client
+        # keeps polling until it does.
+        return jsonify({"ready": False,
+                        "reason": "wake-up in progress",
+                        "ceremony": memory.load_ceremony_state()})
+    try:
+        kind = "wake"
+        try:
+            pack, assistant_id, conv_id = generate_greeting(mode="wake")
+            voice = pack.assistant_reply_JPS
+        except Exception as exc:
+            print("[Flask] Wake-up failure:", repr(exc))
+            en, ja_display, ja_voice = ceremony.line("fallback")
+            pack = AmadeusPack(assistant_reply_ENG=en, assistant_reply_JPS=ja_display)
+            assistant_id, conv_id = _store_greeting_line(pack)
+            voice = ja_voice
+            kind = "fallback"
+        ceremony.note(kind, memory.CEREMONY_DONE)
+        speech_id = _mint_speech_id_text(voice, assistant_id)
+        return jsonify({
+            "ready": True,
+            "response": pack.assistant_reply_ENG,
+            "speech_id": speech_id,
+            "assistant_id": assistant_id,
+            "conversation_id": conv_id,
+            "ceremony": memory.CEREMONY_DONE,
+            "kind": kind,
+        })
+    finally:
+        _wake_gate.release()
+
+
+# post: if the first-launch ceremony (ceremony.py) is not done yet, this
+#       route drives it: the fixed intro / trying / reminder lines (which
+#       need no model at all), the generated wake-up line once the model
+#       answers, or the static fallback if generation fails - adding the
+#       "ceremony" + "kind" fields to the usual response. Once the
+#       ceremony is done it behaves exactly as before: a key is required,
+#       the model must be ready, and one generated greeting is stored as
+#       a normal assistant message with a single-use speech id minted for
+#       its Japanese line (the same voice mechanism a normal reply uses).
+#       If the model is not ready yet, returns 200 with ready=false so
+#       the client can wait (and re-fire when the model comes up) instead
+#       of treating it as an error. The body may carry {"just_saved":
+#       true} when the client just saved connection settings - a fresh
+#       attempt, which re-says the "trying" line and restarts the
+#       reminder clock even while already "connecting".
 @application.route("/greet", methods=["POST"])
 def greet():
+    body = request.get_json(silent=True)
+    just_saved = bool(body.get("just_saved")) if isinstance(body, dict) else False
+    state = memory.load_ceremony_state()
+
+    if state != memory.CEREMONY_DONE:
+        ready = model_ready()
+        kind, new_state = ceremony.decide(
+            state, bool(ready["ready"]), _connection_settings_present(),
+            just_saved=just_saved)
+        if kind in ceremony.FIXED_KINDS:
+            return _serve_ceremony_line(kind, ready, new_state)
+        if kind == "wake":
+            return _serve_wake_up()
+        if kind == "normal":
+            # Brand-new install whose model is already running: record the
+            # ceremony as done and run the normal greeting below.
+            ceremony.note(kind, new_state)
+        elif kind is None:
+            # Nothing new to say this call (e.g. the reminder window has
+            # not elapsed): the client keeps waiting - same shape as the
+            # old not-ready reply, plus where the ceremony stands.
+            return jsonify({"ready": False, "reason": ready["reason"],
+                            "ceremony": state})
+        # kind == "normal" falls through to the normal path below.
+
     if not has_api_key():
         return jsonify({"message": "No API key. Add one in Settings."}), 400
     ready = model_ready()
     if not ready["ready"]:
-        return jsonify({"ready": False, "reason": ready["reason"]})
+        return jsonify({"ready": False, "reason": ready["reason"],
+                        "ceremony": memory.CEREMONY_DONE})
     try:
         pack, assistant_id, conv_id = generate_greeting()
     except Exception as exc:
@@ -770,6 +918,7 @@ def greet():
         "speech_id": speech_id,
         "assistant_id": assistant_id,
         "conversation_id": conv_id,
+        "ceremony": memory.CEREMONY_DONE,
     })
 
 
@@ -785,6 +934,16 @@ def greet():
 #       "no line", never an error (a tab switch must never break).
 @application.route("/conversations/<int:conversation_id>/greet", methods=["POST"])
 def greet_conversation(conversation_id):
+    # While the first-launch ceremony runs, tab switches deliver no line:
+    # the chat box stays locked until the wake-up (or fallback) line lands,
+    # and nothing may speak before it. The guard sits BEFORE the target
+    # tab is activated, so a switch can never change the active
+    # conversation mid-ceremony.
+    ceremony_state = memory.load_ceremony_state()
+    if ceremony_state != memory.CEREMONY_DONE:
+        return jsonify({"ready": False,
+                        "reason": "first launch in progress",
+                        "ceremony": ceremony_state})
     if not has_api_key():
         return jsonify({"message": "No API key. Add one in Settings."}), 400
     # Capture the tab the user LEFT before activating the target - the

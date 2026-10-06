@@ -2185,6 +2185,35 @@ GREETING_INSTRUCTION_SWITCH = {
     ),
 }
 
+# First-launch WAKE-UP (2026-10-05 ceremony): the GENERATED line she speaks
+# the moment the model first connects (the fixed intro/trying/reminder lines
+# in ceremony.py are her only pre-written speech). Two variants: with or
+# without a saved username - the Settings name outranks what she could have
+# learned in chat (user decision 2026-10-05), so if it is set she addresses
+# it instead of asking for a name. The core wording is the user's own
+# approved script.
+WAKE_INSTRUCTION_ASK = {
+    "role": "system",
+    "content": (
+        "The user has just connected you for the first time. Connection "
+        "established, initial boot. Introduce yourself and ask for the "
+        "user's name. If they have no username set, ask the user to set "
+        "one if they like. Speak freely and naturally."
+    ),
+}
+WAKE_INSTRUCTION_NAMED = {
+    "role": "system",
+    "content": (
+        "The user has just connected you for the first time. Connection "
+        "established, initial boot. Introduce yourself to the user - they "
+        "go by {name}. Speak freely and naturally."
+    ),
+}
+
+# The synthetic arrival line the wake prompt ends on (prompt-only, never
+# stored) - the same strong steering position the startup greeting uses.
+WAKE_ARRIVAL = "[Your model just connected for the first time.]"
+
 _PACK_RULES = {
     "role": "system",
     "content": (
@@ -2453,8 +2482,24 @@ def generate_greeting(mode: str = "startup",
                       conversation_id: int | None = None,
                       previous_conversation_id: int | None = None) -> tuple[AmadeusPack, int, int]:
     switch = (mode == "switch")
-    instruction = (GREETING_INSTRUCTION_SWITCH if switch
-                   else GREETING_INSTRUCTION)
+    wake = (mode == "wake")
+    if wake:
+        # The first-launch wake-up: same call ladder, same guards (the
+        # situation engine and the time-lie net run as usual - on a fresh
+        # install that is "first", exactly the measured truth); only the
+        # instruction and the arrival line change.
+        username = store.load_username().strip()
+        if username:
+            instruction = {
+                "role": WAKE_INSTRUCTION_NAMED["role"],
+                "content": WAKE_INSTRUCTION_NAMED["content"].replace(
+                    "{name}", username),
+            }
+        else:
+            instruction = WAKE_INSTRUCTION_ASK
+    else:
+        instruction = (GREETING_INSTRUCTION_SWITCH if switch
+                       else GREETING_INSTRUCTION)
     if conversation_id is None:
         # Startup: the greeted tab is the active one (the timing context's
         # per-tab anchor and the situation both key off it).
@@ -2496,7 +2541,8 @@ def generate_greeting(mode: str = "startup",
         else:
             arrival = "[The user has switched to this conversation.]"
     else:
-        arrival = "[The user just opened the app.]"
+        # A wake-up is not "opening the app" - it is coming online.
+        arrival = WAKE_ARRIVAL if wake else "[The user just opened the app.]"
     # When the prompt tail is a run of her own switch lines (the
     # re-greeting case above), hide the stored greeting rows from the
     # history so she cannot repeat a line she cannot see (2026-09-23). The
