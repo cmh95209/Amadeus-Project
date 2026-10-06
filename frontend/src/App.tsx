@@ -33,6 +33,8 @@ import {
   setContextBudget,
   getLLMServer,
   setLLMServer,
+  getUsername,
+  setUsername,
   testConnection,
   ConnectionStatus,
   Conversation,
@@ -78,6 +80,7 @@ export default function App() {
   const [voiceRetention, setVoiceRetentionState] = useState<number>(100);
   const [contextBudget, setContextBudgetState] = useState<number>(40000);
   const [serverAddress, setServerAddressState] = useState<string>("");
+  const [userName, setUserName] = useState("");
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -139,6 +142,16 @@ export default function App() {
   const modelWasFound = useRef<boolean | null>(null);
   const greetingInFlight = useRef<boolean>(false);
   const switchGreetingInFlight = useRef<boolean>(false);
+  // First-launch ceremony (the backend /greet drives it): where she stands
+  // per the last /greet report - null until the first report, "intro" /
+  // "connecting" while she is still coming online, "done" when the
+  // ceremony finished (the normal app from then on, forever). While the
+  // ceremony is unfinished the chat box stays locked: she cannot answer
+  // until she has generated her first line.
+  const [ceremonyState, setCeremonyState] = useState<string | null>(null);
+  const ceremonyPending = ceremonyState !== null && ceremonyState !== "done";
+  const ceremonyPendingRef = useRef<boolean>(false);
+  ceremonyPendingRef.current = ceremonyPending;
 
   useEffect(() => {
     void initialize();
@@ -229,16 +242,26 @@ export default function App() {
     }
   }
 
-  async function fireGreeting() {
+  async function fireGreeting(justSaved = false) {
     if (greetingInFlight.current || greetedThisSession.current) return;
     if (loading) return; // do not interrupt an in-flight turn
     greetingInFlight.current = true;
     try {
-      const g = await getGreeting();
+      const g = await getGreeting(justSaved);
+      if (g.ceremony) setCeremonyState(g.ceremony); // gate + note follow this
       const line = g.response;
       if (!g.ready || !line) return; // model not up yet; the probe re-fires
-      greetedThisSession.current = true;
-      sessionStorage.setItem("amadeusGreeted", "1");
+      // The ceremony wait-lines (intro / trying / reminder) are spoken but
+      // do NOT finish the ceremony - they keep the box locked and the
+      // probes going. A wake-up, the fallback, or an ordinary greeting
+      // ends it and unlocks the box (and counts as "greeted" for this
+      // session, so a refresh never re-fires it).
+      const ceremonialWait =
+        g.kind === "intro" || g.kind === "trying" || g.kind === "reminder";
+      if (!ceremonialWait) {
+        greetedThisSession.current = true;
+        sessionStorage.setItem("amadeusGreeted", "1");
+      }
       setMessages((current) => [
         ...current,
         { role: "assistant", content: line, id: g.assistantId, is_greeting: true },
@@ -290,8 +313,15 @@ export default function App() {
       const status = await testConnection();
       setConnStatus(status);
       const found = status.reachable && status.model_found;
-      if (found && modelWasFound.current !== true && !greetedThisSession.current) {
-        void fireGreeting(); // fires the moment the model becomes servable
+      // Two re-fires: the classic one (the model just became servable -
+      // the "I forgot to start it" case), and the ceremony one (while she
+      // is still coming online the probe keeps asking /greet every 30 s -
+      // the backend answers with a new line when it has one, or with
+      // silence).
+      const ceremonialWait = ceremonyPendingRef.current && !greetedThisSession.current;
+      if (!greetedThisSession.current &&
+          ((found && modelWasFound.current !== true) || ceremonialWait)) {
+        void fireGreeting();
       }
       modelWasFound.current = found;
     } catch {
@@ -331,7 +361,7 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr] =
+      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr, savedName] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
@@ -342,6 +372,7 @@ export default function App() {
           getVoiceRetention().catch(() => 100),
           getContextBudget().catch(() => 40000),
           getLLMServer().catch(() => ""),
+          getUsername().catch(() => ""),
         ]);
 
       setMessages(memory);
@@ -352,6 +383,7 @@ export default function App() {
       setVoiceRetentionState(voiceCap);
       setContextBudgetState(budgetCap);
       setServerAddressState(serverAddr);
+      setUserName(savedName);
       if (convs) {
         setConversations(convs.conversations);
         setActiveConvId(convs.active_id);
@@ -379,6 +411,12 @@ export default function App() {
     const text = input.trim();
 
     if (!text || loading) {
+      return;
+    }
+
+    // First-launch ceremony: she cannot reply until she has come online
+    // (her wake-up or fallback line has landed). The box below says why.
+    if (ceremonyPending) {
       return;
     }
 
@@ -521,10 +559,18 @@ export default function App() {
         setApiKeyInput("");
       }
       await setModel(nextModel);
+      await setUsername(userName);
       await setVoiceRetention(voiceRetention);
       await setContextBudget(contextBudget);
       await setLLMServer(serverAddress);
       void refreshConnection();
+      // The connection settings were JUST saved: during the first-launch
+      // ceremony this is a fresh attempt - ask the backend to re-check the
+      // line at once (she re-says "checking the line" / wakes up if the
+      // model is already answering). Outside the ceremony this is a no-op
+      // (already greeted this session, or the model not being servable is
+      // the probe's job).
+      void fireGreeting(true);
 
       setStatus(`Model set to ${nextModel}`);
       setSettingsNotice("Connection settings saved.");
@@ -1265,8 +1311,10 @@ export default function App() {
                 event.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder="Message Amadeus..."
+            disabled={ceremonyPending}
+            placeholder={ceremonyPending ? "..." : "Message Amadeus..."}
             rows={1}
+            aria-disabled={ceremonyPending}
           />
 
           <button
@@ -1287,11 +1335,16 @@ export default function App() {
 
           <button
             type="submit"
-            disabled={!input.trim() || loading}
+            disabled={!input.trim() || loading || ceremonyPending}
           >
             Send
           </button>
         </form>
+        {ceremonyPending && (
+          <p className="ceremony-note" role="status">
+            She's still coming online — finish the setup in Settings.
+          </p>
+        )}
         <div className="build-label">
           <span className="build-dot" aria-hidden="true" />
           DEVELOPER BUILD
@@ -1427,6 +1480,23 @@ export default function App() {
                   placeholder="your model name"
                 />
               </label>
+
+              <label>
+                Your name
+                <input
+                  value={userName}
+                  disabled={settingsBusy}
+                  onChange={(event) => setUserName(event.target.value)}
+                  placeholder="what she should call you (optional)"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-describedby="your-name-help"
+                />
+              </label>
+              <p className="settings-help" id="your-name-help">
+                Optional. If you give her a name, she calls you by it. Leave
+                blank to clear it.
+              </p>
 
               {connStatus && connStatus.reachable && connStatus.models.length > 0 && (
                 <div className="model-chips">

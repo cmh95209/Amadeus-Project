@@ -726,6 +726,18 @@ button {
   outline: 2px solid white;
 }
 
+/* The quiet note beneath the composer while the first-launch ceremony is
+   running (she is still coming online; the chat box is locked). */
+.ceremony-note {
+  margin: 6px 0 0;
+  padding: 0 clamp(18px, 3vw, 48px);
+  color: #9ccdb5;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  pointer-events: none;
+}
+
 /* A quiet build signature beneath the message composer. */
 .build-label {
   display: flex;
