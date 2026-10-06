@@ -125,12 +125,12 @@ function Get-LlmModels($baseUrl){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v2) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v3) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v2  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v3  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
