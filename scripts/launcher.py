@@ -55,13 +55,34 @@ def _pip_install_sidecar() -> bool:
     req = CM_DIR / "requirements.txt"
     try:
         subprocess.run([str(_cm_python()), "-m", "pip", "install",
-                        "-r", str(req)], check=True)
+                        "--no-cache-dir", "-r", str(req)], check=True)
         return True
     except (subprocess.CalledProcessError, OSError) as e:
         print(f"[Launcher] WARNING: memory sidecar install failed ({e}) - "
               "the app runs without long-term memory (retried at next "
               "start).")
         return False
+
+
+def _cm_base_python() -> Path | None:
+    """Interpreter to build the sidecar venv from, if a better one exists.
+
+    The sidecar's pinned package list needs Python 3.12+ (numpy 2.5.x), but
+    the app environment the installer builds is 3.10. The installer also
+    creates a dedicated 'amadeus-cm' conda environment (Python 3.13) for
+    exactly this purpose; when it exists the venv is built from it, so the
+    sidecar installs cleanly on EVERY fresh machine. Returns None when no
+    such environment is present (falls back to this launcher's interpreter,
+    which is fine on machines whose sidecar venv is already installed)."""
+    conda = find_conda()
+    if not conda:
+        return None
+    home = Path(conda).resolve().parent.parent
+    if os.name == "nt":
+        candidate = home / "envs" / "amadeus-cm" / "python.exe"
+    else:
+        candidate = home / "envs" / "amadeus-cm" / "bin" / "python"
+    return candidate if candidate.exists() else None
 
 
 def ensure_cm_sidecar() -> bool:
@@ -87,10 +108,15 @@ def ensure_cm_sidecar() -> bool:
         if not _pip_install_sidecar():
             return False
     else:
+        base = _cm_base_python()
+        source = ("the dedicated 'amadeus-cm' environment"
+                  if base is not None else "the app environment")
         print("[Launcher] Memory sidecar not installed yet - one-time setup "
-              "(creates its venv and downloads packages, a few minutes)...")
+              f"(creates its venv from {source} and downloads packages, "
+              "a few minutes)...")
         try:
-            subprocess.run([sys.executable, "-m", "venv", str(CM_DIR / "venv")],
+            interpreter = str(base) if base is not None else sys.executable
+            subprocess.run([interpreter, "-m", "venv", str(CM_DIR / "venv")],
                            check=True)
         except (subprocess.CalledProcessError, OSError) as e:
             print(f"[Launcher] WARNING: memory sidecar venv creation "
