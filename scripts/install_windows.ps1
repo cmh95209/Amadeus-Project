@@ -1,9 +1,19 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.3  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.4  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.4 (October 2026):
+#   - Cleaner output: conda's "a newer version of conda exists" banners are
+#     suppressed (harmless but confusing), and the steps no longer talk
+#     about "your fork".
+#   - The ALL DONE screen now says what Amadeus actually needs: a cloud
+#     model service (e.g. OpenRouter or OpenAI) or a local model server
+#     (e.g. KoboldCpp, Unsloth Desktop, NInfer, Ollama or vLLM) - and
+#     points you to her introduction message, which walks you through
+#     connecting it.
 #
 #  WHAT'S NEW IN v4.3 (October 2026):
 #   - The installer no longer tries to connect Amadeus to a model server
@@ -130,12 +140,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.3) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.4) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.3  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.4  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -205,6 +215,12 @@ try {
     # older conda, which has no 'tos' command.
     & $conda tos accept 2>$null | Out-Null
     Log "  Conda terms of service handled (required by newer conda before it will build environments unattended)."
+    # Silence conda's "a newer version of conda exists" banners: they are
+    # harmless (we always install the newest conda the package sources
+    # offer) but confusing mid-install, and upgrading conda again halfway
+    # through would add risk without any benefit. Best effort: older conda
+    # simply ignores the unknown setting.
+    & $conda config --set notify_outdated_conda false 2>$null | Out-Null
 
     if (Get-Command node -ErrorAction SilentlyContinue) { Log "  Node.js already present." "Green" }
     else { Install-Pkg "Node.js" "OpenJS.NodeJS.LTS"; Refresh-Path }
@@ -216,11 +232,11 @@ try {
     & git lfs install 2>$null
     Log "  Git + LFS ready." "Green"
 
-    # ---------- STEP 3: Amadeus project (your fork, main branch) ----------
-    Step 3 "Downloading the Amadeus project (your fork, with all new features)"
+    # ---------- STEP 3: Amadeus project ----------
+    Step 3 "Downloading the Amadeus project"
     $proj = Join-Path $InstallDir "Amadeus-Project"
     if (Test-Complete $proj @("backend\main.py","start_windows.bat")) {
-        Log "  Already have Amadeus-Project - checking for updates from your fork." "Yellow"
+        Log "  Already have Amadeus-Project - checking for updates." "Yellow"
         if (Test-Path (Join-Path $proj ".git")) {
             Push-Location $proj
             try {
@@ -230,7 +246,7 @@ try {
                 $status  = & git status --porcelain
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
-                    if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version of your fork." "Green" }
+                    if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
                 } elseif ($current -ne $Branch) {
                     Log ("  This folder is on branch '" + $current + "', so I did NOT touch it.") "Yellow"
@@ -367,17 +383,19 @@ try {
     # ---------- DONE ----------
     Step 10 "ALL DONE!"
     Log "" "Green"
-    Log "Everything is installed. Here is what to do next:" "Green"
-    Log "  1) If you don't have Unsloth Desktop yet, get it from https://unsloth.ai"
-    Log "     and load a model in it (e.g. Qwen3). Amadeus needs a model running."
-    Log "  2) Double-click this file to START Amadeus:"
+    Log "Everything is installed. Amadeus needs a model to think with:" "Green"
+    Log "  - a cloud model service (e.g. OpenRouter or OpenAI), or"
+    Log "  - a local model server on this PC (e.g. KoboldCpp, Unsloth"
+    Log "    Desktop, NInfer, Ollama or vLLM)."
+    Log "Here is what to do next:" "Green"
+    Log "  1) Double-click this file to START Amadeus:"
     Log ("       " + (Join-Path $proj "start_windows.bat"))
-    Log "  3) When it opens in your browser, open Settings -> Connection and"
-    Log "     click 'Test connection'. The dot turns green when she can reach"
-    Log "     your model. Pick your model from the chips (or type its name),"
-    Log "     then paste your API key (Unsloth > Settings > API, starts with sk-unsloth-...)."
-    Log "  4) If Amadeus cannot find your model server, open backend\llm_server.txt"
-    Log "     and make sure it says http://localhost:<your Unsloth port>/v1"
+    Log "  2) When she opens in your browser, read her introduction message -"
+    Log "     it walks you through connecting your model, step by step."
+    Log "  3) (Shortcut) You can also open Settings -> Connection and click"
+    Log "     'Test connection' - the dot turns green when she can reach"
+    Log "     your model. Pick your model from the chips (or type its name)"
+    Log "     and paste its API key, if your provider has one."
     Log ""
     Log ("(Install log saved to: " + $LogPath + ")")
     Read-Host "Press Enter to close this window" | Out-Null
