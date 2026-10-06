@@ -2206,15 +2206,27 @@ def _active_conv_id_from_conn(c: sqlite3.Cursor) -> int:
         saved = c.execute("SELECT id FROM conversations WHERE id = ?", (stored,)).fetchone()
         if saved is None:
             # The stored pointer was empty, corrupt, or names a session that no
-            # longer exists. Reset to the first session - and LEAVE A TRACE: a
-            # silent reset here is how the chat pane and the backend can drift
-            # apart on which conversation is active (observed 2026-09-20).
+            # longer exists. Recover to the MOST RECENTLY USED session (newest
+            # updated_at - the same successor rule the delete path uses), not
+            # blindly to the first one: if the note was lost, "where the user
+            # last was" is the best guess. On a fresh install the first
+            # session is also the most recent one, so fresh-install behaviour
+            # is unchanged. (2026-10-06: a lost note used to dump users back
+            # onto General after a browser tab reload.) And LEAVE A TRACE: a
+            # silent recovery here is how the chat pane and the backend can
+            # drift apart on which conversation is active (observed 2026-09-20).
+            rec = c.execute(
+                "SELECT id FROM conversations "
+                "ORDER BY updated_at DESC, id ASC LIMIT 1"
+            ).fetchone()
+            if rec is not None:
+                conv_id = rec[0]
             title_row = c.execute(
                 "SELECT title FROM conversations WHERE id = ?", (conv_id,)
             ).fetchone()
             print(
                 f"[Amadeus] Active-conversation pointer unusable "
-                f"(file held {raw!r}); reset to session {conv_id} "
+                f"(file held {raw!r}); recovered to session {conv_id} "
                 f"({title_row[0] if title_row else 'unknown'})."
             )
             save_active_conversation(conv_id)
