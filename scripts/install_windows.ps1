@@ -1,9 +1,19 @@
 ﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v2  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v3  (resumable / safe to re-run)
 #  Installs everything and connects Amadeus to your LOCAL (Unsloth) model.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v3 (October 2026):
+#   - Installs the long-term memory update: Amadeus remembers you across
+#     conversations (her memory engine runs as its own helper program).
+#   - The memory engine runs in its own newer Python setup, so it installs
+#     cleanly on every machine.
+#   - On a brand-new install she now "meets" you first: a short welcome,
+#     then you connect her model, and she asks for your name.
+#   - Newer Miniconda's terms-of-service check is handled automatically
+#     (fixes installs that stopped at Step 5 on some machines).
 #
 #  WHAT'S NEW IN v2 (September 13, 2026):
 #   - Installs YOUR fork's feature branch (local LLM support, multi-session
@@ -37,11 +47,12 @@ $env:CONDA_PLUGINS_AUTO_ACCEPT_TOS = "yes"
 
 $InstallDir = Join-Path $env:USERPROFILE "Amadeus"
 $LogPath    = Join-Path $InstallDir "install_log.txt"
-# Your fork's FEATURE branch holds the greeting features (startup + switch
-# greetings, anti-repeat pass, 2026-09-22/23); main lags behind until that
-# branch is merged. FLIP $Branch BACK TO "main" once the merge is done.
+# Your fork's FEATURE branch holds all the current features (greetings,
+# voice, long-term memory, the first-meeting welcome); main lags behind
+# until that branch is merged. FLIP $Branch BACK TO "main" once the merge
+# is done.
 $ForkUrl   = "https://github.com/cmh95209/Amadeus-Project.git"
-$Branch    = "feature/startup-greeting"
+$Branch    = "feature/character-memory-spike"
 
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
@@ -187,7 +198,7 @@ try {
                 $status  = & git status --porcelain
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
-                    if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version of your fork's main branch." "Green" }
+                    if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version of your fork." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
                 } elseif ($current -ne $Branch) {
                     Log ("  This folder is on branch '" + $current + "', so I did NOT touch it.") "Yellow"
@@ -209,8 +220,12 @@ try {
     Ensure-Clone "https://github.com/RVC-Boss/GPT-SoVITS.git" $gpt $null @("requirements.txt","extra-req.txt")
 
     # ---------- STEP 5: backend env ----------
-    Step 5 "Setting up the Amadeus backend (Python environment 'amadeus')"
+    Step 5 "Setting up the Amadeus Python environments"
     Ensure-Env "amadeus"
+    # The memory sidecar's package list needs a newer Python (3.12+) than the
+    # app environment (3.10), so it gets its own environment. The launcher
+    # finds it on first start and builds the sidecar from it.
+    Ensure-Env "amadeus-cm" "3.13"
     & $conda run -n amadeus pip install --upgrade pip | Out-Null
     & $conda run -n amadeus pip install Flask flask-cors requests tqdm langchain langchain-openai pydantic
     if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
