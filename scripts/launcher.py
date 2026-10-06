@@ -620,8 +620,12 @@ def run(no_browser: bool = False) -> None:
     # take ~10 min, hence the 600s wait), so it starts here and is waited
     # on LAST - its startup overlaps the other children. Soft-fail on
     # purpose: the app is fully functional without it (the bridge degrades
-    # to the no-memory baseline).
+    # to the no-memory baseline). On a RAM-constrained machine its first
+    # start can die mid-load (2026-10-07: the 18 GB test box, sharing RAM
+    # with a local 27 B model, failed a 55 MB allocation), so the launcher
+    # retries twice more before giving up.
     cm = None
+    cm_available = False
     if ensure_cm_sidecar():
         print("[Launcher] Starting CharacterMemory sidecar...")
         cm = start_process(
@@ -629,6 +633,7 @@ def run(no_browser: bool = False) -> None:
             [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
             CM_DIR,
         )
+        cm_available = True
     else:
         print("[Launcher] CharacterMemory sidecar not available - "
               "continuing without long-term memory.")
@@ -649,12 +654,27 @@ def run(no_browser: bool = False) -> None:
     )
     wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
 
-    if cm is not None:
-        try:
-            wait_for_port("cm-sidecar", CM_PORT, cm, timeout=600)
-        except (TimeoutError, RuntimeError) as e:
-            print("[Launcher] WARNING: cm-sidecar not ready - the app runs "
-                  "without long-term memory:", e)
+    if cm_available:
+        for attempt in range(1, 4):
+            try:
+                wait_for_port("cm-sidecar", CM_PORT, cm, timeout=600)
+                break
+            except (TimeoutError, RuntimeError) as e:
+                terminate_process_tree(cm)
+                if attempt < 3:
+                    print("[Launcher] The memory sidecar did not come up on "
+                          f"attempt {attempt} ({e}) - trying again in 30 s...")
+                    time.sleep(30)
+                    cm = start_process(
+                        "cm-sidecar",
+                        [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
+                        CM_DIR,
+                    )
+                else:
+                    print("[Launcher] WARNING: cm-sidecar not ready after 3 "
+                          "attempts - the app runs without long-term memory. "
+                          "Check .runtime/logs/cm-sidecar.log for details.")
+                    cm = None
 
     url = f"http://127.0.0.1:{FRONTEND_PORT}/"
 

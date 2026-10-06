@@ -155,9 +155,24 @@ t_start = time.time()
 startup_llm_note()
 
 t0 = time.time()
+import torch
 from sentence_transformers import SentenceTransformer
-_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B", device="cpu")
-log(f"embedder loaded in {time.time()-t0:.1f}s (CPU, dim={_model.get_embedding_dimension()})")
+# The model ships half-precision weights (its config declares bfloat16);
+# pin 16-bit explicitly so a fresh install can never silently double the
+# footprint by loading full-precision, and load through the low-memory
+# path (weights are materialized shard by shard instead of double-copied)
+# to keep the load-time memory peak as small as it can be - on a
+# RAM-constrained machine that is the difference between her long-term
+# memory starting or dying mid-load (2026-10-07: the 18 GB test box,
+# sharing RAM with a local 27 B model, failed a 55 MB allocation).
+# 16-bit vs 32-bit moves retrieval rankings only at ~1e-3 relative
+# precision - imperceptible for cosine similarity. Encoded vectors are
+# cast back to float32 before storage.
+_model = SentenceTransformer(
+    "Qwen/Qwen3-Embedding-0.6B", device="cpu",
+    model_kwargs={"torch_dtype": torch.float16,
+                  "low_cpu_mem_usage": True})
+log(f"embedder loaded in {time.time()-t0:.1f}s (CPU 16-bit, dim={_model.get_embedding_dimension()})")
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
