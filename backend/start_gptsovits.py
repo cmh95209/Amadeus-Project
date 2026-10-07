@@ -58,6 +58,22 @@ def main():
     sys.path.insert(0, str(GPT_ROOT))
     sys.path.insert(0, str(GPT_PKG))
 
+    # The newer upstream's language detector (fast_langdetect, used by
+    # split_lang) downloads its language-identification model on first use -
+    # but its downloader REFUSES to run if the cache directory is missing,
+    # and a fresh GPT-SoVITS clone has no such directory: the first /tts
+    # died with 'FileNotFoundError: fast-langdetect: Cache directory not
+    # found' (2026-10-07, fresh-VM launch). Creating the directory here is
+    # the self-heal for EVERY install (old and new); the installer
+    # additionally pre-downloads the model file so the first voice line
+    # never waits on a network fetch.
+    _fld_cache = GPT_PKG / "pretrained_models" / "fast_langdetect"
+    try:
+        _fld_cache.mkdir(parents=True, exist_ok=True)
+        print(f"[Amadeus] ensured language-model cache dir: {_fld_cache}")
+    except OSError as exc:  # pragma: no cover - defensive
+        print(f"[Amadeus] could not create language-model cache dir: {exc!r}")
+
     # GPT-SoVITS expects to run from repo root
     os.chdir(GPT_ROOT)
 

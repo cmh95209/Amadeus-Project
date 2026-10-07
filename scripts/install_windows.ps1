@@ -385,6 +385,51 @@ try {
     }
     if (-not (Test-Path (Join-Path $dst "s2G488k.pth"))) { throw "The voice model files copied but look incomplete (missing s2G488k.pth). Run the installer again to retry." }
     Log "  Voice model files copied into place." "Green"
+    # The newer voice engine detects the language of each line with a
+    # language-identification model (about 130 MB) that it fetches ON FIRST
+    # USE - and its downloader refuses to run unless its cache folder already
+    # exists (a fresh clone has none), which made the very first voice line
+    # fail on fresh installs (2026-10-07, fresh-VM test). Pre-download it now
+    # so her first voice line never waits on a network fetch. Best effort: if
+    # this download fails (offline machine, blocked CDN), the launcher creates
+    # the cache folder at start and the engine fetches the model on first use
+    # instead.
+    $fldDir = Join-Path $dst "fast_langdetect"
+    New-Item -ItemType Directory -Force -Path $fldDir | Out-Null
+    $fldFile = Join-Path $fldDir "lid.176.bin"
+    if (Test-Path $fldFile) {
+        Log "  Voice language model already present." "Yellow"
+    } else {
+        $fldUrl = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
+        # Download with Python (its TLS works on more machines than
+        # PowerShell's - on some PCs Invoke-WebRequest cannot open an SSL
+        # connection at all while Python is fine); PowerShell is the fallback.
+        $fldOk = $false
+        $py = Join-Path $condaHome "python.exe"
+        if (Test-Path $py) {
+            try {
+                Log "  Downloading the voice language model (about 130 MB)..."
+                & $py -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" $fldUrl $fldFile
+                $fldOk = ($LASTEXITCODE -eq 0)
+            } catch { $fldOk = $false }
+        }
+        if (-not $fldOk) {
+            try {
+                Log "  Downloading the voice language model (about 130 MB)..."
+                Invoke-WebRequest $fldUrl -OutFile $fldFile -UseBasicParsing -TimeoutSec 1800
+                $fldOk = ($LASTEXITCODE -eq 0)
+            } catch { $fldOk = $false }
+        }
+        if ($fldOk -and (Test-Path $fldFile)) {
+            Log "  Voice language model pre-downloaded." "Green"
+        } else {
+            # A half-downloaded file would be TRUSTED later (the engine only
+            # fetches when the file is absent), so delete it and fall back to
+            # a fresh automatic download at first use.
+            Remove-Item $fldFile -Force -ErrorAction SilentlyContinue
+            Log "  Could not pre-download the voice language model right now (is your internet reachable?). No problem - the voice engine will download it automatically the first time she speaks." "Yellow"
+        }
+    }
 
     # ---------- STEP 9: frontend ----------
     Step 9 "Setting up the web interface (frontend)"
