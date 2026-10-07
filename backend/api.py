@@ -880,6 +880,15 @@ def greet():
 
     if state != memory.CEREMONY_DONE:
         ready = model_ready()
+        # A "ready" brain must also be ABLE TO TALK: every conversation
+        # (and the post-ceremony greeting) requires an API key, so waking
+        # her on a keyless readiness probe would leave a fresh user with
+        # an unlocked box that answers nothing (2026-10-07, fresh en-US
+        # VM: a keyless local server answered the probe, she woke with a
+        # confused line, and every message 400'd until a key value was
+        # added). Until a key is present she stays on the waiting lines.
+        if ready["ready"] and not has_api_key():
+            ready = {"ready": False, "reason": "API key not set yet"}
         kind, new_state = ceremony.decide(
             state, bool(ready["ready"]), _connection_settings_present(),
             just_saved=just_saved)
