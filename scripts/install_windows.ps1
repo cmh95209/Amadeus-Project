@@ -1,9 +1,17 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.6  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.7  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.7 (October 2026):
+#   - If you were already using Amadeus, the installer now updates your
+#     install properly. It no longer mistakes the files Amadeus writes on
+#     your behalf (her saved connection, her personality notes) for
+#     "unsaved work of yours" and refuses to update - found by the
+#     fresh-VM test. Your saved values are kept either way: an update
+#     only ever touches program files.
 #
 #  WHAT'S NEW IN v4.6 (October 2026):
 #   - The fresh-install test found one more case where her first voice line
@@ -157,12 +165,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.6) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.7) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.6  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.7  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -260,7 +268,18 @@ try {
                 & git remote add fork $ForkUrl 2>$null | Out-Null   # no-op if already present
                 & git fetch fork $Branch 2>$null | Out-Null
                 $current = (& git rev-parse --abbrev-ref HEAD).Trim()
-                $status  = & git status --porcelain
+                # The app writes these personal files at runtime (her saved
+                # connection, her personality notes). On any machine that has
+                # USED the app they show as "locally changed" - expected, and
+                # they must not block updates (v4.7: the fresh-VM test found
+                # the old check made the installer refuse to update every
+                # existing install that had ever saved settings). Everything
+                # else still blocks, so genuine local work is never touched.
+                # (Git's own fast-forward safety still applies: if an update
+                # ever needed to rewrite one of these files, the merge fails
+                # and the files stay exactly as the user left them.)
+                $personal = "llm_server\.txt|llm_model\.txt|personality\.txt|api_key\.txt"
+                $status   = & git status --porcelain | Where-Object { $_ -notmatch $personal }
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
