@@ -39,6 +39,77 @@ def _install_audio_fallback():
     torchaudio.load = _load
 
 
+# The voice engine's english text module (g2p_en) reads Western-script
+# words - a name the user typed, "AI", ... - using data files that a fresh
+# machine does not have (a pronunciation dictionary + grammar patterns).
+# Its own automatic downloader only knows the OLD resource names, while
+# the newer NLTK a fresh install receives looks up the RENAMED tagger
+# files - so the first line containing a Western-script word crashed the
+# whole voice request (2026-10-07, fresh-VM launch: her wake-up line came
+# out without voice). Providing every known name here is the self-heal for
+# EVERY install on next start; the installer additionally pre-downloads
+# them, so on most machines this check is a fast no-op.
+_NLTK_VOICE_RESOURCES = (
+    "averaged_perceptron_tagger_eng",  # NLTK >= 3.9.2 (what fresh installs get)
+    "averaged_perceptron_tagger",      # older NLTK, and the name g2p_en itself checks
+    "cmudict",                          # the english pronunciation dictionary
+)
+
+
+def _ensure_nltk_resources(gpt_root: Path):
+    """Make sure the voice engine's text data for Western-script words exists.
+
+    The newer upstream engine tells NLTK to look in the clone's runtime
+    folder first (via the NLTK_DATA env var it sets at startup); point at
+    the same folder so anything fetched here lands exactly where the engine
+    will look. Best effort - never blocks startup: if the machine is offline
+    the engine's own first-use fetch tries again later.
+    """
+    nltk_dir = gpt_root / "runtime" / "nltk_data"
+    try:
+        os.environ["NLTK_DATA"] = str(nltk_dir)
+        nltk_dir.mkdir(parents=True, exist_ok=True)
+        import nltk
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[Amadeus] could not check the voice text data (NLTK missing?): {exc!r}")
+        return
+
+    missing = []
+    for res in _NLTK_VOICE_RESOURCES:
+        try:
+            nltk.data.find(res)
+        except LookupError:
+            missing.append(res)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[Amadeus] could not check voice text data '{res}': {exc!r}")
+
+    if not missing:
+        print("[Amadeus] voice text data present (Western-script words can be spoken).")
+        return
+
+    # Bound the worst case on flaky/offline networks (nltk's downloader has
+    # no timeout of its own).
+    import socket
+    socket.setdefaulttimeout(30)
+
+    fetched = []
+    for res in missing:
+        try:
+            # Explicit target: the engine's own first search path (see above),
+            # so the fetch never lands in a user-profile fallback folder.
+            if nltk.download(res, quiet=True, download_dir=str(nltk_dir)):
+                fetched.append(res)
+            else:
+                print(f"[Amadeus] could not fetch voice text data '{res}' right now - the engine will try again the first time she speaks such a word.")
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[Amadeus] could not fetch voice text data '{res}': {exc!r}")
+
+    if fetched:
+        print(f"[Amadeus] fetched voice text data: {', '.join(fetched)}")
+    if len(fetched) < len(missing):
+        print("[Amadeus] some voice text data is still missing (no internet right now?). Pure Japanese lines are unaffected; Western-script words will be retried at first use.")
+
+
 def main():
     # run_gptsovits.py is inside Amadeus/, so project root is one level up
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -73,6 +144,11 @@ def main():
         print(f"[Amadeus] ensured language-model cache dir: {_fld_cache}")
     except OSError as exc:  # pragma: no cover - defensive
         print(f"[Amadeus] could not create language-model cache dir: {exc!r}")
+
+    # Self-heal the english text data (see _ensure_nltk_resources) BEFORE the
+    # engine starts, so the first Western-script word in any fresh install
+    # can be spoken.
+    _ensure_nltk_resources(GPT_ROOT)
 
     # GPT-SoVITS expects to run from repo root
     os.chdir(GPT_ROOT)
