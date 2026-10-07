@@ -1,9 +1,18 @@
-﻿# ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.5  (resumable / safe to re-run)
+# ============================================================================
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.6  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.6 (October 2026):
+#   - The fresh-install test found one more case where her first voice line
+#     could come out silent: when a line contains Western-script words (the
+#     name you typed in, "AI", ...), her voice engine needs a few small text
+#     data files that a fresh PC does not have - and its automatic download
+#     was looking for them under old file names, so it fetched the wrong
+#     ones. The installer now pre-downloads those files (a few MB), and
+#     Amadeus checks for them again every time she starts.
 #
 #  WHAT'S NEW IN v4.5 (October 2026):
 #   - The fresh-install test found the voice engine crashing on launch on a
@@ -148,12 +157,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.5) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.6) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.5  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.6  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -429,6 +438,27 @@ try {
             Remove-Item $fldFile -Force -ErrorAction SilentlyContinue
             Log "  Could not pre-download the voice language model right now (is your internet reachable?). No problem - the voice engine will download it automatically the first time she speaks." "Yellow"
         }
+    }
+    # The voice engine reads Western-script words (the name you typed in,
+    # "AI", ...) with a separate english text module. That module needs a
+    # few small data files (a pronunciation dictionary + grammar patterns,
+    # a few MB in total). A fresh PC does not have them, and the automatic
+    # downloader inside the g2p_en package only knows the OLD file names -
+    # while the newer text library a fresh install receives looks for the
+    # renamed ones - so the first line containing a Western-script word
+    # crashed the whole voice request (2026-10-07, fresh-VM test: her
+    # wake-up line came out without voice). Pre-fetch every name into the
+    # voice engine's own data folder (its first search path). Best effort:
+    # if this fails (offline machine), the launcher checks again on every
+    # start, and the engine fetches the rest on first use.
+    $nltkDir = Join-Path $gpt "runtime\nltk_data"
+    New-Item -ItemType Directory -Force -Path $nltkDir | Out-Null
+    $nltkCode = "import os, sys`nos.environ['NLTK_DATA'] = sys.argv[1]`nos.makedirs(sys.argv[1], exist_ok=True)`nimport nltk`nok = True`nfor res in sys.argv[2:]:`n    try:`n        nltk.data.find(res)`n        continue`n    except Exception:`n        pass`n    try:`n        if not nltk.download(res, quiet=True, download_dir=sys.argv[1]):`n            ok = False`n    except Exception:`n        ok = False`nprint('NLTK_DATA_OK' if ok else 'NLTK_DATA_INCOMPLETE')`n"
+    $nltkOut = & $conda run -n GPTSoVits python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
+    if ($nltkOut -match "NLTK_DATA_OK") {
+        Log "  Voice text data for Western-script words is in place." "Green"
+    } else {
+        Log "  Could not pre-fetch all of the voice text data right now (is your internet reachable?). No problem - Amadeus checks again every time she starts, and the voice engine fetches anything still missing the first time she speaks such a word." "Yellow"
     }
 
     # ---------- STEP 9: frontend ----------
