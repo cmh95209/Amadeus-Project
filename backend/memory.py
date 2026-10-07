@@ -14,14 +14,46 @@ DATA_DIR = "data"
 
 PATH_TO_MEMORY = os.path.join(DATA_DIR, "memory.db")
 
+class _TrackedConnection:
+    """A thin safety net around a sqlite3 connection (2026-10-07 fresh-VM
+    run): a request that crashed mid-database-work leaked its connection,
+    and the lock it held turned the rest of the startup burst into
+    'database is locked' 500s for up to 30 s. The wrapper closes the
+    connection the moment it is garbage-collected, so no code path can hold
+    the database hostage - even one that forgets (or dies before) calling
+    conn.close(). Everything else is delegated to the real connection
+    unchanged. (sqlite3.Connection cannot be weak-referenced, so the net
+    lives on this wrapper - a plain object CPython frees the instant it is
+    dropped.)"""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_conn"], name)
+
+    def __del__(self):
+        try:
+            conn = self.__dict__.get("_conn")
+        except AttributeError:  # wrapper never fully constructed
+            return
+        if conn is not None:
+            try:
+                conn.close()  # idempotent - a caller that already closed
+            except Exception:  # the real connection is a no-op
+                pass
+
+
 def _connect_db():
     """Every connection waits up to 30 s for a database lock instead of
     failing. On a fresh install the FIRST request migrates the tables
     (ALTER + backfill), holding an exclusive lock briefly, while the startup
     page fires several requests at once (conversations, greet, ...): they
-    must queue, not 500 (2026-10-07 fresh-box run).
+    must queue, not 500 (2026-10-07 fresh-box run). Connections come back
+    wrapped in _TrackedConnection so a leaked one can never hold the
+    database locked (same run).
     """
-    return sqlite3.connect(PATH_TO_MEMORY, timeout=30.0)
+    return _TrackedConnection(sqlite3.connect(PATH_TO_MEMORY, timeout=30.0))
 PATH_TO_PERSONALITY = os.path.join(DATA_DIR, "personality.txt")
 PATH_TO_API_KEY = os.path.join(DATA_DIR, "api_key.txt")
 PATH_TO_LLM_MODEL = os.path.join(DATA_DIR, "llm_model.txt")
@@ -1272,6 +1304,38 @@ def load_internal_context(now: datetime | None = None, is_greeting=False,
 
 # ---------- MEMORY (JSON list of messages) ---------- (SQL)
 
+def _column_exists(c: sqlite3.Cursor, table: str, column: str) -> bool:
+    cols = {row[1] for row in c.execute(f"PRAGMA table_info({table})")}
+    return column in cols
+
+
+def _add_column(c: sqlite3.Cursor, table: str, column: str,
+                declaration: str) -> bool:
+    """ADD COLUMN that survives the fresh-install startup burst.
+
+    Several requests can migrate the same brand-new database at once (the
+    startup page fires conversations, memory, greet, ... in a burst), so the
+    check-then-add pattern races: a concurrent connection may add the column
+    between our check and our ALTER, and sqlite then answers
+    'duplicate column name' - which simply means the column is already there.
+    Accept that instead of crashing (the 2026-10-07 fresh-VM run crashed
+    here, and the leaked connection cascaded into lock 500s for the whole
+    burst). Returns True when WE added the column (so its one-time backfill
+    should run), False when it already existed or a concurrent request added
+    it (that request owns the backfill; it is idempotent and is committed by
+    _ensure_messages_table, so it sticks either way).
+    """
+    if _column_exists(c, table, column):
+        return False
+    try:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+        return False
+    return True
+
+
 def _ensure_conversations(c: sqlite3.Cursor) -> None:
     c.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
@@ -1285,13 +1349,8 @@ def _ensure_conversations(c: sqlite3.Cursor) -> None:
     # 2026-10-05). Default ''/0 = "nothing summarized yet" - the prompt
     # stays byte-identical to the pre-feature behaviour until the verbatim
     # window overflows for the first time.
-    cols = {row[1] for row in c.execute("PRAGMA table_info(conversations)")}
-    if "rolling_summary" not in cols:
-        c.execute("ALTER TABLE conversations ADD COLUMN rolling_summary "
-                  "TEXT NOT NULL DEFAULT ''")
-    if "summary_covers" not in cols:
-        c.execute("ALTER TABLE conversations ADD COLUMN summary_covers "
-                  "INTEGER NOT NULL DEFAULT 0")
+    _add_column(c, "conversations", "rolling_summary", "TEXT NOT NULL DEFAULT ''")
+    _add_column(c, "conversations", "summary_covers", "INTEGER NOT NULL DEFAULT 0")
 
 
 def _ensure_messages_table(c: sqlite3.Cursor) -> None:
@@ -1305,24 +1364,20 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
             conversation_id INTEGER
         )
     """)
-    # Migrate older databases that predate the audio column.
-    cols = {row[1] for row in c.execute("PRAGMA table_info(messages)")}
-    if "audio" not in cols:
-        c.execute("ALTER TABLE messages ADD COLUMN audio TEXT")
-    if "conversation_id" not in cols:
-        c.execute("ALTER TABLE messages ADD COLUMN conversation_id INTEGER DEFAULT 1")
-    if "japanese" not in cols:
-        c.execute("ALTER TABLE messages ADD COLUMN japanese TEXT")
+    # Migrate older databases that predate the audio column. (On a fresh
+    # database the CREATE above already carries these columns, so the
+    # helpers below are no-ops - they only fire for pre-audio installs.)
+    _add_column(c, "messages", "audio", "TEXT")
+    _add_column(c, "messages", "conversation_id", "INTEGER DEFAULT 1")
+    _add_column(c, "messages", "japanese", "TEXT")
     # Versioning: every regenerated reply is kept; active marks the version
     # the user is currently viewing (the only one the model is shown).
-    if "active" not in cols:
-        c.execute("ALTER TABLE messages ADD COLUMN active INTEGER DEFAULT 1")
+    _add_column(c, "messages", "active", "INTEGER DEFAULT 1")
     c.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
     # Greetings are standalone assistant turns (no user turn of their own).
     # Mark them so the reply-versioning logic never folds one into a run of
     # regenerations - a greeting must stay its own line in the UI.
-    if "greeting" not in cols:
-        c.execute("ALTER TABLE messages ADD COLUMN greeting INTEGER DEFAULT 0")
+    if _add_column(c, "messages", "greeting", "INTEGER DEFAULT 0"):
         c.execute("UPDATE messages SET greeting = 1 WHERE greeting IS NULL")
         # Legacy backfill: the four startup greetings stored before the flag
         # existed (ids 383/385 = the two 2026-09-20 lines, 388/389 = the two
@@ -1351,12 +1406,24 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
 
     # Migrate pre-session databases: fold everything into one conversation.
     _ensure_conversations(c)
-    row = c.execute("SELECT COUNT(*) FROM conversations").fetchone()
-    if row is not None and row[0] == 0:
-        c.execute(
-            "INSERT INTO conversations (title) VALUES ('General')"
-        )
-        c.execute("UPDATE messages SET conversation_id = 1 WHERE conversation_id IS NULL")
+    # One atomic, race-proof seed: a fresh database ends up with exactly one
+    # default chat even when several startup requests run this at the same
+    # time (the old count-then-insert could create two 'General' chats in a
+    # burst - both racers saw zero rows before either's INSERT committed).
+    c.execute(
+        "INSERT INTO conversations (title) "
+        "SELECT 'General' WHERE NOT EXISTS (SELECT 1 FROM conversations)"
+    )
+    c.execute("UPDATE messages SET conversation_id = 1 WHERE conversation_id IS NULL")
+    # Commit the migration work explicitly. Before this, whether the upgrade
+    # stuck depended on WHICH caller happened to run it: paths that commit
+    # (load_active_conversation) kept it, paths that close without committing
+    # (list_conversations) silently rolled the whole upgrade back, and the
+    # next request re-ran it - sometimes racing the previous one (2026-10-07
+    # fresh-VM run). Commit goes to the cursor's parent connection when a
+    # cursor is passed (cursors have no commit of their own), or to the
+    # object itself when a bare connection is passed (tests do this).
+    getattr(c, "connection", c).commit()
 
 
 
