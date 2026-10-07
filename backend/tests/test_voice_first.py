@@ -29,6 +29,7 @@ update_message_content so persistence is asserted end to end. Covers:
      (voice event, then text event) and the original single JSON when it is
      ON.
 """
+import io
 import json
 import sqlite3
 import sys
@@ -452,6 +453,42 @@ class VoiceFirstTests(unittest.TestCase):
         # The web-on branch never touched the voice-first machinery.
         self.assertEqual(fake.structured_calls, 0)
         self.assertEqual(fake.plain_calls, 0)
+
+    def test_route_survives_an_ansi_1252_console(self):
+        """Regression (2026-10-07, fresh en-US Windows VM): on an
+        English-locale PC the launcher's log file encodes the service
+        console in Windows-1252, which cannot hold her Japanese lines -
+        the route's own print of the reply crashed every chat message
+        with UnicodeEncodeError (a 500) although the reply had been
+        generated and stored. main.py now re-encodes the process console
+        to UTF-8 at startup (console_encoding); this simulates the VM:
+        an ANSI-1252 console, the startup re-encode, then the full
+        voice-first route.
+        """
+        import console_encoding
+        fake = _FakeLLM()
+        saved_stdout = sys.stdout
+        ansi = io.TextIOWrapper(io.BytesIO(), encoding="cp1252",
+                                line_buffering=True)
+        sys.stdout = ansi
+        try:
+            # The request WITHOUT the fix: printing her Japanese line on
+            # a Windows-1252 console raises.
+            with self.assertRaises(UnicodeEncodeError):
+                ansi.write(JA_LINE)
+            # main.py's startup line re-encodes the console, after which
+            # the route's own print of the same line survives.
+            ansi = io.TextIOWrapper(io.BytesIO(), encoding="cp1252",
+                                    line_buffering=True)
+            sys.stdout = ansi
+            console_encoding.force_utf8_stdio()
+            response, body, _rows = self._route(False, fake)
+        finally:
+            sys.stdout = saved_stdout
+        self.assertEqual(response.status_code, 200)
+        events = _events(body)
+        self.assertEqual([e["phase"] for e in events], ["voice", "text"])
+        self.assertEqual(events[1]["response"], EN_LINE)
 
 
 def _first_event(body):

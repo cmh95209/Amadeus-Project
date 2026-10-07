@@ -1,6 +1,14 @@
 from patches import apply_all_patches
 apply_all_patches()
 
+# Whatever the user's Windows locale is, our console (the launcher's log
+# file, or a real terminal) must be able to hold her Japanese lines: on
+# an English PC a redirected console defaults to Windows-1252, and the
+# first such print crashed the request with UnicodeEncodeError (2026-10-07,
+# fresh en-US VM: 500 on every chat message).
+import console_encoding
+console_encoding.force_utf8_stdio()
+
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import logging

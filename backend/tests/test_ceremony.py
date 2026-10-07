@@ -375,6 +375,7 @@ class GreetRouteTests(_FreshAppTests):
         # real generator; this test covers the route: the GENERATED JA line
         # is what gets minted for speech.
         self.memory.save_ceremony_state("connecting")
+        self.chat.setKey("sk-test")  # a wake requires a key (see the key-gate test)
         with self.model(True), self._canned_wake():
             res = self.greet()
         body = res.json
@@ -390,6 +391,7 @@ class GreetRouteTests(_FreshAppTests):
 
     def test_wake_failure_ships_fallback_and_still_ends(self):
         self.memory.save_ceremony_state("connecting")
+        self.chat.setKey("sk-test")  # a wake requires a key (see the key-gate test)
         with self.model(True), patch.object(
                 self.api, "generate_greeting",
                 side_effect=RuntimeError("model rejected the call")):
@@ -419,13 +421,59 @@ class GreetRouteTests(_FreshAppTests):
         self.assertNotIn("kind", body)
         self.assertEqual(self.state(), "done")
 
-    def test_first_launch_no_key_keeps_existing_400(self):
-        # A brand-new install whose model runs but has no API key: the
-        # normal path's existing 400 stands (the user adds a key in
-        # Settings; the ceremony is already recorded as done).
+    def test_first_launch_model_up_but_no_key_stays_in_ceremony(self):
+        # A brand-new install whose model runs but has no API key: she must
+        # NOT jump straight to the normal path (its 400 would end the
+        # ceremony with her unable to talk) - the key gate keeps her on
+        # the waiting story until a key value is present.
+        with self.model(True, "model server unreachable"):
+            res = self.greet()
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertIs(body["ready"], False)
+        self.assertEqual(body["kind"], "intro")
+        self.assertEqual(body["ceremony"], "intro")
+        self.assertEqual(self.state(), "intro")
+
+    def test_done_state_without_key_keeps_the_400(self):
+        # Once the ceremony is done the normal path's key gate stands on
+        # its own: no key -> 400, same as before the key gate existed.
+        self.memory.save_ceremony_state("done")
         with self.model(True):
             res = self.greet()
         self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.state(), "done")
+
+    def test_wake_requires_an_api_key(self):
+        # The 2026-10-07 fresh-VM scenario: a keyless local server answers
+        # the readiness probe, so the model is "ready" without a key - she
+        # must NOT wake until a key is present (every conversation needs
+        # one), staying on the "checking the line" story instead.
+        with self.model(False, "model server unreachable"):
+            self.greet()  # intro
+        with self.model(True), \
+             patch.object(self.chat, "LLM_Model", "qwen3.8-27b"):
+            res = self.greet(just_saved=True)  # address + model saved, NO key
+        body = res.json
+        self.assertIs(body["ready"], False)  # gated: no key -> not ready
+        self.assertEqual(body["kind"], "trying")
+        self.assertEqual(self.state(), "connecting")
+        # A quiet probe (nothing new to say) reports the gate's reason.
+        with self.model(True), \
+             patch.object(self.chat, "LLM_Model", "qwen3.8-27b"):
+            res = self.greet()
+        body = res.json
+        self.assertIs(body["ready"], False)
+        self.assertEqual(body["reason"], "API key not set yet")
+        self.assertNotIn("kind", body)
+        # The user adds a key value (keyless servers need one too - the
+        # app requires it even though the server ignores it): she wakes.
+        self.chat.setKey("any-value")
+        with self.model(True), \
+             patch.object(self.chat, "LLM_Model", "qwen3.8-27b"), \
+             self._canned_wake():
+            res = self.greet()
+        self.assertEqual(res.json["kind"], "wake")
         self.assertEqual(self.state(), "done")
 
     def test_done_state_runs_the_normal_path(self):

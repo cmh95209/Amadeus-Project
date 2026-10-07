@@ -333,6 +333,12 @@ def start_process(name: str, command: list[str], cwd: Path) -> subprocess.Popen:
 
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"  # print() reaches the log live, not on exit
+    # Every Python service writes its console (this UTF-8 log file, see
+    # open_log) in UTF-8 whatever the user's Windows locale is: on an
+    # English PC the default Windows-1252 cannot hold her Japanese lines
+    # and one print used to crash the request (2026-10-07, fresh en-US
+    # VM - 500 on every chat message).
+    env["PYTHONIOENCODING"] = "utf-8"
     kwargs: dict = {
         "cwd": str(cwd),
         "stdout": log,
