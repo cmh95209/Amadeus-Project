@@ -1,9 +1,18 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.7  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.8  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.8 (October 2026):
+#   - Her web search now works on fresh PCs. General web search runs through
+#     a small search library (ddgs) that was missing from the install list,
+#     so on a fresh machine she could only answer from her own knowledge -
+#     and honestly said so. (Weather always worked: it uses its own data
+#     feed and never needed this library.) Found by the fresh-VM test.
+#     The install smoke test now also checks for it, so a missing search
+#     library can never again hide silently.
 #
 #  WHAT'S NEW IN v4.7 (October 2026):
 #   - If you were already using Amadeus, the installer now updates your
@@ -165,12 +174,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.7) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.8) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.7  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.8  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -326,12 +335,20 @@ try {
     # finds it on first start and builds the sidecar from it.
     Ensure-Env "amadeus-cm" "3.13"
     & $conda run -n amadeus pip install --upgrade pip | Out-Null
-    & $conda run -n amadeus pip install Flask flask-cors requests tqdm langchain langchain-openai pydantic
+    # ddgs: the DuckDuckGo search library behind her web search (weather is
+    # separate - it uses a keyless Open-Meteo feed and needs no library).
+    # The 2026-10-07 fresh-VM run proved a fresh PC was missing this: she
+    # answered searches from her own knowledge and honestly said she could
+    # not verify them online.
+    & $conda run -n amadeus pip install Flask flask-cors requests tqdm langchain langchain-openai pydantic ddgs
     if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
     # Smoke test: the whole backend must import cleanly in this environment.
     $backend = Join-Path $proj "backend"
     Push-Location $backend
-    $smoke = & $conda run -n amadeus python -c "import api; print('SMOKE_OK')" 2>&1 | Out-String
+    # ddgs is imported lazily by the backend (web search), so also check it
+    # explicitly: a fresh PC that lost the search library must never hide
+    # behind a passing smoke test.
+    $smoke = & $conda run -n amadeus python -c "import api; import ddgs; print('SMOKE_OK')" 2>&1 | Out-String
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
