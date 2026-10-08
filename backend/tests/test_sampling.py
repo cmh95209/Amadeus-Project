@@ -109,7 +109,7 @@ class SamplingClientTests(SamplingBase):
     def test_all_disabled_sends_nothing_new(self):
         client = self._build("http://localhost:8888/v1", self.memory.default_sampling())
         self.assertIsNone(client.temperature)
-        self.assertEqual(client.max_tokens, 1024)  # built-in cap unchanged
+        self.assertEqual(client.max_tokens, 4096)  # built-in cap unchanged (raised 1024 -> 4096, 2026-10-08: long cloud replies clip below the old cap)
 
     def test_thinking_client_keeps_4096_floor(self):
         small = self._with(self.memory.default_sampling(), max_tokens=256)

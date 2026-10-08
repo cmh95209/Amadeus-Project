@@ -388,9 +388,17 @@ def _run_web_search(query: str) -> str:
             time.sleep(min(backoff, max(0.0, remaining - 0.5)))
             backoff = min(backoff * 2, SEARCH_BACKOFF_MAX)
             continue
-        # A result came back (possibly an empty list).
+        # A result came back (possibly an empty list). A clean zero-result
+        # answer is just as unverifiable as a failed search, so it carries
+        # the same honesty instruction (2026-10-08: the failed path had it,
+        # this one didn't - a model could read "no results" as "I searched"
+        # and present its own knowledge as search-verified).
         if not results:
-            return "No web results were found for that query."
+            return (
+                "No web results were found for that query. Answer from your own "
+                "knowledge and be honest that you could not verify it online "
+                "right now. Do not mention any technical details."
+            )
         lines = []
         for i, r in enumerate(results, 1):
             title = (r.get("title") or "").strip()
@@ -3111,12 +3119,38 @@ def _voice_first_context_lines(context, max_lines: int = 4) -> list:
     return list(reversed(lines))
 
 
+def _is_verbatim_echo(text: str, source: str, threshold: float = 0.9) -> bool:
+    """True when `text` is a verbatim (near-)copy of `source` - the lazy
+    "translation" a weak model produces by repeating the input line instead of
+    translating it. Comparison is on normalized text (case, punctuation,
+    whitespace and symbols dropped; Latin, kana and CJK letters all kept), so
+    an echo still matches even when the Japanese line happens to contain
+    Latin words ("Hong", "AI") - the case the letter-only check misses. A
+    genuine translation - even one that legitimately carries Japanese words,
+    as when she teaches Japanese - is mostly different text and compares low,
+    so it passes untouched."""
+    def normalize(s: str) -> str:
+        return "".join(ch for ch in s.casefold() if ch.isalnum())
+    a, b = normalize(text), normalize(source)
+    if not b:
+        return False
+    if a == b:
+        return True
+    if len(a) < 12 or len(b) < 12:
+        return False  # too short to trust a near-miss ratio on
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+
+
 def _translate_reply_en(llm, jps: str, context_lines) -> str:
     """Voice-first call 2: the English display line for the Japanese line call
     1 already spoke. One short, fast call (JA line + a few context lines, not
     the full prompt). Returns "" when nothing usable comes back - the caller
     then shows the Japanese line itself, the same fallback the English guard
-    uses when its translation pass fails."""
+    uses when its translation pass fails. Every unusable result is logged
+    with a short snippet of what the model actually returned, so a silent
+    backfill failure is visible in the log instead of found only by digging
+    through the memory DB."""
     lines = [
         "You are writing the English line shown to the user in the chat UI for "
         "one of Amadeus's replies. Translate her Japanese line into natural, "
@@ -3133,11 +3167,20 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
     content = reply.content if isinstance(reply.content, str) else str(reply.content)
     en = _strip_thinking(content).strip().strip(chr(34)).strip()
     if not en:
+        print(f"[Amadeus] Voice-first: English backfill unusable (empty) - raw: {content[:120]!r}")
         return ""
     # A weaker model can echo the Japanese input back as the "translation";
     # that would put Japanese in the English box - treat it as a failure so
     # the real Japanese line is shown instead.
     if not _has_latin(en):
+        print(f"[Amadeus] Voice-first: English backfill unusable (no English letters - likely a Japanese echo) - raw: {en[:120]!r}")
+        return ""
+    # The echo can still slip past the letter check when her Japanese line
+    # happens to contain Latin words ("Hong", "AI", ...): a model that
+    # repeats the line verbatim then "passes" as a translation. Compare
+    # against her actual line instead of counting scripts.
+    if _is_verbatim_echo(en, (jps or "").strip()):
+        print(f"[Amadeus] Voice-first: English backfill unusable (echoed the Japanese line) - raw: {en[:120]!r}")
         return ""
     return en
 

@@ -350,6 +350,37 @@ class VoiceFirstTests(unittest.TestCase):
         self.assertEqual(len(assistant_rows), 1)
         self.assertEqual(assistant_rows[0][2], JA_LINE)
 
+    def test_backfill_verbatim_echo_with_latin_is_rejected(self):
+        # 2026-10-08 incident: a weak model repeated her Japanese line as the
+        # "English" translation; it slipped the letter check because the line
+        # contained Latin words ("Hong"), so Japanese text landed in the
+        # English box. The echo check (a near-copy of her real line) rejects
+        # it, and the stored row keeps her actual Japanese line instead.
+        ja = "Hong、今日はいい天気ね。ゆっくり休んでね。"
+        echo = "Hong、今日はいい天気ね。ゆっくり休んで"  # near-echo: lost the final ね
+        fake = _FakeLLM(jps=ja)
+        fake, turn, exc, rows = self._run(
+            fake, call="output", plain_script=[echo])
+        self.assertIsNone(exc)
+        self.assertNotEqual(turn.wait_en(timeout=5.0), echo)  # the echo was rejected
+        assistant_rows = [r for r in rows if r[1] == "assistant"]
+        self.assertEqual(len(assistant_rows), 1)
+        self.assertEqual(assistant_rows[0][2], ja)
+        self.assertEqual(assistant_rows[0][3], ja)
+
+    def test_backfill_translation_carrying_japanese_is_accepted(self):
+        # She can teach Japanese: her English line legitimately carries
+        # Japanese words ("The word 猫 (neko) means cat..."). The echo guard
+        # must reject only near-copies of her Japanese line - never a
+        # genuine translation that carries Japanese.
+        ja = "「猫」は「ねこ」と読みます。"
+        en = 'The word 猫 is read as "neko" - want to learn more?'
+        fake = _FakeLLM(jps=ja)
+        fake, turn, exc, rows = self._run(
+            fake, call="output", plain_script=[en])
+        self.assertIsNone(exc)
+        self.assertEqual(turn.wait_en(timeout=5.0), en)
+
     def test_call1_total_failure_removes_user_turn(self):
         fake = _FakeLLM()
         fake, _turn, exc, rows = self._run(

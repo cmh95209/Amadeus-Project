@@ -298,14 +298,17 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # a shorter/longer ceiling (e.g. 300 = 5 minutes).
             "timeout": 600,
             "max_retries": 0,
-            # Bound the OUTPUT length. Without a cap, a model stuck in a
-            # repetition loop (a known Gemma failure mode when it cannot satisfy
-            # a forced tool call) would generate until the full timeout - i.e.
-            # appear to hang for ~10 minutes. Real replies are 150-300 tokens,
-            # so 1024 is far more than she needs, and a runaway/stuck
-            # generation now stops at a quarter of the old worst case instead
-            # of an endless spin.
-            "max_tokens": 1024,
+            # Bound the OUTPUT length. Two jobs: (1) without a cap, a model
+            # stuck in a repetition loop (a known Gemma failure mode when it
+            # cannot satisfy a forced tool call) would generate until the full
+            # timeout - i.e. appear to hang for ~10 minutes; a cap stops the
+            # spin. (2) Top-tier cloud models write long structured replies
+            # (English line + Japanese line + fields), and 1024 proved too
+            # small in the field: a reply clipped mid-JSON decoded to nothing
+            # and surfaced as "no usable reply" (fresh-VM incident, 2026-10-08).
+            # 4096 gives real headroom for long replies - the same floor the
+            # thinking client already uses - while still bounding a runaway.
+            "max_tokens": 4096,
         }
         extra_body = dict(sampling_extra)
         if local:

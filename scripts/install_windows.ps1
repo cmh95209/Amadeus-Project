@@ -1,9 +1,27 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.8  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.9  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.9 (October 2026):
+#   - Her longest replies no longer get cut off: the built-in reply-size
+#     limit is bigger now (this is what the "Output max tokens = 4096"
+#     setting was working around - you can leave that box unticked).
+#   - A rare glitch could leave her English text box showing a copy of
+#     her Japanese line. The app now recognizes that (even when the line
+#     contains a Western name, like yours) and falls back cleanly - and
+#     writes what it saw to the log so the cause can be found. Teaching
+#     you Japanese inside her English line is unaffected.
+#   - If you pick a model the server does not know (for example a
+#     ":batch" model, which only answers in bulk jobs hours later), the
+#     error now says exactly that instead of a technical code - and the
+#     Settings connection test now warns you about ":batch" names
+#     before you save them.
+#   - When a web search runs but finds nothing, she answers from her own
+#     knowledge and says she could not verify it online (the same
+#     honesty wording used when a search fails).
 #
 #  WHAT'S NEW IN v4.8 (October 2026):
 #   - Her web search now works on fresh PCs. General web search runs through
@@ -174,12 +192,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.8) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.9) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.8  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.9  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null

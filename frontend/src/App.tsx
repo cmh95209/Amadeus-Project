@@ -117,7 +117,7 @@ export default function App() {
       ? `Can't reach ${connStatus.address}. ${connStatus.error ? connStatus.error : "Is the server running?"}`
       : connStatus.model_configured
         ? connStatus.model_found
-          ? `Connected to ${connStatus.address} - model "${connStatus.configured_model}" found.`
+          ? `Connected to ${connStatus.address} - model "${connStatus.configured_model}" found.${connStatus.batch_warning ? ` ${connStatus.batch_warning}` : ""}`
           : `Connected to ${connStatus.address}, but "${connStatus.configured_model}" is not in its model list.`
         : `Connected to ${connStatus.address} - enter a model name in the field above.`;
 
