@@ -634,5 +634,37 @@ class WebOnFalseRefusalNetTests(unittest.TestCase):
         self.assertIn("can't use web", pack.assistant_reply_ENG)  # original served
 
 
+class _FakeSearchClient:
+    def __init__(self, results):
+        self.results = results
+
+    def text(self, *args, **kwargs):
+        return iter(self.results)
+
+
+class EmptyResultsHonestyTests(unittest.TestCase):
+    """A search that runs fine but finds NOTHING is just as unverifiable as a
+    failed one (2026-10-08: she claimed 'I could search this time' after a
+    zero-result search; only the FAILED path carried the honesty instruction).
+    The clean zero-result path must now carry the same instruction."""
+
+    def test_zero_results_carry_the_honesty_instruction(self):
+        with patch.object(chat, "_get_search_client",
+                          return_value=_FakeSearchClient([])):
+            out = chat._run_web_search("top tech news today")
+        self.assertTrue(out.startswith("No web results were found"), out)
+        self.assertIn("be honest that you could not verify", out)
+        self.assertIn("Do not mention any technical details", out)
+
+    def test_real_results_are_untouched(self):
+        with patch.object(chat, "_get_search_client",
+                          return_value=_FakeSearchClient(
+                              [{"title": "T", "body": "B", "href": "U"}])):
+            out = chat._run_web_search("top tech news today")
+        self.assertIn("1. T", out)
+        self.assertIn("URL: U", out)
+        self.assertNotIn("be honest", out)
+
+
 if __name__ == "__main__":
     unittest.main()

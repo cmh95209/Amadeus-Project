@@ -57,16 +57,57 @@ def _unlink_voice(assistant_id) -> None:
         pass
 
 
+def _model_not_found_message() -> str:
+    """Plain-English 'the model name is wrong' message for a 404 from the
+    model endpoint. The raw exception names (NotFound / OpenAIModelNotFound)
+    are jargon to a user; the actionable fact is the model name in Settings -
+    retrying never fixes it. A batch-only model id ("...:batch") gets a
+    dedicated hint: OpenRouter lists those names and a test-connection can
+    even find them, yet chat can't use them (results arrive up to 24 h
+    later). This is the 2026-10-07 fresh-VM incident: an evening chasing a
+    cryptic 404 that was just a ":batch" suffix in the model name."""
+    try:
+        current = getLLMModel().strip()
+    except Exception:
+        current = ""
+    if current.endswith(":batch"):
+        return (
+            f'The server has no usable chat model named "{current}": names ending '
+            'in ":batch" are batch-only (OpenRouter serves them only through its '
+            'batch service, with results up to 24 h later). Pick the same model '
+            'WITHOUT the ":batch" suffix in Settings.'
+        )
+    return (
+        "The server says it has no model by the name configured in Settings"
+        + (f' ("{current}")' if current else "")
+        + " - check or correct the model name there. Retrying will not fix it."
+    )
+
+
 def _llm_error_message(exc: Exception) -> str:
     """Translate a model-server failure into a plain-English message."""
     try:
         import openai
+        if isinstance(exc, openai.NotFoundError):
+            return _model_not_found_message()
         if isinstance(exc, openai.APIConnectionError):
             return f"Can't reach the model server at {llm._server_url()}. Is it running?"
         if isinstance(exc, openai.APITimeoutError):
             return "The model server took too long to respond. Is it busy or overloaded?"
         if isinstance(exc, openai.AuthenticationError):
             return "The model server rejected the API key. Check it in Settings."
+    except Exception:
+        pass
+    try:
+        # langchain re-raises an OpenAI 404 as its own exception type (it is
+        # a subclass of openai.NotFoundError, so the check above usually
+        # already caught it; this covers versions where it is not).
+        try:
+            from langchain_openai import OpenAIModelNotFoundError
+        except ImportError:  # older/newer versions nest it
+            from langchain_openai.chat_models.base import OpenAIModelNotFoundError
+        if isinstance(exc, OpenAIModelNotFoundError):
+            return _model_not_found_message()
     except Exception:
         pass
     return f"The model did not return a usable reply ({type(exc).__name__}). Please try again."
@@ -637,6 +678,17 @@ def test_connection():
         and model_configured
         and _model_in_list(model_name, probe["models"])
     )
+    # The trap that cost an evening on 2026-10-07: a ":batch" name IS in the
+    # server's model list, so the test cheerfully says "model found" - but
+    # chat cannot use a batch-only model. Warn the moment the name is found.
+    batch_warning = None
+    if model_found and model_name.strip().endswith(":batch"):
+        batch_warning = (
+            f'WARNING: "{model_name.strip()}" is a batch-only model - the server '
+            "serves it only through its batch service (results up to 24 h later), "
+            f"so chat won't work with it. Use the same model without the "
+            '":batch" suffix instead.'
+        )
     return jsonify({
         "address": address,
         "configured": bool(configured),
@@ -645,6 +697,7 @@ def test_connection():
         "configured_model": model_name,
         "model_configured": model_configured,
         "model_found": model_found,
+        "batch_warning": batch_warning,
         "error": probe["error"],
     })
 

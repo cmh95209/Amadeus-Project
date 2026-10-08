@@ -549,6 +549,7 @@ export type ConnectionStatus = {
   configured_model: string;
   model_configured: boolean;
   model_found: boolean;
+  batch_warning?: string;
   error?: string;
 };
 
@@ -599,6 +600,7 @@ export async function testConnection(): Promise<ConnectionStatus> {
     configured_model: typeof data.configured_model === "string" ? data.configured_model : "",
     model_configured: data.model_configured !== false,
     model_found: data.model_found === true,
+    batch_warning: typeof data.batch_warning === "string" ? data.batch_warning : undefined,
     error: typeof data.error === "string" ? data.error : undefined,
   };
 }

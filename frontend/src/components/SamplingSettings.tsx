@@ -31,7 +31,7 @@ const TOOLTIPS: Record<string, string> = {
   presence_penalty:
     "Bonus for introducing new topics instead of repeating existing ones. Positive = more variety, negative = more repetition. 0 = off.",
   max_tokens:
-    "Hard limit on how long one reply may be, in tokens (1 token is about three quarters of a word). When off, Amadeus uses its built-in 1024 limit.",
+    "Hard limit on how long one reply may be, in tokens (1 token is about three quarters of a word). When off, Amadeus uses its built-in 4096 limit (large enough for her longest replies).",
 };
 
 type ParamRowProps = {
