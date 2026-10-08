@@ -1,9 +1,15 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.9  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.10  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.10 (October 2026):
+#   - The installer can now put Amadeus in a folder of your choice: add
+#     -InstallDir "C:\Some\Place" to the run command and everything lands
+#     there instead. Without that, everything works exactly as before (your
+#     user's Amadeus folder).
 #
 #  WHAT'S NEW IN v4.9 (October 2026):
 #   - Her longest replies no longer get cut off: the built-in reply-size
@@ -123,8 +129,18 @@
 #   2) Windows key -> type "PowerShell" -> right-click -> "Run as administrator".
 #   3) Paste this ONE line and press Enter:
 #        Set-ExecutionPolicy -Scope Process Bypass; & "$HOME\Downloads\install_windows.ps1"
-#   4) Wait. If it ever stops, send your helper the install_log.txt in your Amadeus folder.
+#      (Optional: add  -InstallDir "E:\Some\Place"  at the end to install
+#       somewhere other than your user's Amadeus folder.)
+#   4) Wait. If it ever stops, send your helper the install_log.txt in the
+#      folder you installed into.
 # ============================================================================
+
+param(
+    # Optional: where to install. Example:
+    #   .\install_windows.ps1 -InstallDir "C:\Some\Place"
+    # Without it, the default (your user profile's "Amadeus" folder) is used.
+    [string]$InstallDir = ""
+)
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faster
@@ -135,7 +151,8 @@ $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faste
 # install never stops waiting for a human. Older conda ignores it.
 $env:CONDA_PLUGINS_AUTO_ACCEPT_TOS = "yes"
 
-$InstallDir = Join-Path $env:USERPROFILE "Amadeus"
+if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE "Amadeus" }
+$InstallDir = $InstallDir.TrimEnd('\')
 $LogPath    = Join-Path $InstallDir "install_log.txt"
 # Your fork's FEATURE branch holds all the current features (greetings,
 # voice, long-term memory, the first-meeting welcome); main lags behind
@@ -192,12 +209,12 @@ function Ensure-Env($name, $py="3.10"){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.9) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.10) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.9  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.10  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
