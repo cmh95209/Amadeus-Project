@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.2  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -39,6 +39,12 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.2 (October 2026):
+#   - The FFmpeg check no longer tries to install it or suggests Homebrew:
+#     a code-level check of the voice engine proved Amadeus serves her voice
+#     as WAV and never needs FFmpeg, so the check is now informational only.
+#     (This also saves a few minutes on Macs that have Homebrew.)
 #
 #  BEFORE RUNNING, HAVE AT HAND (optional, but makes it faster):
 #   - nothing required; the installer fetches everything it needs.
@@ -218,7 +224,7 @@ clone_or_update() {
 #  BANNER
 # ----------------------------------------------------------------------------
 printf '%s%s%s\n' "$C_BOLD" "============================================================" "$C_RESET" | tee_to
-printf '%s AMADEUS INSTALLER for MAC OS  v1.1%s\n' "$C_BOLD" "$C_RESET" | tee_to
+printf '%s AMADEUS INSTALLER for MAC OS  v1.2%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s This installs everything Amadeus needs on this Mac:%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s\n' "   - the app (into: $INSTALL_DIR)" | tee_to
 printf '%s\n' "   - three Python toolboxes: the app, her memory, her voice" | tee_to
@@ -439,22 +445,16 @@ if ! node_ok; then
 fi
 NPM="$NODE_BIN_DIR/npm"
 
-# --- 2e. FFmpeg (used by the voice engine for some audio conversions).
+# --- 2e. FFmpeg (checked only - Amadeus does not need it).
+# Verified 2026-10-09 in the voice engine's code: her voice is served as
+# WAV (written with a Python audio library, no external program), the only
+# ffmpeg use in the synthesis path (speed change) is disabled upstream, and
+# Amadeus never requests the other (ffmpeg-based) audio formats. A missing
+# ffmpeg can therefore never break her voice - no install, no suggestion.
 if command -v ffmpeg >/dev/null 2>&1; then
-    log "  FFmpeg: present."
-elif command -v brew >/dev/null 2>&1; then
-    log "  FFmpeg not found - installing it with Homebrew..."
-    brew install ffmpeg >/dev/null 2>&1 || true
-    hash -r
-    if command -v ffmpeg >/dev/null 2>&1; then
-        log "  FFmpeg ready."
-    else
-        log "  WARNING: FFmpeg could not be installed - her voice may not work for some sounds. (brew install ffmpeg fixes this.)"
-    fi
+    log "  FFmpeg: present (Amadeus does not require it - just in case)."
 else
-    log "  WARNING: FFmpeg is not installed (and Homebrew is not available either)."
-    log "  Her voice engine works without it for normal chat, but some sounds may fail."
-    log "  If that bothers you: install Homebrew (brew.sh) and run: brew install ffmpeg"
+    log "  FFmpeg: not present - that's fine, Amadeus does not need it."
 fi
 
 # ----------------------------------------------------------------------------
