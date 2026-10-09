@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.0  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.1  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -31,6 +31,14 @@
 #     helper route kept only as a fallback.
 #   - If the right PyTorch build is already in the voice toolbox, the
 #     multi-GB download is skipped (re-runs move on in seconds).
+#
+#  WHAT'S NEW IN v1.1 (October 2026) - field fix from the first real-Mac test:
+#   - On a brand-new Mac, the 'unzip' tool is often missing the moment this
+#     installer installs Apple's developer tools; Git-LFS now falls back to
+#     the archive tool built into every Mac (bsdtar).
+#   - Every Git-LFS failure now shows its real reason in the install log
+#     (plus what the downloaded archive contains) instead of a generic line.
+#   - Step 1 now prints the actual chip name (the first version had a typo).
 #
 #  BEFORE RUNNING, HAVE AT HAND (optional, but makes it faster):
 #   - nothing required; the installer fetches everything it needs.
@@ -210,7 +218,7 @@ clone_or_update() {
 #  BANNER
 # ----------------------------------------------------------------------------
 printf '%s%s%s\n' "$C_BOLD" "============================================================" "$C_RESET" | tee_to
-printf '%s AMADEUS INSTALLER for MAC OS  v1.0%s\n' "$C_BOLD" "$C_RESET" | tee_to
+printf '%s AMADEUS INSTALLER for MAC OS  v1.1%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s This installs everything Amadeus needs on this Mac:%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s\n' "   - the app (into: $INSTALL_DIR)" | tee_to
 printf '%s\n' "   - three Python toolboxes: the app, her memory, her voice" | tee_to
@@ -236,7 +244,7 @@ fi
 MAC_VER="$(sw_vers -productVersion 2>/dev/null || echo unknown)"
 MAC_MAJOR="$(printf '%s' "$MAC_VER" | cut -d. -f1)"
 log "  macOS version : $MAC_VER"
-log "  Chip          : $([ $IS_SILICON = 1 ] && echo 'Apple Silicon ($ARCH)' || echo "Intel ($ARCH)")"
+log "  Chip          : $([ $IS_SILICON = 1 ] && echo "Apple Silicon ($ARCH)" || echo "Intel ($ARCH)")"
 if [ "$MAC_MAJOR" -lt 12 ] 2>/dev/null; then
     log "  WARNING: macOS $MAC_VER is older than macOS 12 - Amadeus is known to work best on macOS 12 or newer. Continuing, but you may hit issues."
 fi
@@ -279,24 +287,59 @@ if command -v git-lfs >/dev/null 2>&1; then
     log "  Git-LFS: present."
 else
     log "  Installing Git-LFS (needed so the voice models download as real files)..."
+    lfs_err="$INSTALL_DIR/git-lfs-err.log"
+    : > "$lfs_err"
+    lfs_zip="$TOOLS_DIR/git-lfs.zip"
     if command -v brew >/dev/null 2>&1; then
-        brew install git-lfs >/dev/null 2>&1 || true
+        # Make sure Homebrew's tools folder is on the path for this session.
+        case ":$PATH:" in
+            *":$(brew --prefix 2>/dev/null)/bin:"*) ;;
+            *) export PATH="$(brew --prefix 2>/dev/null)/bin:$PATH" ;;
+        esac
+        hash -r
+        log "  (trying your Homebrew first...)"
+        brew install git-lfs >>"$lfs_err" 2>&1 || true
     fi
     if ! command -v git-lfs >/dev/null 2>&1; then
         ensure_tools_dir
         lfs_url=$([ $IS_SILICON = 1 ] && echo "$GITLFS_URL_ARM" || echo "$GITLFS_URL_X64")
-        curl -L --fail --progress-bar -o "$TOOLS_DIR/git-lfs.zip" "$lfs_url" \
+        curl -L --fail --progress-bar -o "$lfs_zip" "$lfs_url" \
             || die "Could not download Git-LFS." "Check your internet connection and re-run the installer."
-        ( cd "$TOOLS_DIR" && unzip -o -q git-lfs.zip && chmod +x git-lfs && rm -f git-lfs.zip )
+        # A brand-new Mac - one that got Apple's developer tools installed by
+        # THIS very installer minutes ago - may not have the 'unzip' tool on
+        # its path yet. macOS's built-in bsdtar opens zip files too, so use
+        # whichever extractor exists.
+        if command -v unzip >/dev/null 2>&1; then
+            ( cd "$TOOLS_DIR" && unzip -o -q git-lfs.zip ) >>"$lfs_err" 2>&1
+        else
+            log "  (this Mac does not offer 'unzip' yet - using the built-in bsdtar...)"
+            ( cd "$TOOLS_DIR" && /usr/bin/bsdtar -x -f git-lfs.zip ) >>"$lfs_err" 2>&1
+        fi
+        chmod +x "$TOOLS_DIR/git-lfs" 2>/dev/null || true
         export PATH="$TOOLS_DIR:$PATH"
         hash -r
     fi
-    if command -v git-lfs >/dev/null 2>&1; then
+    # Prove the tool actually RUNS (catches a download for the wrong chip
+    # type or a broken archive) before declaring success.
+    lfs_probe="$(git lfs version 2>&1 | tail -2)"
+    if printf '%s' "$lfs_probe" | grep -q "git-lfs/"; then
         git lfs install >/dev/null 2>&1 || true
+        rm -f "$lfs_zip"
         log "  Git-LFS ready."
     else
-        die "Could not set up Git-LFS." \
-            "Easiest fix: install Homebrew (brew.sh), then re-run this installer."
+        if [ -s "$lfs_err" ]; then
+            log "  (what the setup attempts reported:)"
+            tail -8 "$lfs_err" | tee_to
+        fi
+        if [ -n "$lfs_probe" ]; then
+            log "  (asking the tool to identify itself said: $lfs_probe)"
+        fi
+        if [ -f "$lfs_zip" ]; then
+            log "  (the downloaded archive contains:)"
+            /usr/bin/bsdtar -tf "$lfs_zip" 2>/dev/null | tee_to || true
+        fi
+        die "Could not set up Git-LFS (the details above explain why)." \
+            "Re-run the installer - it retries just this step. If it fails again, send the install log."
     fi
 fi
 
