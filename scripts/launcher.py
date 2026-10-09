@@ -140,6 +140,7 @@ def find_conda() -> str | None:
         os.environ.get("CONDA_EXE"),
         str(Path.home() / "anaconda3" / "bin" / "conda"),
         str(Path.home() / "miniconda3" / "bin" / "conda"),
+        str(Path.home() / "miniforge3" / "bin" / "conda"),
         str(Path.home() / "opt" / "anaconda3" / "bin" / "conda"),
         "/opt/anaconda3/bin/conda",
         "/opt/anaconda3/condabin/conda",
@@ -167,6 +168,8 @@ def find_npm() -> str | None:
     candidates = [
         "/opt/homebrew/bin/npm",
         "/usr/local/bin/npm",
+        # Node.js the macOS installer may place in the user's home folder
+        str(Path.home() / ".amadeus-tools" / "node" / "bin" / "npm"),
         r"C:\Program Files\nodejs\npm.cmd",
     ]
 
