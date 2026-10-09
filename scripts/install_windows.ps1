@@ -1,9 +1,24 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.10  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.11  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.11 (October 2026):
+#   - The long package-download steps no longer run through a helper
+#     program that could freeze on some Windows PCs without saying
+#     anything. The installer now gives each job to the toolbox's own
+#     Python directly - same packages, same results, and a stalled
+#     download gives up after two minutes instead of freezing forever.
+#     If a machine keeps its toolboxes in an unusual place, the old
+#     helper route is still used as a fallback, so nothing can get worse
+#     than before.
+#   - If the right GPU engine is already installed, the installer now sees
+#     it and skips the 2.5 GB download - re-runs on such machines move on
+#     in seconds instead of minutes.
+#   - The web interface setup skips a pointless background check, saving
+#     a few seconds on fresh machines.
 #
 #  WHAT'S NEW IN v4.10 (October 2026):
 #   - The installer can now put Amadeus in a folder of your choice: add
@@ -208,13 +223,35 @@ function Ensure-Env($name, $py="3.10"){
     if ($LASTEXITCODE -ne 0) { throw ("Could not create the '" + $name + "' Python environment.") }
 }
 
+# Locate a toolbox's own Python program (the program that actually runs the
+# jobs). conda keeps environments in <miniconda folder>\envs\<name>, and
+# the installer's own `conda create` always lands them there - on a fresh
+# PC included - so this is found everywhere. It returns $null only if a
+# machine keeps its toolboxes somewhere unusual; callers then fall back to
+# the traditional `conda run` helper route, which is still correct (just
+# the slower door that could freeze on some Windows machines).
+function Env-Python($name){
+    $p = Join-Path $condaHome "envs\$name\python.exe"
+    if (Test-Path $p) { return $p }
+    return $null
+}
+
+# Run pip inside one of the toolboxes. Prefers the toolbox's own Python
+# (no middleman); uses the helper route only as a fallback. $pipArgs is
+# everything pip should receive, e.g. @("install", "Flask") or
+# @("uninstall", "-y", "torch").
+function Invoke-PipInEnv($name, $pipArgs){
+    $py = Env-Python $name
+    if ($py) { & $py -m pip $pipArgs } else { & $conda run -n $name pip $pipArgs }
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.10) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.11) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.10  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.11  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -369,13 +406,13 @@ try {
     # app environment (3.10), so it gets its own environment. The launcher
     # finds it on first start and builds the sidecar from it.
     Ensure-Env "amadeus-cm" "3.13"
-    & $conda run -n amadeus pip install --upgrade pip | Out-Null
+    Invoke-PipInEnv "amadeus" @("--upgrade", "pip") | Out-Null
     # ddgs: the DuckDuckGo search library behind her web search (weather is
     # separate - it uses a keyless Open-Meteo feed and needs no library).
     # The 2026-10-07 fresh-VM run proved a fresh PC was missing this: she
     # answered searches from her own knowledge and honestly said she could
     # not verify them online.
-    & $conda run -n amadeus pip install Flask flask-cors requests tqdm langchain langchain-openai pydantic ddgs
+    Invoke-PipInEnv "amadeus" @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs")
     if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
     # Smoke test: the whole backend must import cleanly in this environment.
     $backend = Join-Path $proj "backend"
@@ -383,7 +420,11 @@ try {
     # ddgs is imported lazily by the backend (web search), so also check it
     # explicitly: a fresh PC that lost the search library must never hide
     # behind a passing smoke test.
-    $smoke = & $conda run -n amadeus python -c "import api; import ddgs; print('SMOKE_OK')" 2>&1 | Out-String
+    # Direct Python where the toolbox layout is standard (see Env-Python
+    # above); the helper route stays as the fallback.
+    $amPy = Env-Python "amadeus"
+    if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; print('SMOKE_OK')" 2>&1 | Out-String }
+    else { $smoke = & $conda run -n amadeus python -c "import api; import ddgs; print('SMOKE_OK')" 2>&1 | Out-String }
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
@@ -399,23 +440,41 @@ try {
     #         and the rest of the packages see torch as already installed.
     $hasGpu = $false
     try { $nv = & nvidia-smi 2>&1 | Out-String; if ($nv -match "NVIDIA") { $hasGpu = $true } } catch { $hasGpu = $false }
-    & $conda run -n GPTSoVits pip uninstall -y torch torchvision torchaudio 2>&1 | Out-Null   # clear any stale/CPU copy
-    if ($hasGpu) {
-        Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (required for RTX 50-series / Blackwell)." "Green"
-        & $conda run -n GPTSoVits pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 2>&1 | Tee-Object -FilePath $pipLog
-    } else {
-        Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow"
-        & $conda run -n GPTSoVits pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu 2>&1 | Tee-Object -FilePath $pipLog
+    # One fast local check (no download): what PyTorch build is already in
+    # the toolbox, and can it already see the hardware? If the right kind
+    # is present and working, the 2.5 GB download is skipped entirely - a
+    # re-run on such a machine moves on in seconds. (On a fresh PC the
+    # answer is 'none' and the normal download happens.)
+    $torchProbe = "try:`n    import torch`n    print('T|' + torch.__version__ + '|' + str(torch.version.cuda or 'cpu') + '|' + str(torch.cuda.is_available()))`nexcept Exception:`n    print('NONE')`n"
+    $gptPy = Env-Python "GPTSoVits"
+    if ($gptPy) { $torchInfo = (& $gptPy -c $torchProbe 2>&1 | Out-String).Trim() }
+    else { $torchInfo = (& $conda run -n GPTSoVits python -c $torchProbe 2>&1 | Out-String).Trim() }
+    $torchReady = $false
+    if ($torchInfo -match '^T\|') {
+        $tp = $torchInfo.Split('|')   # T | version | cuda build tag | can-see-GPU
+        $torchReady = ($hasGpu -and $tp[3] -eq 'True') -or ((-not $hasGpu) -and $tp[2] -eq 'cpu')
     }
-    if ($LASTEXITCODE -ne 0) {
-        Pop-Location
-        $tail = (Get-Content $pipLog -Tail 15) -join "`n"
-        throw "PyTorch failed to install. The last lines of the error are in voice_pip.log (your Amadeus folder):`n$tail"
+    if ($torchReady) {
+        Log ("  PyTorch " + $tp[1] + " is already in place and ready for this machine - skipping the download.") "Green"
+    } else {
+        Invoke-PipInEnv "GPTSoVits" @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null   # clear any stale copy
+        if ($hasGpu) {
+            Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (required for RTX 50-series / Blackwell)." "Green"
+            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") 2>&1 | Tee-Object -FilePath $pipLog
+        } else {
+            Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow"
+            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            $tail = (Get-Content $pipLog -Tail 15) -join "`n"
+            throw "PyTorch failed to install. The last lines of the error are in voice_pip.log (your Amadeus folder):`n$tail"
+        }
     }
 
     # --- 6b. Install the remaining voice packages (any error is now captured).
-    & $conda run -n GPTSoVits pip install -r extra-req.txt --no-deps 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
-    & $conda run -n GPTSoVits pip install -r requirements.txt 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+    Invoke-PipInEnv "GPTSoVits" @("install", "-r", "extra-req.txt", "--no-deps") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+    Invoke-PipInEnv "GPTSoVits" @("install", "-r", "requirements.txt") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
     if ($LASTEXITCODE -ne 0) {
         # Last resort: install everything except the Japanese text helper
         # (pyopenjtalk). The patched voice code treats it as optional, so
@@ -424,7 +483,7 @@ try {
         $reqCore = Join-Path $gpt "requirements-core.txt"
         Get-Content $reqAll | Where-Object { $_ -notmatch "pyopenjtalk" } | Set-Content -Path $reqCore -Encoding ascii
         Log "  Retrying the voice packages without the optional Japanese text helper..." "Yellow"
-        & $conda run -n GPTSoVits pip install -r $reqCore 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+        Invoke-PipInEnv "GPTSoVits" @("install", "-r", $reqCore) 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Log "  Voice packages installed (Japanese text helper skipped - voice still works)." "Yellow"
         } else {
@@ -437,7 +496,10 @@ try {
 
     # ---------- STEP 7: confirm PyTorch can actually use your GPU ----------
     Step 7 "Checking that PyTorch can use your GPU"
-    $gpuCheck = & $conda run -n GPTSoVits python -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String
+    # Direct Python where the toolbox layout is standard (step 6 already
+    # located it in $gptPy); the helper route stays as the fallback.
+    if ($gptPy) { $gpuCheck = & $gptPy -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
+    else { $gpuCheck = & $conda run -n GPTSoVits python -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
     if ($hasGpu) {
         if ($gpuCheck -match "GPU_OK") { Log "  PyTorch can see your GPU - voice synthesis will run on it." "Green" }
         else { Log "  NOTE: PyTorch is installed but could not see the GPU yet. Update your NVIDIA driver, then re-run this installer once." "Yellow" }
@@ -524,8 +586,24 @@ try {
     # start, and the engine fetches the rest on first use.
     $nltkDir = Join-Path $gpt "runtime\nltk_data"
     New-Item -ItemType Directory -Force -Path $nltkDir | Out-Null
-    $nltkCode = "import os, sys`nos.environ['NLTK_DATA'] = sys.argv[1]`nos.makedirs(sys.argv[1], exist_ok=True)`nimport nltk`nok = True`nfor res in sys.argv[2:]:`n    try:`n        nltk.data.find(res)`n        continue`n    except Exception:`n        pass`n    try:`n        if not nltk.download(res, quiet=True, download_dir=sys.argv[1]):`n            ok = False`n    except Exception:`n        ok = False`nprint('NLTK_DATA_OK' if ok else 'NLTK_DATA_INCOMPLETE')`n"
-    $nltkOut = & $conda run -n GPTSoVits python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
+    $nltkCode = "import os, sys, socket`nsocket.setdefaulttimeout(120)`nos.environ['NLTK_DATA'] = sys.argv[1]`nos.makedirs(sys.argv[1], exist_ok=True)`nimport nltk`nok = True`nfor res in sys.argv[2:]:`n    try:`n        nltk.data.find(res)`n        continue`n    except Exception:`n        pass`n    try:`n        if not nltk.download(res, quiet=True, download_dir=sys.argv[1]):`n            ok = False`n    except Exception:`n        ok = False`nprint('NLTK_DATA_OK' if ok else 'NLTK_DATA_INCOMPLETE')`n"
+    # v4.11 field fix (2026-10-08, dev PC E: drive install): call the
+    # voice env's python.exe directly instead of through `conda run`. The
+    # conda-run form of this exact step deadlocked there: the call never
+    # returned and no child process survived, stalling the install silently
+    # (reproduced twice). Direct python.exe is the same interpreter the
+    # wrapper would launch - it just skips the middleman - and it is the
+    # same pattern the language-model step above uses, which worked fine.
+    # The 120 s socket timeout in $nltkCode keeps a stalled download from
+    # hanging forever (it then falls back to the yellow note + on-first-use
+    # fetch, as before).
+    $nltkPy = Join-Path $condaHome "envs\GPTSoVits\python.exe"
+    if (Test-Path $nltkPy) {
+        $nltkOut = & $nltkPy -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
+    } else {
+        # Fallback for exotic layouts where the env's python is elsewhere.
+        $nltkOut = & $conda run -n GPTSoVits python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
+    }
     if ($nltkOut -match "NLTK_DATA_OK") {
         Log "  Voice text data for Western-script words is in place." "Green"
     } else {
@@ -535,7 +613,9 @@ try {
     # ---------- STEP 9: frontend ----------
     Step 9 "Setting up the web interface (frontend)"
     Push-Location (Join-Path $proj "frontend")
-    & npm install | Out-Null
+    # --no-audit --no-fund: skip npm's background registry checks - they
+    # save nothing for an install and can add tens of seconds on fresh PCs.
+    & npm install --no-audit --no-fund | Out-Null
     if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else { Log "  Frontend ready." "Green" }
     Pop-Location
 
