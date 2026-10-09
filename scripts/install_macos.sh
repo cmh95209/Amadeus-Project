@@ -315,6 +315,15 @@ else
             log "  (this Mac does not offer 'unzip' yet - using the built-in bsdtar...)"
             ( cd "$TOOLS_DIR" && /usr/bin/bsdtar -x -f git-lfs.zip ) >>"$lfs_err" 2>&1
         fi
+        # The archive puts the program inside a versioned folder
+        # (git-lfs-3.8.0/git-lfs). Copy it up to the tools folder so the
+        # PATH line below can find it.
+        if [ ! -x "$TOOLS_DIR/git-lfs" ]; then
+            found_lfs="$(find "$TOOLS_DIR" -type f -name git-lfs 2>/dev/null | head -1)"
+            if [ -n "$found_lfs" ]; then
+                cp "$found_lfs" "$TOOLS_DIR/git-lfs" 2>>"$lfs_err"
+            fi
+        fi
         chmod +x "$TOOLS_DIR/git-lfs" 2>/dev/null || true
         export PATH="$TOOLS_DIR:$PATH"
         hash -r
