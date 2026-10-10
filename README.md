@@ -258,7 +258,8 @@ Next major work includes:
 
 ---
 
-# Architecture
+<details>
+<summary># Architecture</summary>
 
 Amadeus is split into five runtime components (the LLM server is external):
 
@@ -307,6 +308,7 @@ frontend without rewriting the conversational core, and the memory engine to
 live in its own process.
 
 ---
+
 
 # Project Structure
 
@@ -412,7 +414,7 @@ The required Web runtime files and shaders are included with the project
 frontend.
 
 ---
-
+</details>
 <details>
 <summary><strong>Manual Installation</strong> — what the installer scripts do, step by step (only needed if you'd rather install by hand)</summary>
 
@@ -976,8 +978,8 @@ re-seeded automatically on the next start). Back it up if you want to keep
 what she has learned about you.
 
 ---
-
-# Common Issues
+<details>
+<summary><strong> ## Common Issues</strong> </summary>
 
 ## Launcher says a port is already in use
 
@@ -1150,7 +1152,7 @@ To also reset her long-term memory, delete `backend/data/character_memory/`
 afterward. A new database will be created automatically.
 
 ---
-
+</details></summary>
 # Development Roadmap
 
 Status as of v2.0:
