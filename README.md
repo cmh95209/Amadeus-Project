@@ -53,10 +53,9 @@ a local LLM or a cloud LLM model to connect with the app.
    partway — it resumes where it left off — and it writes a log to
    `install_log.txt` in the folder it installed into.
 4. When it prints **ALL DONE**, double-click `start_windows.bat` in the
-   Amadeus folder (by default your `Amadeus` folder).
+   Amadeus folder (by default your `C:\Users\YOURUSERNAME\Amadeus` folder).
 
-To install into a different folder (for example a clean second copy for GPU
-testing), add a parameter at the end of the command:
+To install into a different folder, add a parameter at the end of the command:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_windows.ps1" -OutFile "$HOME\Downloads\install_windows.ps1"; & "$HOME\Downloads\install_windows.ps1" -InstallDir "D:\Amadeus"
@@ -79,7 +78,7 @@ to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
 3. Wait (a fresh Mac downloads several gigabytes of models), then double-click
    `start_macos.command` in the Amadeus folder (by default `~/Amadeus`).
 
-Prefer to download the installer by hand? The macOS installer script is
+Prefer to download the installer by hand? The Windows and macOS installer script is
 attached to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.0).
 
 ## Your first meeting
