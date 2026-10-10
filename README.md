@@ -22,8 +22,9 @@ is given personality, voice, visual presence, and continuity over time.
 native-Japanese dialogue, greeting systems, web search and weather modules,
 and installer scripts for Windows and Mac. See the [Changelog](docs/changelog.md).
 
-<img width="3434" height="2015" alt="image" src="https://github.com/user-attachments/assets/cee65838-11da-464a-8072-c7fb0ad24c39" />
-<img width="3434" height="2015" alt="image" src="https://github.com/user-attachments/assets/1c6b2a62-d2ca-4a1e-ba03-ad183f5e01de" />
+![Amadeus Preview](docs/images/mainmenu.png)
+
+![Amadeus Preview](docs/images/settings.png)
 
 ---
 
