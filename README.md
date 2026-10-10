@@ -193,17 +193,11 @@ Voice retention               ✓
 First-meeting ceremony        ✓
 Long-term memory (v2.0)       ✓
 One-shot installers (Win/Mac) ✓
-Poke interactions (stomach)   planned
-Prompting improvements        planned (high priority)
 Display-language dropdown     planned (her voice stays Japanese)
 Show her Japanese line        planned
-Expression control            planned (very low priority)
-More/improved animations      planned (require hiring animator)
-```
-
-Longer-term ideas include richer character interaction, additional activities
-such as chess, and eventually hosting Amadeus as a web service where multiple
-users can run independent sessions.
+Better animations/Live2D      planned
+Better web and harness tools  planned
+Agentic workflows             planned
 
 ---
 
@@ -238,3 +232,6 @@ The Amadeus project code is MIT-licensed; her voice engine (GPT-SoVITS) is
 MIT; her long-term memory engine (CharacterMemory) is GPL-3.0 and runs only
 inside the sidecar's own process. Full notes and credits:
 [docs/license.md](docs/license.md).
+
+The voice sample is a copyright of the original IP holders (MAGES inc and relevant parties), and is only used for entertainment and personal purposes.
+Do not distribute or sell the voice sample without permission of the original IP holders.
