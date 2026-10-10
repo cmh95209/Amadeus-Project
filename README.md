@@ -1,27 +1,132 @@
 # Amadeus
 
-Amadeus is a Steins;Gate-inspired AI character assistant designed to feel less like a conventional chatbot and more like a persistent virtual companion.
+Amadeus is a Steins;Gate-inspired AI character assistant designed to feel less
+like a conventional chatbot and more like a persistent virtual companion.
 
-The project combines configurable large language models, persistent conversation history, customizable character behavior, bilingual dialogue generation, neural voice synthesis, and Live2D character rendering in a single interactive system.
+In *Steins;Gate 0*, Amadeus is an AI assistant built on Makise Kurisu's
+memories and personality — she is **not** Kurisu herself. This project
+recreates that in-story character as a real, usable companion: she thinks and
+speaks Japanese natively, an English (or other-language) translation is shown
+on screen, and since v2.0 she genuinely **remembers** you across sessions.
 
-Amadeus began as a small personal experiment inspired by *Steins;Gate*. It has since grown into a larger software project and a sandbox for experimenting with conversational AI, memory, speech synthesis, animated character interfaces, and long-running assistant behavior.
+The project combines configurable large language models, long-term memory,
+persistent conversation history, customizable character behavior,
+Japanese-first bilingual dialogue, neural voice synthesis, and Live2D
+character rendering in a single interactive system.
 
-The project is still actively evolving. It is not intended to be a finished product; it is an ongoing attempt to explore what happens when an AI character is given personality, voice, visual presence, and continuity over time.
+Amadeus began as a small personal experiment inspired by *Steins;Gate*. It has
+since grown into a larger software project and a sandbox for experimenting
+with conversational AI, memory, speech synthesis, animated character
+interfaces, and long-running assistant behavior.
+
+The project is still actively evolving. It is not intended to be a finished
+product; it is an ongoing attempt to explore what happens when an AI character
+is given personality, voice, visual presence, and continuity over time.
+
+**v2.0 (October 2026)** adds long-term memory, voice-first native-Japanese
+dialogue, a first-meeting ceremony, a one-shot macOS installer, and the
+hardened Windows installer (v4.11). See the [Changelog](#changelog).
 
 ![Amadeus Preview](docs/images/mainmenu.png)
 
 ![Amadeus Preview](docs/images/settings.png)
 
-## How Conversation and Voice Work
+---
 
-Amadeus currently separates the **text you read** from the **voice you hear**.
+# Quick Start
 
-You can chat with Kurisu in **English** (or any language she can understand).
+The fastest way to run Amadeus is a single copy-paste command. It installs
+everything (Python environments, the voice engine, her voice models, the web
+interface) and then you just start the app. You do **not** need an Apple
+Developer account, a GitHub account, or an API key up front.
 
-For each normal response, Amadeus asks the LLM to write her reply **natively in Japanese first**, then an English version of it for the UI — in a single model call:
+## Windows
 
-- **Japanese (`assistant_reply_JPS`)** — natural spoken Japanese, written the way Kurisu would actually talk; sent to GPT-SoVITS for voice synthesis. This is also what is stored in her memory, so her own history stays in her own voice.
-- **English (`assistant_reply_ENG`)** — a translation of that Japanese line, displayed in the conversation UI.
+1. Press the Windows key, type **PowerShell**, right-click it and choose
+   **Run as administrator**.
+2. Paste this one line and press Enter:
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_windows.ps1" -OutFile "$HOME\Downloads\install_windows.ps1"; & "$HOME\Downloads\install_windows.ps1"
+   ```
+
+3. Wait. On a fresh PC the download-heavy steps (the voice engine and its
+   models) take a while; on a machine that has run the installer before, most
+   steps are skipped. The installer is safe to re-run if it ever stops
+   partway — it resumes where it left off — and it writes a log to
+   `install_log.txt` in the folder it installed into.
+4. When it prints **ALL DONE**, double-click `start_windows.bat` in the
+   Amadeus folder (by default your `Amadeus` folder).
+
+To install into a different folder (for example a clean second copy for GPU
+testing), add a parameter at the end of the command:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_windows.ps1" -OutFile "$HOME\Downloads\install_windows.ps1"; & "$HOME\Downloads\install_windows.ps1" -InstallDir "D:\Amadeus"
+```
+
+Prefer to download the installer by hand? Both installer scripts are attached
+to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.0).
+
+## macOS (Apple Silicon and Intel)
+
+1. Open **Terminal** (the one-shot installer works on a brand-new Mac — it
+   installs any missing developer tools itself, and it never asks for your
+   administrator password).
+2. Paste this one line and press Enter:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_macos.sh -o install_macos.sh && bash install_macos.sh
+   ```
+
+3. Wait (a fresh Mac downloads several gigabytes of models), then double-click
+   `start_macos.command` in the Amadeus folder (by default `~/Amadeus`).
+
+Prefer to download the installer by hand? The macOS installer script is
+attached to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.0).
+
+## Your first meeting
+
+The first time you start the app, Amadeus wakes up with her own line — and
+she is honest about what she still can't do. Before she can talk you through
+anything, you have to give her a brain:
+
+1. Open **Settings → Connection** in the app.
+2. Point her at a language model — **any** of these work:
+   - a local server on your own GPU (Unsloth Desktop, Ollama, LM Studio,
+     llama.cpp, vLLM, or any OpenAI-compatible server) — leave the address
+     field empty and she auto-detects the usual local ports (8888, 8000);
+   - or a cloud model through **OpenRouter** (or any OpenAI-compatible
+     endpoint) with your API key.
+3. Pick the model name (the server's real model list appears as clickable
+   chips, and "Test connection" verifies it before you commit).
+4. Save. She speaks her real wake-up line, and the conversation begins.
+
+Amadeus does **not** bundle or automatically install a local LLM — run the
+model with a server of your choice and point Amadeus at it. The installer
+handles everything *except* the model server.
+
+Prefer to install it by hand? The collapsible **Manual Installation**
+section further down lists every step the installer scripts do for you, in
+case you prefer to do it yourself or run into something the scripts cannot
+handle.
+
+---
+
+# How Conversation and Voice Work
+
+Amadeus separates the **text you read** from the **voice you hear**.
+
+You can chat with her in **English** (or any language she can understand).
+For each normal response, Amadeus asks the LLM to write her reply **natively
+in Japanese first**, then a translation of it for the UI — in a single model
+call:
+
+- **Japanese (spoken line)** — natural spoken Japanese, written the way she
+  would actually talk; sent to GPT-SoVITS for voice synthesis. This is also
+  what is stored in her memory, so her own history stays in her own voice.
+- **English (display line)** — a translation of that Japanese line, displayed
+  in the conversation UI. Her voice is Japanese-only by design.
 
 So a typical conversation looks like:
 
@@ -31,88 +136,134 @@ You type a message
         ▼
       LLM
         │
-        ├── Japanese dialogue (native) ─► GPT-SoVITS ─► Kurisu speaks Japanese
+        ├── Japanese dialogue (native) ─► GPT-SoVITS ─► Amadeus speaks Japanese
         │
         └── English translation ─────► displayed in the WebUI
 ```
 
-> [!IMPORTANT]
-> ### Does Amadeus run a local LLM?
->
-> **Yes — or it can.** The conversational LLM can run **on your own GPU**
-> (Unsloth Desktop, Ollama, LM Studio, llama.cpp, vLLM, or any
-> OpenAI-compatible server) **or** remotely through **OpenRouter** with your
-> own API key.
->
-> Point Amadeus at your model server in Settings → Connection ("Model server
-> address"). Leave the field empty and Amadeus auto-detects the usual local
-> ports (8888, 8000) — which is how it finds an Unsloth Desktop server that
-> picks a new port every time it restarts.
->
-> The connection status dot and the "Test connection" button ask the server
-> for its real model list, so a mistyped model name shows an amber warning
-> instead of failing mid-conversation, and the server's models appear as
-> clickable chips.
->
-> What runs locally:
->
-> - **The conversational LLM** (when pointed at a local server) — on your GPU
-> - **GPT-SoVITS** — Japanese voice synthesis
-> - **Live2D / Cubism** — character rendering and animation
-> - **Conversation history** — stored locally in SQLite
-> - **Amadeus frontend and backend**
->
-> What can run remotely:
->
-> - **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
->
-> Amadeus does **not bundle or automatically install a local LLM** — run the
-> model with a server of your choice and point Amadeus at it.
+### Does Amadeus run a local LLM?
 
-## Current Status
+**Yes — or it can.** The conversational LLM can run **on your own GPU**
+(Unsloth Desktop, Ollama, LM Studio, llama.cpp, vLLM, or any
+OpenAI-compatible server) **or** remotely through **OpenRouter** with your
+own API key.
 
-The current development version includes:
+Point Amadeus at your model server in Settings → Connection ("Model server
+address"). Leave the field empty and Amadeus auto-detects the usual local
+ports (8888, 8000) — which is how it finds an Unsloth Desktop server that
+picks a new port every time it restarts.
+
+The connection status dot and the "Test connection" button ask the server
+for its real model list, so a mistyped model name shows an amber warning
+instead of failing mid-conversation, and the server's models appear as
+clickable chips.
+
+What runs locally:
+
+- **The conversational LLM** (when pointed at a local server) — on your GPU
+- **GPT-SoVITS** — Japanese voice synthesis
+- **The CharacterMemory sidecar** — her long-term memory (small; CPU is fine)
+- **Live2D / Cubism** — character rendering and animation
+- **Conversation history** — stored locally in SQLite
+- **Amadeus frontend and backend**
+
+What can run remotely:
+
+- **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
+
+Amadeus does **not bundle or automatically install a local LLM** — run the
+model with a server of your choice and point Amadeus at it.
+
+---
+
+# Long-Term Memory (v2.0)
+
+Since v2.0, Amadeus has a long-term memory of her own. A separate local
+service — the **CharacterMemory sidecar** (127.0.0.1:9870) — quietly
+processes your conversations in the background:
+
+- it learns **facts** about you, **episodes** of what happened, and a
+  running **summary** of who you are and what you care about;
+- before each reply it renders the relevant memories into her prompt, so she
+  can reference things you told her days or weeks ago;
+- her memory is **user data**, stored locally in
+  `backend/data/character_memory/` — nothing is ever sent anywhere except the
+  turns mirrored to her LLM, which go to whatever model server you configured.
+
+The sidecar runs in its own process with its own Python environment, so the
+memory engine (and its license) stays cleanly separated from the rest of the
+app: if it is missing or fails, the app runs exactly as it did before v2.0
+(without long-term memory) and the launcher only warns.
+
+The memory engine is built on **CharacterMemory** by
+[Francesco Caracciolo](https://github.com/FrancescoCaracciolo/CharacterMemory)
+— an open-source memory system for LLM characters (GPL-3.0), which Amadeus
+runs as a separate helper process. See `memory_sidecar/LICENSE-NOTE.md` for
+the full license notes.
+
+The launcher starts the sidecar automatically (its one-time setup takes a few
+minutes on first launch). It follows the same LLM settings as the app, so
+there is nothing extra to configure.
+
+---
+
+<details>
+<summary><strong>Latest features (v2.0)</strong> — everything Amadeus can do today</summary>
+
+The current version (v2.0) includes:
 
 - React + TypeScript browser interface
 - Python / Flask backend
-- Configurable LLM access through OpenRouter
+- Configurable LLM access: any local OpenAI-compatible server **or** OpenRouter
+- **Long-term memory** (CharacterMemory sidecar: facts, episodes, summaries)
+- **Voice-first dialogue**: she writes natural spoken Japanese natively; the
+  on-screen text is its translation
+- **First-meeting ceremony**: she wakes up on her own line and is honest
+  about what she can't do yet; the model is configured in Settings
+- **One-shot installers**: Windows (v4.11) and macOS (v1.2) — both
+  cross-platform launcher support included
 - Persistent SQLite conversation history
 - Runtime LLM model switching
-- GPT-SoVITS character voice synthesis
+- GPT-SoVITS character voice synthesis (Japanese, streamed, lip-synced)
 - Live2D Cubism rendering directly in the WebUI
 - Natural looping idle and talking-body motions
 - Touch interactions with one-shot character reactions
 - Browser-side streamed speech playback
 - Audio-amplitude-driven Live2D lip synchronization
 - Paired text + prerecorded audio variants for special interactions
-- Cross-platform automatic launcher for macOS and Windows
-- Local model server support (Unsloth Desktop, Ollama, LM Studio, llama.cpp, vLLM) alongside OpenRouter
-- Live connection status with the server's model list and a "Test connection" button
-- Native-Japanese-first dialogue with an English translation shown in the UI
+- Optional local web search (DuckDuckGo, no API key; also reads the top
+  result's page for real content), with optional "deep thinking" for the
+  search decision, plus live weather and air quality
+- Live connection status with the server's model list and a "Test
+  connection" button
 - Trust-based relationship stats and trust-aware voice lines
 - Multiple named chat sessions (create, rename, delete, switch)
 - Reply regeneration with saved versions, plus edit / delete / undo
 - Per-message voice replay and on-demand re-voice
 - Voice retention cap (keep the last N recordings)
-- Optional local web search (now also reads the top result's page for real content, not just one-line snippets), with optional deep thinking for the search decision
 - Backend connection/status display
 - Conversation memory reset controls
 
-The Live2D character system now handles idle, talking, touch reactions, motion priority, and audio-driven mouth movement in the browser. Generated GPT-SoVITS speech is streamed through Flask to the WebUI, where the same audio signal sent to the speakers is analyzed to drive `ParamMouthOpenY`.
+The Live2D character system handles idle, talking, touch reactions, motion
+priority, and audio-driven mouth movement in the browser. Generated
+GPT-SoVITS speech is streamed through Flask to the WebUI, where the same
+audio signal sent to the speakers is analyzed to drive `ParamMouthOpenY`.
 
-Next major character-system work includes:
+Next major work includes:
 
 - More expression and motion control from model responses
 - Richer hit-area and interaction behavior
+- A user-selectable display-language dropdown (her voice stays Japanese)
+- Showing her Japanese line alongside the translation
 - Expanding the prerecorded interaction voice library
-- Improved prompting and character-state control
-- A future redesign of the long-term memory system
+
+</details>
 
 ---
 
 # Architecture
 
-Amadeus is split into three main runtime components:
+Amadeus is split into five runtime components (the LLM server is external):
 
 ```text
 ┌─────────────────────────────────────────────┐
@@ -126,24 +277,37 @@ Amadeus is split into three main runtime components:
 │ Python / Flask Backend                      │
 │                                             │
 │  Chat   Memory   LLM   TTS API             │
-└───────────────┬─────────────────────────────┘
-                │
-                ▼
+└──────────┬──────────────────┬───────────────┘
+           │                  │
+           ▼                  ▼
+┌─────────────────────┐  ┌──────────────────────────────────┐
+│ GPT-SoVITS          │  │ CharacterMemory sidecar          │
+│ Character voice     │  │ Long-term memory (separate       │
+│ synthesis           │  │ process; GPL engine; optional)   │
+└─────────────────────┘  └──────────────────────────────────┘
+           │
+           ▼
 ┌─────────────────────────────────────────────┐
-│ GPT-SoVITS                                  │
-│ Character voice synthesis                   │
+│ LLM server (yours: local or cloud)          │
+│ Unsloth / Ollama / LM Studio / llama.cpp /  │
+│ vLLM / OpenRouter / any OpenAI-compatible   │
 └─────────────────────────────────────────────┘
 ```
 
 Default local services:
 
 ```text
-GPT-SoVITS        http://127.0.0.1:9880
-Amadeus backend   http://127.0.0.1:5050
-Amadeus WebUI     http://127.0.0.1:5173
+GPT-SoVITS voice     http://127.0.0.1:9880
+Amadeus backend      http://127.0.0.1:5050
+Amadeus WebUI        http://127.0.0.1:5173
+Memory sidecar       http://127.0.0.1:9870
+LLM server           (yours — local port or cloud URL)
 ```
 
-The AI backend is intentionally independent from the frontend. This allowed the original Unity interface to be replaced by a browser-based React/WebGL frontend without rewriting the conversational core.
+The AI backend is intentionally independent from the frontend. This allowed
+the original Unity interface to be replaced by a browser-based React/WebGL
+frontend without rewriting the conversational core, and the memory engine to
+live in its own process.
 
 ---
 
@@ -152,51 +316,77 @@ The AI backend is intentionally independent from the frontend. This allowed the 
 ```text
 Amadeus-Project/
 ├── backend/
-│   ├── main.py
-│   ├── api.py
-│   ├── chat.py
-│   ├── memory.py
-│   ├── llm.py
-│   ├── tts.py
-│   ├── start_gptsovits.py
-│   ├── environment.yml
-│   ├── requirements.in
-│   ├── assets/
-│   └── data/
+│   ├── main.py                # Flask app entry point
+│   ├── api.py                 # REST API
+│   ├── chat.py                # conversation pipeline (voice-first)
+│   ├── memory.py              # SQLite conversation history
+│   ├── llm.py                 # LLM access (local or OpenRouter)
+│   ├── tts.py                 # GPT-SoVITS voice client
+│   ├── start_gptsovits.py     # voice engine startup
+│   ├── ceremony.py            # first-meeting / wake-up logic
+│   ├── ja_voice.py            # her Japanese voice rules
+│   ├── cm_bridge.py           # bridge to the memory sidecar
+│   ├── weather.py             # live weather / air quality
+│   ├── webfetch.py            # web search result reading
+│   ├── console_encoding.py    # UTF-8 console hardening
+│   ├── stats.py               # trust / relationship stats
+│   ├── environment.yml        # backend env (python 3.10)
+│   ├── requirements.in        # backend dependencies
+│   ├── assets/                # prerecorded interaction audio
+│   └── data/                  # runtime data (git-ignored)
 │
 ├── frontend/
-│   ├── cubism/
-│   │   ├── Core/
-│   │   └── Framework/
+│   ├── cubism/                # Live2D Cubism SDK (Core/Framework)
 │   ├── public/
 │   │   ├── cubism-shaders/
-│   │   ├── live2d/
+│   │   ├── live2d/            # character model assets
 │   │   └── live2dcubismcore.min.js
 │   ├── src/
 │   │   ├── components/
-│   │   │   └── Live2DCharacter.tsx
+│   │   │   ├── Live2DCharacter.tsx
+│   │   │   └── SamplingSettings.tsx
 │   │   ├── live2d/
 │   │   │   ├── cubismBootstrap.ts
 │   │   │   ├── KurisuController.ts
-│   │   │   └── KurisuModel.ts
+│   │   │   ├── KurisuModel.ts
+│   │   │   ├── MotionPlayer.ts
+│   │   │   └── textureLoader.ts
+│   │   ├── audio/
+│   │   │   └── SpeechPlayer.ts
 │   │   ├── App.tsx
 │   │   ├── api.ts
+│   │   ├── interactions.ts
 │   │   ├── main.tsx
 │   │   └── styles.css
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.ts
 │
-├── scripts/
-│   └── launcher.py
+├── memory_sidecar/            # long-term memory (v2.0)
+│   ├── cm_sidecar.py          # sidecar entry point (port 9870)
+│   ├── requirements.txt       # pinned sidecar dependencies
+│   ├── lib/                   # vendored CharacterMemory engine (GPL)
+│   ├── seed_index/            # her lore, re-seeded on first start
+│   ├── LICENSE-NOTE.md
+│   └── venv/                  # built on first launch (git-ignored)
 │
+├── scripts/
+│   ├── launcher.py            # cross-platform automatic launcher
+│   ├── install_windows.ps1    # Windows one-shot installer (v4.11)
+│   └── install_macos.sh       # macOS one-shot installer (v1.2)
+│
+├── GPT-SoVITS/                # voice engine (cloned locally, git-ignored)
+├── docs/images/
 ├── start_macos.command
 ├── start_windows.bat
+├── check_amadeus.bat          # backend self-test (no model needed)
 ├── README.md
+├── LICENSE
 └── .gitignore
 ```
 
-GPT-SoVITS is cloned separately into a local `GPT-SoVITS/` directory. It is an external dependency rather than part of the Amadeus repository itself.
+GPT-SoVITS is cloned separately into a local `GPT-SoVITS/` directory. It is
+an external dependency rather than part of the Amadeus repository itself.
 
 ---
 
@@ -204,11 +394,13 @@ GPT-SoVITS is cloned separately into a local `GPT-SoVITS/` directory. It is an e
 
 ## Backend
 
-- Python
+- Python 3.10 (backend environment)
+- Python 3.13 (memory sidecar environment)
 - Flask
 - SQLite
-- OpenRouter
+- Any OpenAI-compatible LLM server (local) or OpenRouter
 - GPT-SoVITS
+- CharacterMemory (vendored, GPL-3.0 — isolated in the sidecar process)
 
 ## Frontend
 
@@ -218,72 +410,44 @@ GPT-SoVITS is cloned separately into a local `GPT-SoVITS/` directory. It is an e
 - WebGL
 - Live2D Cubism SDK for Web
 
-The Live2D runtime does not require users to install Cubism Editor or Unity. The required Web runtime files and shaders are included with the project frontend.
+The Live2D runtime does not require users to install Cubism Editor or Unity.
+The required Web runtime files and shaders are included with the project
+frontend.
 
 ---
 
-# Installation
-
-## One-click install (Windows)
-
-Prefer to let a single script do all of this for you? Download
-`install_windows.ps1` from the [latest release](https://github.com/cmh95209/Amadeus-Project/releases)
-(it is also in `scripts/install_windows.ps1` in this repository), save it
-somewhere you remember - e.g. your Downloads folder - then:
-
-1. Press the Windows key, type **PowerShell**, right-click it and choose
-   **Run as administrator**.
-2. Paste this one line and press Enter (adjust the path if you saved the
-   script somewhere other than Downloads):
-
-   ```powershell
-   Set-ExecutionPolicy -Scope Process Bypass; & "$HOME\Downloads\install_windows.ps1"
-   ```
-
-3. Press Enter when asked, then wait. The script installs everything,
-   connects Amadeus to your local model server, writes a log to
-   `Amadeus\install_log.txt`, and is safe to re-run if it ever stops
-   partway - it resumes where it left off.
-
-The manual steps below are what the script does for you, in case you prefer
-to do it yourself or run into something the script cannot handle.
+<details>
+<summary><strong>Manual Installation</strong> — what the installer scripts do, step by step (only needed if you'd rather install by hand)</summary>
 
 ## 0. Requirements
 
 Before installing Amadeus, make sure you have:
 
-- Git
-- Conda / Anaconda / Miniconda
-- Node.js + npm
-- Git LFS
-- FFmpeg
-- Python 3.10 for GPT-SoVITS
-- Visual Studio Build Tools on Windows if required by GPT-SoVITS dependencies
+- **Git** and **Git LFS** (the voice models are stored via LFS)
+- **Miniconda or Anaconda** (three Python environments are created: `amadeus`
+  on Python 3.10, `amadeus-cm` on Python 3.13 for the memory sidecar, and
+  `GPTSoVits` on Python 3.10)
+- **Node.js (LTS) + npm** for the web interface
+- **macOS**: the Xcode Command Line Tools (`xcode-select --install` in a
+  terminal if you don't have them)
+- **Windows**: nothing else — the voice patches shipped with this project
+  remove the old C-compiler requirement. (An NVIDIA GPU is strongly
+  recommended for faster voice synthesis; CPU operation is possible.)
 
-An NVIDIA GPU is strongly recommended for faster local voice synthesis, although CPU operation is possible.
+Note: **FFmpeg is NOT required** — Amadeus serves her voice as WAV through
+Python audio libraries and never invokes the FFmpeg program.
 
-### Conda
-
-Install Anaconda or Miniconda and make sure the `conda` command is available.
-
-### Node.js
-
-Install Node.js and npm. The browser WebUI uses Vite and React.
-
-### Windows
-
-Install Visual Studio Build Tools if required by GPT-SoVITS or one of its Python dependencies.
-
----
+An OpenAI-compatible LLM server (local or cloud) is needed to actually chat;
+it is configured in the app after installation, not during it.
 
 ## 1. Clone Amadeus
 
 ```bash
-git clone https://github.com/reflectors02/Amadeus-Project.git
+git clone https://github.com/cmh95209/Amadeus-Project.git
 cd Amadeus-Project
 ```
 
-Clone GPT-SoVITS into the project directory:
+Clone GPT-SoVITS (the voice engine) into the project directory:
 
 ```bash
 git clone https://github.com/RVC-Boss/GPT-SoVITS.git
@@ -295,48 +459,61 @@ Your local directory will then contain both:
 Amadeus-Project/
 ├── backend/
 ├── frontend/
+├── memory_sidecar/
 ├── scripts/
 └── GPT-SoVITS/      # external project, cloned locally
 ```
 
----
+## 2. Apply the voice patches
 
-## 2. Create the Amadeus Backend Environment
+This project ships five voice-engine patches (a prebuilt Japanese text
+helper and pure-Python text segmentation) that make the voice engine work
+without a C compiler. Copy them onto the GPT-SoVITS clone, preserving the
+folder structure:
+
+```bash
+# macOS / Linux
+cp -R scripts/voice-patch/* GPT-SoVITS/
+
+# Windows (PowerShell)
+Copy-Item -Recurse -Force scripts\voice-patch\* GPT-SoVITS\
+```
+
+## 3. Create the Amadeus backend environment
 
 From the repository root:
 
 ```bash
 cd backend
 conda env create -f environment.yml
-```
-
-Activate it:
-
-```bash
-conda activate amadeus
-```
-
-Return to the project root:
-
-```bash
 cd ..
 ```
 
-Backend dependency information is tracked in:
+This creates the `amadeus` environment (Python 3.10) with all backend
+dependencies, including `ddgs` (the search library behind her web search).
 
-```text
-backend/environment.yml
-backend/requirements.in
-```
+## 4. Create the memory sidecar environment
 
----
-
-## 3. Create the GPT-SoVITS Environment
+The long-term memory engine needs a newer Python than the app (its pinned
+packages require Python 3.12+), so it has its own environment:
 
 ```bash
-cd GPT-SoVITS
-conda create -n GPTSoVits python=3.10
+conda create -n amadeus-cm python=3.13 -y
+```
+
+That is all you have to do manually: on its **first launch**, the launcher
+finds this environment, builds the sidecar's own `memory_sidecar/venv` from
+it, and installs the pinned package list (a few minutes of downloads). If
+you start the services by hand instead (see [Manual Startup](#manual-startup)),
+the sidecar venv is built the first time the launcher runs — or you can skip
+long-term memory entirely; the app runs fine without it.
+
+## 5. Create the GPT-SoVITS environment
+
+```bash
+conda create -n GPTSoVits python=3.10 -y
 conda activate GPTSoVits
+cd GPT-SoVITS
 ```
 
 Install GPT-SoVITS dependencies:
@@ -344,14 +521,14 @@ Install GPT-SoVITS dependencies:
 ```bash
 pip install -r extra-req.txt --no-deps
 pip install -r requirements.txt
-conda install ffmpeg
 ```
+
+(No FFmpeg installation is needed — see step 0.)
+
 ### Initialize fast-langdetect
 
-GPT-SoVITS uses `fast-langdetect` for language detection. If you encounter
-a missing model cache directory error, create the directory below.
-
-Run this while still inside the `GPT-SoVITS` directory.
+GPT-SoVITS uses `fast-langdetect` for language detection. Create its model
+cache directory so the very first speech line can never stall:
 
 #### Windows
 
@@ -359,7 +536,7 @@ Run this while still inside the `GPT-SoVITS` directory.
 mkdir GPT_SoVITS\pretrained_models\fast_langdetect
 ```
 
-#### macOS / Linux
+#### macOS
 
 ```bash
 mkdir -p GPT_SoVITS/pretrained_models/fast_langdetect
@@ -371,69 +548,77 @@ Return to the Amadeus project root:
 cd ..
 ```
 
----
+## 6. Configure PyTorch
 
-## 4. Configure PyTorch
+The exact PyTorch installation depends on your hardware.
 
-The exact PyTorch installation depends on the machine running GPT-SoVITS.
+### NVIDIA GPU (Windows or Linux)
 
-### NVIDIA GPU
+With a recent NVIDIA driver installed, install the CUDA 12.8 build (the same
+build the installer uses):
 
-Install the CUDA-enabled PyTorch build appropriate for your system.
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
 
-Example:
+### CPU Only (Windows, Linux, or Intel Mac)
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+### Apple Silicon Mac
+
+Plain PyPI wheels work and enable MPS (Apple GPU) acceleration:
+
+```bash
+pip install torch torchvision torchaudio
+```
+
+## 7. Download GPT-SoVITS Pretrained Models
+
+The voice quality depends on pretrained models, stored on Hugging Face via
+Git LFS (that is why Git LFS is a requirement):
+
+```bash
+cd GPT-SoVITS
+git clone https://huggingface.co/lj1995/GPT-SoVITS pretrained_models
+```
+
+If the downloaded files are tiny LFS *pointers* instead of real model files
+(`git lfs install` missing or the files are a few hundred bytes), run
+`git lfs pull` inside `pretrained_models/`.
+
+Also pre-download the language-detection model so the first voice line is
+instant:
+
+```bash
+cd GPT_SoVITS/pretrained_models/fast_langdetect
+# Windows:
+curl -L -o lid.176.bin https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
+# macOS:
+curl -L -O https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
+cd ../../..
+```
+
+Optionally, pre-download the Western-script text data (pronunciation of
+Latin-script names and words in her voice):
 
 ```bash
 conda activate GPTSoVits
-pip uninstall -y torch torchvision torchaudio
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+cd GPT-SoVITS
+python -c "import nltk; nltk.download('cmudict'); nltk.download('averaged_perceptron_tagger'); nltk.download('averaged_perceptron_tagger_eng')"
+cd ..
 ```
 
-Check the current PyTorch installation instructions if your CUDA environment requires a different build.
+(Skip this and the voice engine will fetch what it needs on first use,
+which is slower and can stall on flaky connections.)
 
-### CPU Only
+Amadeus is paired with the upstream GPT-SoVITS project (validated as of v2.0
+against upstream commit `9bbd80a`, plus the voice patches from step 2). Do
+not update it ahead of Amadeus (see [Updating Amadeus](#updating-amadeus)).
 
-A CPU-only configuration is also possible, although synthesis will be slower.
-
-Example:
-
-```bash
-conda activate GPTSoVits
-pip uninstall -y torch torchvision torchaudio torchcodec
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-```
-
----
-
-## 5. Download GPT-SoVITS Pretrained Models
-
-Install Git LFS if necessary:
-
-```bash
-git lfs install
-```
-
-Clone the pretrained model repository somewhere temporary:
-
-```bash
-git clone https://huggingface.co/lj1995/GPT-SoVITS
-```
-
-Copy the required pretrained files into:
-
-```text
-GPT-SoVITS/GPT_SoVITS/pretrained_models/
-```
-
-The exact files required can vary with GPT-SoVITS versions, so Amadeus should only be paired with a GPT-SoVITS version known to work with the project.
-
----
-
-## 6. Install Frontend Dependencies
-
-The automatic launcher runs `npm install` if `frontend/node_modules/` is missing.
-
-You can also install the dependencies manually:
+## 8. Install Frontend Dependencies
 
 ```bash
 cd frontend
@@ -441,76 +626,68 @@ npm install
 cd ..
 ```
 
-No separate Live2D or Cubism installation is required for the WebUI. The Cubism Web runtime, framework source, shaders, and model assets used by Amadeus are part of the project frontend.
+## 9. Your first meeting
+
+Start the app the normal way ([Launching Amadeus](#launching-amadeus)) and
+follow the [first-meeting steps](#your-first-meeting) above: open
+Settings → Connection, point her at your model, pick the model, save — and
+she speaks.
+
+</details>
 
 ---
 
 # Configuration
 
-## OpenRouter API Key
+## Model Server, API Key, and Active Model
 
-The OpenRouter API key is stored locally in:
+These are set in the app's **Settings → Connection** panel (the first-meeting
+flow), and are stored locally as plain text:
 
-```text
-backend/data/api_key.txt
-```
+- **Model server address** — `backend/llm_server.txt`. Leave empty to
+  auto-detect local ports (8888, 8000), or set a full URL such as
+  `http://127.0.0.1:8080/v1` (local) or an OpenRouter URL.
+- **API key** — `backend/data/api_key.txt`. Needed for cloud endpoints such
+  as OpenRouter; local servers that don't check keys can use any value or
+  none.
+- **Active model** — `backend/data/llm_model.txt`. The exact model name the
+  server serves (the "Test connection" button shows the real list; avoid
+  variants like `:batch` unless you know why you want them).
 
-Do not commit this file.
+The memory sidecar follows these same settings automatically — there is no
+separate memory configuration.
 
-## Active LLM Model
-
-The active model can be changed while Amadeus is running through the settings interface.
-
-The backend exposes model-control endpoints including:
-
-```text
-/setLLMModel
-/getCurrLLMModel
-```
-
-## Model Server Address
-
-Amadeus talks to whichever OpenAI-compatible server you configure in
-Settings → Connection ("Model server address"), for example:
-
-```text
-http://localhost:8888/v1    (Unsloth Desktop)
-http://localhost:11434/v1   (Ollama)
-https://openrouter.ai/api/v1
-```
-
-The address is stored in `backend/llm_server.txt`. Leave it empty to let
-Amadeus auto-detect the common local ports (8888, 8000). The default model
-name lives in `backend/data/llm_model.txt`; the server's actual model list
-can be inspected and picked from the settings view.
+You can change all of these at any time without reinstalling anything.
 
 ## Web Access, Deep Thinking, and Voice Retention
 
-- **Web access** toggle — lets Kurisu search the web (local DuckDuckGo, no
-  API key) when a message references something recent.
-- **Deep thinking** toggle — enables model-side reasoning for the
-  search-judgement call only, keeping the final reply fast.
-- **Voice retention** — keeps the last N voice recordings and prunes older
-  ones automatically.
-- **Conversation memory (tokens)** — how much recent conversation she keeps
-  in each prompt (estimated tokens, default 40000). Lower it for small
-  models or limited VRAM.
+- **Web access** — a toggleable local web search (DuckDuckGo, no API key)
+  lets her verify recent events; it reads the top result's page for real
+  content, with an optional "deep thinking" mode that enables model reasoning
+  for the search decision only. Disabled by default on fresh installs.
+- **Live weather & air quality** — keyless, from public feeds.
+- **Voice retention** — keep the last N generated voice recordings, freeing
+  disk space automatically.
 
 ---
 
 # Launching Amadeus
 
-Amadeus includes a shared Python launcher used by the macOS and Windows startup scripts.
+## Launcher
 
-The launcher:
+The project ships a cross-platform launcher that starts the whole stack in
+the right order and waits for each service:
 
-1. Checks for Conda, npm, and required project files.
-2. Clears stale Amadeus listeners from ports `9880`, `5050`, and `5173`.
-3. Installs frontend dependencies if `frontend/node_modules/` is missing.
-4. Starts GPT-SoVITS in the `GPTSoVits` Conda environment.
-5. Waits for the voice server to become available.
-6. Starts the Flask backend.
-7. Waits for the backend to become available.
+1. Starts the GPT-SoVITS voice engine.
+2. Waits for the voice engine to become available.
+3. Installs the frontend (npm) if `node_modules/` is missing.
+4. Starts the Flask backend.
+5. Waits for the backend to become available.
+6. Starts the CharacterMemory sidecar (first launch: builds its venv and
+   installs its packages — this takes a few minutes; afterwards it starts in
+   seconds). If the sidecar cannot be installed or started, the launcher
+   warns and continues — the app runs without long-term memory.
+7. Waits for the sidecar to become available (best effort).
 8. Starts the React/Vite frontend.
 9. Waits for the WebUI to become available.
 10. Opens Amadeus automatically in the default browser.
@@ -522,13 +699,17 @@ Runtime logs are written locally to:
 .runtime/logs/
 ```
 
-The `.runtime/` directory is ignored by Git.
+(voice: `gptsovits.log`, backend: `backend.log`, sidecar: `cm-sidecar.log`,
+frontend: `frontend.log`)
 
----
+The `.runtime/` directory is ignored by Git.
 
 ## macOS
 
-The first time you clone or copy the project, make the launcher executable:
+If you used the installer, simply double-click `start_macos.command` in your
+Amadeus folder (or run `./start_macos.command` in Terminal).
+
+If you installed manually, make the launcher executable first:
 
 ```bash
 chmod +x start_macos.command
@@ -546,8 +727,6 @@ The launcher opens Amadeus automatically once all services are ready.
 
 Press `Ctrl+C` in the launcher terminal to shut down the complete stack.
 
----
-
 ## Windows
 
 Double-click:
@@ -562,13 +741,19 @@ or run it from Command Prompt:
 start_windows.bat
 ```
 
-The Windows launcher uses the same underlying startup sequence as the macOS launcher.
+The Windows launcher uses the same underlying startup sequence as the macOS
+launcher.
+
+A health check that does **not** need a model or a running app is included:
+double-click `check_amadeus.bat` and it runs the backend self-tests with a
+built-in stand-in, reporting a plain-English pass/fail.
 
 ---
 
 # Manual Startup
 
-Manual startup is mainly useful for development and debugging.
+Manual startup is mainly useful for development and debugging. Start the
+services in this order:
 
 ## GPT-SoVITS
 
@@ -598,6 +783,24 @@ The backend listens on:
 http://127.0.0.1:5050
 ```
 
+## Memory sidecar (optional)
+
+```bash
+# Windows
+memory_sidecar\venv\Scripts\python.exe memory_sidecar\cm_sidecar.py
+# macOS
+memory_sidecar/venv/bin/python memory_sidecar/cm_sidecar.py
+```
+
+The sidecar listens on:
+
+```text
+http://127.0.0.1:9870
+```
+
+If `memory_sidecar/venv` does not exist yet, run the launcher once first (it
+builds the venv), or skip the sidecar — the app runs fine without it.
+
 ## Frontend
 
 ```bash
@@ -615,7 +818,8 @@ http://127.0.0.1:5173
 
 # Live2D WebUI
 
-Amadeus now renders its character directly in the browser using the official Live2D Cubism SDK for Web.
+Amadeus renders its character directly in the browser using the official
+Live2D Cubism SDK for Web.
 
 The current rendering path is:
 
@@ -658,19 +862,26 @@ The Cubism Core runtime is loaded from:
 frontend/public/live2dcubismcore.min.js
 ```
 
-The project previously experimented with a Pixi-based Live2D integration. That approach was removed in favor of direct use of the current official Cubism Web SDK.
+The project previously experimented with a Pixi-based Live2D integration.
+That approach was removed in favor of direct use of the current official
+Cubism Web SDK.
 
 ## Character Motion and Lip Sync
 
-The browser-side character system now separates body motion from mouth motion.
+The browser-side character system separates body motion from mouth motion.
 
-- `MotionPlayer.ts` manages looping `Idle` and `Talk` states plus higher-priority one-shot reactions.
-- `SpeechPlayer.ts` plays streamed audio in the browser and measures the actual waveform with the Web Audio API.
+- `MotionPlayer.ts` manages looping `Idle` and `Talk` states plus
+  higher-priority one-shot reactions.
+- `SpeechPlayer.ts` plays streamed audio in the browser and measures the
+  actual waveform with the Web Audio API.
 - The measured amplitude is smoothed and applied to `ParamMouthOpenY`.
-- Touch reactions can interrupt the talking-body loop without stopping lip sync.
-- When a reaction finishes, the character returns to `Talk` if audio is still playing, otherwise `Idle`.
+- Touch reactions can interrupt the talking-body loop without stopping lip
+  sync.
+- When a reaction finishes, the character returns to `Talk` if audio is
+  still playing, otherwise `Idle`.
 
-The current Kurisu motion set includes a longer natural idle, a subtle talking-body loop, a head-pat reaction, and special touch reactions.
+The current motion set includes a longer natural idle, a subtle talking-body
+loop, a head-pat reaction, and special touch reactions.
 
 Prerecorded interaction lines are stored under:
 
@@ -678,8 +889,8 @@ Prerecorded interaction lines are stored under:
 backend/assets/reaction_audio/
 ```
 
-and are served through Flask to the same browser audio/lip-sync path used by generated speech.
-
+and are served through Flask to the same browser audio/lip-sync path used by
+generated speech.
 
 ---
 
@@ -691,12 +902,16 @@ Pull the latest project changes:
 git pull origin main
 ```
 
+The simplest way to apply everything (environments, voice engine patches,
+models, frontend) is to re-run the installer one-liner for your platform — it
+is resumable and skips what is already in place. If you installed manually:
+
 ## Update Backend Environment
 
 ```bash
 conda activate amadeus
 cd backend
-conda env update -f environment.yml --prune
+pip install -r requirements.in
 cd ..
 ```
 
@@ -719,6 +934,13 @@ pip install -r requirements.txt
 cd ..
 ```
 
+(Re-apply the voice patches from step 2 if the update touches the patched
+files.)
+
+The memory sidecar's venv keeps its pinned packages; after a project update
+that changes the sidecar's requirements, delete `memory_sidecar/venv` and
+let the launcher rebuild it.
+
 ---
 
 # Runtime Data and Secrets
@@ -727,9 +949,13 @@ The following are local runtime data and should not be committed:
 
 ```text
 backend/data/api_key.txt
+backend/data/llm_model.txt
 backend/data/memory.db
+backend/data/character_memory/    # her long-term memory (v2.0)
+backend/llm_server.txt
 backend/generated/
 .runtime/
+memory_sidecar/venv/
 frontend/node_modules/
 GPT-SoVITS/
 ```
@@ -741,6 +967,16 @@ backend/data/memory.db
 ```
 
 Deleting this database removes the locally stored conversation history.
+
+Her long-term memory lives in:
+
+```text
+backend/data/character_memory/
+```
+
+Deleting that folder resets her memory to a clean slate (her lore is
+re-seeded automatically on the next start). Back it up if you want to keep
+what she has learned about you.
 
 ---
 
@@ -754,6 +990,7 @@ The launcher attempts to clear stale Amadeus listeners from:
 9880
 5050
 5173
+9870
 ```
 
 If a port cannot be cleared, inspect:
@@ -762,7 +999,25 @@ If a port cannot be cleared, inspect:
 .runtime/logs/
 ```
 
-The backend intentionally uses port `5050` rather than `5000` to avoid conflicts with macOS services that commonly use port 5000.
+The backend intentionally uses port `5050` rather than `5000` to avoid
+conflicts with macOS services that commonly use port 5000.
+
+---
+
+## She has no long-term memory
+
+The memory sidecar is optional by design — if it isn't running, everything
+else works and she simply doesn't remember across sessions.
+
+- Check that it started: `.runtime/logs/cm-sidecar.log` (the launcher also
+  prints a warning if the sidecar never became ready).
+- First launch is slow (a few minutes): the launcher builds the sidecar's
+  venv and downloads its packages. Wait for the next start.
+- On a manual install, make sure the `amadeus-cm` conda environment
+  (Python 3.13) exists — the launcher builds the sidecar from it.
+- The sidecar needs the same model server as the app to *learn* (it
+  re-uses your Settings → Connection values); memory recall itself works
+  even while the engine is still warming up.
 
 ---
 
@@ -808,11 +1063,15 @@ Also verify that the required pretrained models exist under:
 GPT-SoVITS/GPT_SoVITS/pretrained_models/
 ```
 
+(and that they are real files, not tiny Git-LFS pointers — see
+[Manual step 7](#7-download-gpt-sovits-pretrained-models)).
+
 ---
 
 ## Live2D character does not appear
 
-Check the browser developer console and verify that the model reaches the expected loading stages:
+Check the browser developer console and verify that the model reaches the
+expected loading stages:
 
 ```text
 model3.json loaded
@@ -837,11 +1096,13 @@ frontend/public/live2d/
 
 ## `Shader program is not initialized`
 
-The Cubism Web renderer loads shader files asynchronously. A warning during the initial frames can occur while the shaders are loading.
+The Cubism Web renderer loads shader files asynchronously. A warning during
+the initial frames can occur while the shaders are loading.
 
 If the character eventually renders, this initial warning is not fatal.
 
-Persistent shader compile errors usually indicate that the shader files are not being served from the expected public path.
+Persistent shader compile errors usually indicate that the shader files are
+not being served from the expected public path.
 
 ---
 
@@ -854,7 +1115,8 @@ cd frontend
 npm install
 ```
 
-The automatic launcher also performs this step if `node_modules/` does not exist.
+The automatic launcher also performs this step if `node_modules/` does not
+exist.
 
 ---
 
@@ -865,7 +1127,7 @@ Run:
 ```bash
 conda activate amadeus
 cd backend
-conda env update -f environment.yml --prune
+pip install -r requirements.in
 ```
 
 ---
@@ -886,48 +1148,107 @@ Windows:
 del backend\data\memory.db
 ```
 
-Restart Amadeus afterward. A new database will be created automatically.
+To also reset her long-term memory, delete `backend/data/character_memory/`
+(see [Runtime Data and Secrets](#runtime-data-and-secrets)). Restart Amadeus
+afterward. A new database will be created automatically.
 
 ---
 
 # Development Roadmap
 
-Short-term priorities:
+Status as of v2.0:
 
 ```text
 Live2D static rendering       ✓
-Live2D model scaling          ✓
-Cubism shader integration     ✓
-Idle motion                   ✓
-Cubism physics                ✓
-Touch interaction             ✓
-Special touch reactions       ✓
-Talking-body motion           ✓
-Browser streamed speech       ✓
-Audio-driven lip sync         ✓
-Prerecorded interaction audio ✓
-frontend personality editing  ✓
-Improved Temporal awareness   ✓
-Local LLM server support      ✓
+Live2D + lip sync             ✓
+Interaction reactions         ✓
+Streaming voice               ✓
+Local LLM support             ✓
 Native-Japanese dialogue      ✓
 Connection status + test      ✓
 Multi-session conversations   ✓
 Reply versions + undo         ✓
 Relationship (trust) stats    ✓
 Web access + deep thinking    ✓
+Live weather & air quality    ✓
 Voice retention               ✓
+First-meeting ceremony        ✓
+Long-term memory (v2.0)       ✓
+One-shot installers (Win/Mac) ✓
 Poke interactions (stomach)   planned
 Prompting improvements        planned (high priority)
+Display-language dropdown     planned (her voice stays Japanese)
+Show her Japanese line        planned
 Expression control            planned (very low priority)
 More/improved animations      planned (require hiring animator)
-Memory redesign               later
 ```
 
-Longer-term ideas include richer character interaction, additional activities such as chess, and eventually hosting Amadeus as a web service where multiple users can run independent sessions.
+Longer-term ideas include richer character interaction, additional activities
+such as chess, and eventually hosting Amadeus as a web service where multiple
+users can run independent sessions.
 
 ---
 
 # Changelog
+
+## v2.0 — Long-Term Memory, Voice-First Dialogue, First Meeting, macOS — October 2026
+
+The big one.
+
+**She remembers (long-term memory).** A new local service — the
+CharacterMemory sidecar (`memory_sidecar/`, port 9870, built on
+[CharacterMemory](https://github.com/FrancescoCaracciolo/CharacterMemory) by
+Francesco Caracciolo) — learns facts, episodes, and a running summary of who
+you are from your conversations, and feeds the relevant memories into her
+prompt before each reply. It runs in its own process and environment
+(Python 3.13, GPL-3.0 engine, isolated — see
+`memory_sidecar/LICENSE-NOTE.md`), follows the app's LLM settings
+automatically, and is soft-failing: without it the app runs exactly as
+before. Her memory is local user data in `backend/data/character_memory/`.
+
+**Voice-first dialogue.** Her replies are now written natively in Japanese
+first (the line her voice speaks), with the on-screen text as its
+translation. Guards ensure a lazy model can't feed her voice the English
+text, and her memory stores the Japanese lines so her history reads in her
+own voice. Her voice is Japanese-only by design.
+
+**First meeting.** Fresh installs wake up with a proper ceremony: she speaks
+first, is honest about what she still can't do (no model configured yet),
+and only gives her real wake-up line once a model server is configured in
+Settings. Keyless local servers (like NInfer) are handled correctly.
+
+**Windows installer v4.11.** The one-shot installer survived five fresh-PC
+field runs: fresh installs now work regardless of the Windows display
+language (UTF-8 console hardening), the memory sidecar's Python 3.13
+environment is created automatically (fresh machines can no longer silently
+run without memory), package steps run through each environment's own Python
+(deadlock-free), a fast local probe skips the 2.5 GB PyTorch re-download when
+the right build is already present, the `ddgs` search library behind her web
+search is installed (it was silently missing from fresh installs before),
+and a new optional `-InstallDir` parameter installs a clean second copy
+anywhere.
+
+**macOS installer v1.2.** A new one-shot installer for Apple Silicon and
+Intel Macs: it installs any missing developer tools itself (Xcode Command
+Line Tools, git, Git LFS, Miniconda, Node), sets up the same three
+environments, downloads the voice models (including a Git-LFS fallback that
+works on a brand-new Mac with no `unzip`), and never asks for the
+administrator password. Voice uses Apple's MPS acceleration on Apple
+Silicon. FFmpeg turned out to be unnecessary entirely (verified in the
+voice engine's code) and is not installed or suggested.
+
+**Her factory personality** is now her rebuilt Japanese character sheet, so
+fresh installs meet her as she is, not as a template.
+
+**Also in this release:** trust-based relationship stats, live weather and
+air quality, web search that reads the top result's page, model sampling
+settings, the `:batch` model-name warning, plain-English error messages for
+unusable model names, and a suite of reliability fixes (startup race
+conditions, tab-pointer recovery, honest "no results" wording).
+
+**Published:** the final `main` branch was updated to v2.0 and published as
+the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.0)
+with the installer scripts attached.
 
 ## Switching Tabs No Longer Gets the Same "Welcome Back" — September 22, 2026
 
@@ -1683,7 +2004,9 @@ These endpoints provide the interface between the frontend and the Python backen
 
 # Notes
 
-Amadeus is a personal experimental project under active development. APIs, model formats, dependencies, and project structure may change as the system evolves.
+Amadeus is a personal experimental project under active development. APIs,
+model formats, dependencies, and project structure may change as the system
+evolves.
 
 ---
 
@@ -1691,6 +2014,19 @@ Amadeus is a personal experimental project under active development. APIs, model
 
 Original Amadeus project code is licensed under the [MIT License](LICENSE).
 
-Third-party components and assets—including the Live2D Cubism SDK, character
-models, artwork, voice recordings, and model weights—are not covered by this
-MIT license and remain subject to their respective licenses and permissions.
+Third-party components and assets — including the Live2D Cubism SDK,
+character models, artwork, voice recordings, and model weights — are not
+covered by this MIT license and remain subject to their respective licenses
+and permissions.
+
+Two external components deserve a special mention:
+
+- **GPT-SoVITS** ([RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS),
+  by lj1995 and contributors) — the voice engine. MIT-licensed; it is cloned
+  at install time and is not part of this repository.
+- **CharacterMemory** ([Francesco Caracciolo](https://github.com/FrancescoCaracciolo/CharacterMemory))
+  — the long-term memory engine. GPL-3.0-or-later; it is vendored in
+  `memory_sidecar/lib/` and runs **only inside the sidecar's own process**
+  (127.0.0.1:9870), which keeps the GPL engine cleanly separated from the
+  MIT-licensed application. See `memory_sidecar/LICENSE-NOTE.md` for the full
+  notes.
