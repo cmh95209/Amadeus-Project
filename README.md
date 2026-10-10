@@ -1,31 +1,26 @@
-# Amadeus
+# Amadeus-L
 
-Amadeus is a Steins;Gate-inspired AI character assistant designed to feel less
-like a conventional chatbot and more like a persistent virtual companion.
+Amadeus-L is a Steins;Gate 0-inspired AI character assistant designed to 
+replicate the Amadeus AI assistant.
+This project recreates that in-story character as a real, usable companion: she thinks and
+speaks Japanese natively with English translation shown
+on screen.
 
-In *Steins;Gate 0*, Amadeus is an AI assistant built on Makise Kurisu's
-memories and personality — she is **not** Kurisu herself. This project
-recreates that in-story character as a real, usable companion: she thinks and
-speaks Japanese natively, an English (or other-language) translation is shown
-on screen, and since v2.0 she genuinely **remembers** you across sessions.
-
-The project combines configurable large language models, long-term memory,
+The project combines configurable LLMs, long-term memory,
 persistent conversation history, customizable character behavior,
 Japanese-first bilingual dialogue, neural voice synthesis, and Live2D
 character rendering in a single interactive system.
 
-Amadeus began as a small personal experiment inspired by *Steins;Gate*. It has
-since grown into a larger software project and a sandbox for experimenting
-with conversational AI, memory, speech synthesis, animated character
-interfaces, and long-running assistant behavior.
+Amadeus-L is a fork of the original project by @reflectors02, adapting it and adding experimental
+features such as local LLM support and other bleeding edge features such as web search.
 
 The project is still actively evolving. It is not intended to be a finished
 product; it is an ongoing attempt to explore what happens when an AI character
 is given personality, voice, visual presence, and continuity over time.
 
-**v2.0 (October 2026)** adds long-term memory, voice-first native-Japanese
-dialogue, a first-meeting ceremony, a one-shot macOS installer, and the
-hardened Windows installer (v4.11). See the [Changelog](#changelog).
+**As of v2.0 (October 2026)** , Amadeus-L has long-term memory, voice-first native-Japanese
+dialogue, greeting systems, web search and weather modules, installer scripts for Windows and Mac. 
+See the [Changelog](#changelog).
 
 ![Amadeus Preview](docs/images/mainmenu.png)
 
@@ -37,8 +32,10 @@ hardened Windows installer (v4.11). See the [Changelog](#changelog).
 
 The fastest way to run Amadeus is a single copy-paste command. It installs
 everything (Python environments, the voice engine, her voice models, the web
-interface) and then you just start the app. You do **not** need an Apple
-Developer account, a GitHub account, or an API key up front.
+interface) and then you just start the app. 
+
+Note: To use Amadeus as a companion and AI assistant, you will require either a local LLM or cloud LLM model
+to connect with the app.
 
 ## Windows
 
