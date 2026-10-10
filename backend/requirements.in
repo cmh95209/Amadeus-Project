@@ -6,6 +6,7 @@ tqdm==4.67.1
 langchain
 langchain-openai
 pydantic
+ddgs
 
 # Voice client
 gradio_client
