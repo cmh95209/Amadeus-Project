@@ -195,6 +195,7 @@ def request_message():
         _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
         return jsonify({
             "response": pack.assistant_reply_ENG,
+            "japanese": pack.assistant_reply_JPS,
             "speech_id": speech_id,
             "user_id": user_id,
             "assistant_id": assistant_id,
@@ -218,7 +219,8 @@ def request_message():
     def generate():
         yield "data: " + json.dumps(
             {"phase": "voice", "speech_id": speech_id, "user_id": turn.user_id,
-             "assistant_id": turn.assistant_id, "conversation_id": turn.conv_id},
+             "assistant_id": turn.assistant_id, "conversation_id": turn.conv_id,
+             "japanese": turn.pack.assistant_reply_JPS},
             ensure_ascii=False) + "\n\n"
         # Wait (bounded) for the background English backfill; her voice is
         # already playing by the time this line runs.
@@ -436,16 +438,33 @@ def set_deep_thinking():
 
 
 # pre: message_id exists; JSON body contains "content"
-# post: the stored message text is replaced (this changes what she remembers)
+# post: the stored message text is replaced (this changes what she remembers).
+#       Her context reads the JAPANESE line of her replies, so editing one of
+#       HER replies also rewrites that line from the edited English (one short
+#       model call) and drops the old voice file; if that call fails the edit
+#       is refused, so the two lines never disagree.
 @application.route("/memory/<int:message_id>", methods=["PATCH"])
 def edit_message(message_id):
     data = request.get_json(silent=True)
     content = data.get("content") if isinstance(data, dict) else None
     if not isinstance(content, str) or not content.strip():
         return jsonify({"message": "No content received"}), 400
-    if not memory.update_message_content(message_id, content.strip()):
+    content = content.strip()
+    reply_ctx = memory.get_reply_edit_context(message_id)
+    if reply_ctx is None:
+        if not memory.update_message_content(message_id, content):
+            return jsonify({"message": "Message not found"}), 404
+        return jsonify({"status": "ok"})
+    try:
+        japanese = chat.voice_line_for_edit(content, reply_ctx["prev_user"])
+    except Exception as exc:
+        print("[Flask] Edit: Japanese line rewrite failed:", repr(exc))
+        return jsonify({"message": "Edit not saved - her Japanese line could not be "
+                                   "rewritten. " + _llm_error_message(exc)}), 502
+    if not memory.update_message_content(message_id, content, japanese=japanese):
         return jsonify({"message": "Message not found"}), 404
-    return jsonify({"status": "ok"})
+    _unlink_voice(message_id)
+    return jsonify({"status": "ok", "japanese": japanese})
 
 
 # pre: message_id exists

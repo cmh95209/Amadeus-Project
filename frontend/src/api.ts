@@ -13,6 +13,8 @@ export type MemoryMessage = {
   conversation_id?: number;
   audio_url?: string;
   has_japanese?: boolean;
+  /** Her spoken Japanese line (assistant rows; "" when none). */
+  japanese?: string;
   active?: boolean;
   version?: number;
   total_versions?: number;
@@ -22,6 +24,7 @@ export type MemoryMessage = {
 
 export type MessageReply = {
   response: string;
+  japanese?: string;
   speechUrl?: string;
   userId?: number;
   assistantId?: number;
@@ -110,6 +113,7 @@ export async function sendMessage(userInput: string): Promise<MessageTurn> {
 
   const reply = {
     response: data.response,
+    japanese: typeof data.japanese === "string" ? data.japanese : undefined,
     speechUrl:
       typeof data.speech_id === "string"
         ? `${API_BASE}/speech/${encodeURIComponent(data.speech_id)}`
@@ -129,6 +133,7 @@ type VoiceFirstEvent = {
   assistant_id?: number;
   conversation_id?: number;
   response?: string;
+  japanese?: string;
 };
 
 async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
@@ -187,6 +192,7 @@ async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
           if (event.phase === "voice") {
             reply = {
               response: "",
+              japanese: typeof event.japanese === "string" ? event.japanese : undefined,
               speechUrl:
                 typeof event.speech_id === "string"
                   ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
@@ -412,12 +418,15 @@ export async function sendInteraction(interactionValue: number): Promise<Message
   };
 }
 
-export async function editMessage(id: number, content: string): Promise<void> {
-  await parseResponse(await fetch(`${API_BASE}/memory/${id}`, {
+/** Saves an edit. For one of HER replies the backend also rewrites her
+ * Japanese line (what she actually reads back) and returns it. */
+export async function editMessage(id: number, content: string): Promise<string | undefined> {
+  const data = await parseResponse(await fetch(`${API_BASE}/memory/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   }));
+  return typeof data.japanese === "string" ? data.japanese : undefined;
 }
 
 export async function deleteMessage(id: number): Promise<void> {

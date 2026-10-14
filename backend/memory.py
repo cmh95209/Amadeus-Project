@@ -1936,7 +1936,9 @@ def _group_reply_turns(rows) -> List[List[int]]:
 # pre: row is one (id, role, content, created_at, audio, japanese, active,
 #      conversation_id, greeting) tuple
 # post: the plain dict shape the UI expects (audio_url / has_japanese when
-#      present; is_greeting on a standalone greeting turn)
+#      present; is_greeting on a standalone greeting turn). Assistant rows
+#      always carry "japanese" (her spoken line, "" when none) so the UI can
+#      show it under the English when the user turns that on.
 def _message_item(row) -> Dict[str, str]:
     mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
@@ -1946,8 +1948,10 @@ def _message_item(row) -> Dict[str, str]:
         item["is_greeting"] = True
     if audio:
         item["audio_url"] = "/message_audio/" + audio
-    if role == "assistant" and (japanese or "").strip():
-        item["has_japanese"] = True
+    if role == "assistant":
+        item["japanese"] = (japanese or "").strip()
+        if item["japanese"]:
+            item["has_japanese"] = True
     return item
 
 
@@ -2079,12 +2083,19 @@ def set_message_audio(message_id: int, audio_path: str) -> None:
 
 
 # pre: message_id may or may not exist
-# post: the message text is replaced; returns True when a row was changed
-def update_message_content(message_id: int, content: str) -> bool:
+# post: the message text is replaced; returns True when a row was changed.
+#       With japanese given (an edited assistant reply), her spoken line is
+#       replaced in the same write and the stale voice-file link is cleared,
+#       so Replay re-synthesizes the edited line.
+def update_message_content(message_id: int, content: str, japanese: str | None = None) -> bool:
     conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
-    c.execute("UPDATE messages SET content = ? WHERE id = ?", (content, message_id))
+    if japanese is None:
+        c.execute("UPDATE messages SET content = ? WHERE id = ?", (content, message_id))
+    else:
+        c.execute("UPDATE messages SET content = ?, japanese = ?, audio = NULL WHERE id = ?",
+                  (content, japanese, message_id))
     ok = c.rowcount > 0
     conn.commit()
     conn.close()
@@ -2514,6 +2525,26 @@ def get_unvoiced_assistant_messages() -> List[Dict[str, str]]:
     ).fetchall()
     conn.close()
     return [{"id": i, "content": content, "prev_user": prev_user} for i, content, prev_user in rows]
+
+
+# pre: message_id may or may not exist
+# post: for an assistant row, {"prev_user": <the user line right before it, or
+#       None>}; None when the row is missing or is a user message
+def get_reply_edit_context(message_id: int) -> Dict[str, str] | None:
+    conn = _connect_db()
+    c = conn.cursor()
+    _ensure_messages_table(c)
+    row = c.execute(
+        "SELECT m.role, "
+        "(SELECT u.content FROM messages u "
+        " WHERE u.conversation_id = m.conversation_id AND u.id < m.id AND u.role = 'user' "
+        " ORDER BY u.id DESC LIMIT 1) AS prev_user "
+        "FROM messages m WHERE m.id = ?", (int(message_id),)
+    ).fetchone()
+    conn.close()
+    if row is None or row[0] != "assistant":
+        return None
+    return {"prev_user": row[1]}
 
 
 # ---------- VOICE FILE RETENTION (SQL + disk) ----------

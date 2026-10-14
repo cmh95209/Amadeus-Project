@@ -3476,6 +3476,21 @@ def _voice_line_for_reply(llm, english_reply: str, previous_user) -> str:
     return _strip_thinking(content).strip().strip(chr(34)).strip()
 
 
+def voice_line_for_edit(english_reply: str, previous_user) -> str:
+    """The Japanese line for a reply the user edited (in English) in the UI.
+
+    Her prompt history and long-term memory read the Japanese column, so an
+    edit only steers her once this line is rewritten too. Raises when the
+    model is unreachable or returns no Japanese - the caller then refuses
+    the edit instead of saving English and Japanese that disagree.
+    """
+    llm = get_llm(API_KEY, LLM_Model)
+    jps = _clean_tts_text(_voice_line_for_reply(llm, english_reply, previous_user))
+    if not _has_japanese(jps):
+        raise ValueError("model returned no Japanese")
+    return jps
+
+
 def backfill_japanese_voice() -> None:
     global _BACKFILL_STARTED
     if _BACKFILL_STARTED:

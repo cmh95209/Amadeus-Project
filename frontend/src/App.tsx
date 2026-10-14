@@ -77,6 +77,15 @@ export default function App() {
   const [webToggling, setWebToggling] = useState(false);
   const [deepThinking, setDeepThinkingState] = useState<boolean | null>(null);
   const [deepThinkingBusy, setDeepThinkingBusy] = useState(false);
+  // Display-only, so it lives in this browser (no backend setting file).
+  const [showJapanese, setShowJapanese] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("amadeusShowJapanese") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [editSaving, setEditSaving] = useState(false);
   const [voiceRetention, setVoiceRetentionState] = useState<number>(100);
   const [contextBudget, setContextBudgetState] = useState<number>(40000);
   const [serverAddress, setServerAddressState] = useState<string>("");
@@ -162,6 +171,43 @@ export default function App() {
       behavior: "smooth",
     });
   }, [messages, loading]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("amadeusShowJapanese", showJapanese ? "1" : "0");
+    } catch {
+      // Storage blocked: the switch still works for this visit.
+    }
+  }, [showJapanese]);
+
+  // Chat replies arrive with her Japanese line, but greetings and touch
+  // reactions are added locally without it. While the Japanese line is
+  // shown, pick those up once from the server's copy (each id only once,
+  // so a line that really has no Japanese never causes a reload loop).
+  const japaneseFetched = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (!showJapanese || loading || editingId !== null) return;
+    const missing = messages.filter(
+      (m) => m.role !== "user" && m.id != null && m.japanese === undefined &&
+        !japaneseFetched.current.has(m.id)
+    );
+    if (missing.length === 0) return;
+    missing.forEach((m) => japaneseFetched.current.add(m.id!));
+    const shownConv = displayedConvIdRef.current;
+    void getMemory()
+      .then((fresh) => {
+        if (displayedConvIdRef.current !== shownConv) return; // tab moved on
+        const byId = new Map(fresh.map((m) => [m.id, m.japanese]));
+        setMessages((current) =>
+          current.map((m) =>
+            m.id != null && m.japanese === undefined && byId.has(m.id)
+              ? { ...m, japanese: byId.get(m.id) ?? "" }
+              : m
+          )
+        );
+      })
+      .catch(() => undefined);
+  }, [showJapanese, loading, editingId, messages]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -478,6 +524,7 @@ export default function App() {
         next.push({
           role: "assistant",
           content: reply.response,
+          japanese: reply.japanese,
           id: reply.assistantId,
         });
         return next;
@@ -898,17 +945,27 @@ export default function App() {
 
   async function saveEdit(id: number) {
     const text = editDraft.trim();
-    if (!text) return;
+    if (!text || editSaving) return;
+    const isHers = messages.some((m) => m.id === id && m.role !== "user");
+    setEditSaving(true);
+    if (isHers) setStatus("Saving edit - rewriting her Japanese line...");
     try {
-      await editMessage(id, text);
+      const japanese = await editMessage(id, text);
       setMessages((current) =>
-        current.map((m) => (m.id === id ? { ...m, content: text } : m))
+        current.map((m) => {
+          if (m.id !== id) return m;
+          if (japanese === undefined) return { ...m, content: text };
+          // Her line changed: the old voice clip is gone; Replay re-speaks it.
+          return { ...m, content: text, japanese, has_japanese: true, audio_url: undefined };
+        })
       );
       setStatus("Message updated");
+      cancelEdit();
     } catch (error) {
+      // Keep the edit box open so the draft is not lost.
       setStatus(error instanceof Error ? error.message : "Could not save the edit");
     } finally {
-      cancelEdit();
+      setEditSaving(false);
     }
   }
 
@@ -1260,11 +1317,12 @@ export default function App() {
                   <div className="edit-actions">
                     <button
                       type="button"
+                      disabled={editSaving}
                       onClick={() => void saveEdit(message.id!)}
                     >
-                      Save
+                      {editSaving ? "Saving..." : "Save"}
                     </button>
-                    <button type="button" onClick={cancelEdit}>
+                    <button type="button" disabled={editSaving} onClick={cancelEdit}>
                       Cancel
                     </button>
                   </div>
@@ -1272,6 +1330,11 @@ export default function App() {
               ) : (
                 <div className="bubble">
                   {message.content}
+                  {showJapanese && message.role !== "user" && message.japanese && (
+                    <span className="bubble-japanese" lang="ja">
+                      {message.japanese}
+                    </span>
+                  )}
                 </div>
               )}
             </article>
@@ -1610,6 +1673,27 @@ export default function App() {
                 >
                   <span className="settings-toggle-knob" aria-hidden="true" />
                   <span>{deepThinking ? "On" : "Off"}</span>
+                </button>
+              </div>
+
+              <div className="settings-toggle-row" aria-label="Show her Japanese line">
+                <div className="settings-toggle-text">
+                  <span className="settings-toggle-title">Show her Japanese line</span>
+                  <span className="settings-toggle-desc">
+                    Shows the Japanese she actually spoke under each of her
+                    messages - this is also what she remembers. Editing one of
+                    her messages rewrites it to match (her long-term memory may
+                    already have learned the old line). Saved in this browser.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={`settings-toggle${showJapanese ? " on" : ""}`}
+                  onClick={() => setShowJapanese((v) => !v)}
+                  aria-pressed={showJapanese}
+                >
+                  <span className="settings-toggle-knob" aria-hidden="true" />
+                  <span>{showJapanese ? "On" : "Off"}</span>
                 </button>
               </div>
 

@@ -461,6 +461,8 @@ class VoiceFirstTests(unittest.TestCase):
         self.assertEqual(voice["user_id"], 1)
         self.assertEqual(voice["assistant_id"], 2)
         self.assertEqual(voice["conversation_id"], 1)
+        # Her Japanese line rides the voice event (UI "Show her Japanese line").
+        self.assertEqual(voice["japanese"], JA_LINE)
         self.assertEqual(text["phase"], "text")
         self.assertEqual(text["response"], EN_LINE)
         # The voice event precedes the text event: audio can start before the
@@ -479,6 +481,7 @@ class VoiceFirstTests(unittest.TestCase):
         self.assertTrue(response.content_type.startswith("application/json"))
         data = json.loads(body)
         self.assertEqual(data["response"], EN_LINE)
+        self.assertEqual(data["japanese"], JA_LINE)
         self.assertIsInstance(data["speech_id"], str)
         self.assertEqual(data["assistant_id"], 2)
         # The web-on branch never touched the voice-first machinery.
