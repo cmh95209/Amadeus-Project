@@ -668,8 +668,9 @@ class SwitchGreetingGenerationTests(unittest.TestCase):
                                       "already greeted them. This time "
                                       "speak a completely different topic "
                                       "(science, trivia, ask about their "
-                                      "day, etc.). Randomize it. Be sassy "
-                                      "and teasing.]"})
+                                      "day, etc.). Randomize it. Let your "
+                                      "tone follow how you currently feel "
+                                      "about them.]"})
         # History (the non-system part): BOTH old greeting rows are hidden -
         # no template to copy - checked via their Japanese text (what the
         # history rows actually render)...

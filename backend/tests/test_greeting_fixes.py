@@ -154,6 +154,38 @@ class FallbackLinesTests(_FreshAppTests):
                 self.assertNotIn("おかえり", ja)
 
 
+class DayWordingTests(_FreshAppTests):
+    """Fix 7: everyday 'day' phrases are not time claims; real day-scale
+    gap claims still are."""
+
+    def check(self, eng, situation="continuous"):
+        sit = {"situation": situation, "unanswered_fresh": False,
+               "last_contact": {"phrase": "a few hours ago", "time": None}}
+        return self.chat._greeting_time_lie_check(sit, eng, "")
+
+    def test_everyday_day_phrases_pass(self):
+        for eng in ("Have a nice day!", "These days I read papers at night.",
+                    "The other day I found a paper on time leaps.",
+                    "How was your day?", "What a day.",
+                    "Day or night, I'm here."):
+            with self.subTest(eng=eng):
+                self.assertIsNone(self.check(eng))
+
+    def test_day_gap_claims_are_still_caught(self):
+        for eng in ("It's been two days, I guess.", "A few days ago you said so.",
+                    "It's been a couple of days.", "One day since you spoke!",
+                    "It's been a whole day.", "Days have passed, you know.",
+                    "I waited for days.", "3 days, really?"):
+            with self.subTest(eng=eng):
+                self.assertIsNotNone(self.check(eng))
+
+    def test_return_day_claim_within_the_bucket_passes(self):
+        sit = {"situation": "return", "unanswered_fresh": False,
+               "last_contact": {"phrase": "two days ago", "time": None}}
+        self.assertIsNone(self.chat._greeting_time_lie_check(
+            sit, "It's been two days, huh.", ""))
+
+
 class _SwitchingLLM:
     """A fake model that, while 'writing' the line, lets the user switch to
     another tab (the race fix 3 closes). Records the prompt it was given."""

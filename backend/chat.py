@@ -2350,7 +2350,16 @@ _GREETING_CLAIM_EN = {
     "years":  [r"\byears?\b"],
     "months": [r"\bmonths?\b"],
     "weeks":  [r"\bweeks?\b"],
-    "days":   [r"\bdays?\b"],
+    # Days: only GAP constructions (2026-10-15) - a bare "day" also matched
+    # "have a nice day", "these days", "the other day", bouncing true lines.
+    "days":   [
+        r"\b(\d+|two|three|four|five|six|seven|eight|nine|ten|several|few|"
+        r"couple of|many|some)\s+days\b",
+        r"\b(a|one|1)\s+day\s+(ago|since|now|or two|or so)\b",
+        r"\bbeen\s+(a|one|1)\s+(whole\s+|full\s+)?day\b",
+        r"\bdays?\s+(ago|since|now|have passed|had passed|went by|without)\b",
+        r"\bfor days\b",
+    ],
 }
 _GREETING_CLAIM_JA = {
     # Plain substrings (no regex): "年前" catches the kanji-numeral forms
@@ -2573,8 +2582,10 @@ def generate_greeting(mode: str = "startup",
     # the vary-topic directive in the system notes at the FRONT was ignored
     # while a one-off user message at the END fixed it). A switch into a
     # tab whose last line is one of her own greetings (the bounce case)
-    # gets the vary-topic directive here; the playful bouncing framing is
-    # kept (user decision 2026-09-22), and the old "note how many of your
+    # gets the vary-topic directive here. The tone is no longer fixed
+    # ("be sassy and teasing" until 2026-10-15, user decision): it follows
+    # how she currently feels about the user (the trust-tier voice context
+    # is in every prompt). The old "note how many of your
     # lines above are switch reactions" nudge is replaced - it pointed her
     # AT the template (live: 8 near-identical switch lines at the tail).
     re_greeting = False
@@ -2589,7 +2600,8 @@ def generate_greeting(mode: str = "startup",
                 "[The user has switched to this conversation again - you "
                 "have already greeted them. This time speak a completely "
                 "different topic (science, trivia, ask about their day, "
-                "etc.). Randomize it. Be sassy and teasing.]"
+                "etc.). Randomize it. Let your tone follow how you "
+                "currently feel about them.]"
             )
         else:
             arrival = "[The user has switched to this conversation.]"
