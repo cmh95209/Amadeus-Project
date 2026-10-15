@@ -7,6 +7,8 @@ from pathlib import Path
 
 import requests
 
+from speech_text import to_spoken
+
 # Resolve paths from this file so the backend works regardless of cwd.
 BACKEND_DIR = Path(__file__).resolve().parent
 REF_WAV = BACKEND_DIR / "assets" / "reference_audio" / "kurisu10s.wav"
@@ -18,11 +20,21 @@ STREAMING_MODE = int(os.getenv("GPTSOVITS_STREAMING_MODE", "1"))
 _speech_lock = threading.Lock()
 
 
+def _spoken(text: str) -> str:
+    """Numbers -> kana so the engine never reads them in English (speech_text).
+    A rewriting bug must never silence her: fall back to the text as-is."""
+    try:
+        return to_spoken(text)
+    except Exception as exc:
+        print(f"[AmadeusSpeak] to_spoken failed, speaking raw text: {exc!r}")
+        return text
+
+
 def _request_payload(text: str) -> dict:
     if not REF_WAV.exists():
         raise FileNotFoundError(f"Reference audio not found: {REF_WAV}")
     return {
-        "text": text,
+        "text": _spoken(text),
         "text_lang": "ja",
         "ref_audio_path": str(REF_WAV),
         "prompt_text": REF_TXT,
