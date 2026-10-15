@@ -784,6 +784,104 @@ GREETING_ANCHOR_ELAPSED_CAP = 30 * 86400
 GREETING_PRESENCE_WINDOW = 2 * 3600
 
 
+# ---------- PRESENCE ("last seen", 2026-10-15) --------------------------------
+# A user who opens the app, reads, or switches tabs WITHOUT typing was still
+# there - but the greeting used to measure absence from the last typed
+# message only (opened at 16:53 without a word, back at 18:09: "a day or
+# two ago" since last night's message). The WebUI now pings while its window
+# is visible, and every greeting route records the visit; a ping within
+# VISIT_MERGE_SECONDS of the previous one extends the same visit. The code
+# merges "last seen" and "last talked" into the ONE situation line - she is
+# never handed two times to compare.
+VISIT_MERGE_SECONDS = 10 * 60
+VISITS_KEEP = 200
+_VISIT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _ensure_visits_table(c: sqlite3.Cursor) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS visits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            conversation_id INTEGER
+        )
+    """)
+
+
+def record_presence(conversation_id: int | None = None,
+                    now: datetime | None = None) -> int:
+    """The user is in the app right now: extend the current visit (last ping
+    within VISIT_MERGE_SECONDS) or start a new one. Keeps only the newest
+    VISITS_KEEP visits. Returns the visit id."""
+    now_local = (now or datetime.now().astimezone()).astimezone()
+    stamp = now_local.strftime(_VISIT_TIME_FORMAT)
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_visits_table(c)
+        conn.commit()
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT id, last_seen_at FROM visits "
+                        "ORDER BY id DESC LIMIT 1").fetchone()
+        visit_id = None
+        if row is not None:
+            try:
+                last = datetime.fromisoformat(row[1]).astimezone()
+                gap = (now_local - last).total_seconds()
+            except (TypeError, ValueError):
+                gap = None
+            if gap is not None and -60 <= gap <= VISIT_MERGE_SECONDS:
+                visit_id = row[0]
+                c.execute("UPDATE visits SET last_seen_at = ?, "
+                          "conversation_id = COALESCE(?, conversation_id) "
+                          "WHERE id = ?", (stamp, conversation_id, visit_id))
+        if visit_id is None:
+            c.execute("INSERT INTO visits (started_at, last_seen_at, conversation_id) "
+                      "VALUES (?, ?, ?)", (stamp, stamp, conversation_id))
+            visit_id = c.lastrowid
+            c.execute("DELETE FROM visits WHERE id NOT IN "
+                      "(SELECT id FROM visits ORDER BY id DESC LIMIT ?)",
+                      (VISITS_KEEP,))
+        conn.commit()
+        return int(visit_id)
+    finally:
+        conn.close()
+
+
+def load_last_seen(before: datetime | None = None) -> datetime | None:
+    """When the user was last seen in the app (newest visit ping), or None
+    when no visit is recorded (older installs: the greeting then measures
+    from messages only, exactly as before). before (greeting regenerate)
+    limits it to visits that STARTED before that moment and caps them at
+    it - the moment the original greeting was spoken. Never modifies
+    memory."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_visits_table(c)
+        conn.commit()
+        rows = c.execute("SELECT started_at, last_seen_at FROM visits "
+                         "ORDER BY id DESC LIMIT 50").fetchall()
+    finally:
+        conn.close()
+    best = None
+    cap = before.astimezone() if before is not None else None
+    for started_at, last_seen_at in rows:
+        try:
+            started = datetime.fromisoformat(started_at).astimezone()
+            seen = datetime.fromisoformat(last_seen_at).astimezone()
+        except (TypeError, ValueError):
+            continue
+        if cap is not None:
+            if started >= cap:
+                continue
+            seen = min(seen, cap)
+        if best is None or seen > best:
+            best = seen
+    return best
+
+
 def other_conversation_facts(now: datetime | None = None) -> Dict[str, object]:
     """Cross-conversation facts for a greeting prompt (bounded, prompt-only).
 
@@ -889,7 +987,8 @@ def _has_any_user_message() -> bool:
 def compute_greeting_situation(conversation_id: int,
                                now: datetime | None = None,
                                previous_conversation_id: int | None = None,
-                               switch: bool = False) -> Dict[str, object]:
+                               switch: bool = False,
+                               presence_before: datetime | None = None) -> Dict[str, object]:
     """THE one situation a greeting is spoken in, decided by the code.
 
     2026-10-05 rework: before, the prompt carried a pile of raw time facts
@@ -951,6 +1050,19 @@ def compute_greeting_situation(conversation_id: int,
         out["her_last_line"] = None
     if anchor is not None:
         out["last_contact"] = anchor
+    out["last_talked"] = anchor
+    # "Last seen" (visits, 2026-10-15): presence without typing. None on
+    # installs with no recorded visit - then everything below measures from
+    # messages only, exactly as before. presence_before = greeting
+    # regenerate: only what was known when the original line was spoken.
+    out["last_seen"] = None
+    try:
+        seen_time = load_last_seen(presence_before)
+    except Exception:
+        seen_time = None
+    if seen_time is not None and seen_time <= now_local + timedelta(minutes=1):
+        out["last_seen"] = {"time": seen_time,
+                            "phrase": _contact_phrase(seen_time, now_local)}
     # Up to 2 other-tab digests (the anchor tab is named in the truth line
     # when it is elsewhere, so "others" skips it - other_conversation_facts
     # already lists every non-anchor tab, newest first).
@@ -1047,7 +1159,49 @@ def compute_greeting_situation(conversation_id: int,
         same_tab = (this_anchor is not None
                     and str(anchor.get("created_at"))
                     == str(this_anchor["created_at"]))
-        if anchor["elapsed_seconds"] <= GREETING_PRESENCE_WINDOW:
+        # Presence = the later of "last talked" and "last seen". When the
+        # visit is meaningfully later than the last message (they came by
+        # without writing), the code speaks from the visit - ONE phrase only.
+        seen = out["last_seen"]
+        seen_later = (seen is not None and anchor.get("time") is not None
+                      and (seen["time"] - anchor["time"]).total_seconds()
+                      > VISIT_MERGE_SECONDS)
+        if seen_later:
+            presence_elapsed = max(0.0, (
+                now_local.astimezone(timezone.utc)
+                - seen["time"].astimezone(timezone.utc)).total_seconds())
+        else:
+            presence_elapsed = anchor["elapsed_seconds"]
+        if seen_later and presence_elapsed <= GREETING_PRESENCE_WINDOW:
+            out["situation"] = "continuous"
+            out["last_contact"] = dict(anchor, phrase=seen["phrase"],
+                                       time=seen["time"])
+            out["truth_line"] = (
+                f"SITUATION: the user was here in the app until "
+                f"{seen['phrase']}, just not writing - they were not away "
+                f"from you. This is not a welcome-back moment: do not say "
+                f"they have been gone or away.")
+            out["details"].append(
+                f'Their last line was: "{anchor["digest"]}".')
+        elif seen_later:
+            out["situation"] = "return"
+            out["last_contact"] = dict(anchor, phrase=seen["phrase"],
+                                       time=seen["time"])
+            out["truth_line"] = (
+                f"SITUATION: the user was last here in the app "
+                f"{seen['phrase']}. They were genuinely away since then. A "
+                f"brief, natural welcome-back is right; use the phrase above "
+                f"as-is, never a different gap.")
+            out["details"].append(
+                "They opened the app after you last talked, but did not "
+                "write anything.")
+            out["details"].append(
+                f'Their last line was: "{anchor["digest"]}".')
+            if this_anchor is None:
+                out["details"].append(
+                    "They have not sent a message in this conversation "
+                    "yet.")
+        elif anchor["elapsed_seconds"] <= GREETING_PRESENCE_WINDOW:
             out["situation"] = "continuous"
             if same_tab:
                 out["truth_line"] = (
@@ -2245,11 +2399,11 @@ def load_greeting_row(message_id: int) -> Dict[str, object] | None:
         _ensure_messages_table(c)
         row = c.execute(
             "SELECT id, conversation_id, role, greeting, greeting_kind, "
-            "greeting_from, greeting_group, active FROM messages WHERE id = ?",
-            (int(message_id),)).fetchone()
+            "greeting_from, greeting_group, active, created_at FROM messages "
+            "WHERE id = ?", (int(message_id),)).fetchone()
         if row is None:
             return None
-        mid, conv, role, greeting, kind, from_id, group, active = row
+        mid, conv, role, greeting, kind, from_id, group, active, created = row
         (newer,) = c.execute(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND id > ? "
             "AND COALESCE(active, 1) = 1", (conv, mid)).fetchone()
@@ -2262,12 +2416,21 @@ def load_greeting_row(message_id: int) -> Dict[str, object] | None:
         "group": group if group else mid,
         "active": (active if active is not None else 1) == 1,
         "is_latest": newer == 0,
+        "created_at": _parse_local(created),
     }
 
 
 # pre: message_id exists
 # post: the row joins its own version group (greeting_group = its id) when
 #       it had none - done when a first regenerate makes it "version 1"
+def _parse_local(stamp) -> datetime | None:
+    """A stored local timestamp as an aware datetime, or None."""
+    try:
+        return datetime.fromisoformat(stamp).astimezone()
+    except (TypeError, ValueError):
+        return None
+
+
 def ensure_greeting_group(message_id: int) -> None:
     conn = _connect_db()
     try:

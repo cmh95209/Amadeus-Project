@@ -232,5 +232,128 @@ class TimingLogLineTests(_FreshAppTests):
         self.assertNotIn("Hello.", log.split("Greeting timing:")[1].splitlines()[0])
 
 
+class PresenceTests(_FreshAppTests):
+    """B: "last seen" visits, merged into the ONE situation line."""
+
+    def setUp(self):
+        super().setUp()
+        self.memory.save_ceremony_state("done")
+        self.conv = self.memory.load_active_conversation()
+
+    def set_time(self, mid, stamp):
+        import sqlite3
+        db = sqlite3.connect("data/memory.db")
+        db.execute("UPDATE messages SET created_at = ? WHERE id = ?", (stamp, mid))
+        db.commit()
+        db.close()
+
+    def visits(self):
+        import sqlite3
+        db = sqlite3.connect("data/memory.db")
+        try:
+            return db.execute("SELECT started_at, last_seen_at FROM visits ORDER BY id").fetchall()
+        finally:
+            db.close()
+
+    def talked_last_night(self):
+        uid = self.memory.append_message("user", "good night!", conversation_id=self.conv)
+        self.set_time(uid, "2026-10-14 23:29")
+        aid = self.memory.append_message("assistant", "Night.", conversation_id=self.conv)
+        self.set_time(aid, "2026-10-14 23:30")
+
+    # --- the visits table -------------------------------------------------
+    def test_pings_merge_into_one_visit_and_split_after_a_break(self):
+        self.memory.record_presence(now=at(2026, 10, 15, 16, 53))
+        self.memory.record_presence(now=at(2026, 10, 15, 16, 58))
+        self.memory.record_presence(now=at(2026, 10, 15, 17, 6))
+        self.assertEqual(self.visits(), [("2026-10-15 16:53:00", "2026-10-15 17:06:00")])
+        self.memory.record_presence(now=at(2026, 10, 15, 18, 9))
+        self.assertEqual(len(self.visits()), 2)
+
+    def test_old_visits_are_trimmed(self):
+        for i in range(self.memory.VISITS_KEEP + 5):
+            self.memory.record_presence(now=at(2026, 1, 1, 0, 0).replace(day=1) +
+                                        __import__("datetime").timedelta(hours=i))
+        self.assertEqual(len(self.visits()), self.memory.VISITS_KEEP)
+
+    def test_last_seen_and_the_regenerate_cap(self):
+        self.assertIsNone(self.memory.load_last_seen())
+        self.memory.record_presence(now=at(2026, 10, 15, 16, 53))
+        self.memory.record_presence(now=at(2026, 10, 15, 17, 0))
+        self.memory.record_presence(now=at(2026, 10, 15, 18, 9))   # a new visit
+        self.memory.record_presence(now=at(2026, 10, 15, 18, 14))
+        self.assertEqual(self.memory.load_last_seen(), at(2026, 10, 15, 18, 14))
+        # Regenerating the 18:09 greeting: only what was known at 18:09.
+        self.assertEqual(self.memory.load_last_seen(before=at(2026, 10, 15, 18, 9)),
+                         at(2026, 10, 15, 17, 0))
+
+    # --- the situation ----------------------------------------------------
+    def test_opened_the_app_without_writing_is_not_an_absence(self):
+        # The reported day: talked last night, opened the app at 16:53 and
+        # stayed a while without writing, back at 18:09.
+        self.talked_last_night()
+        self.memory.record_presence(now=at(2026, 10, 15, 16, 53))
+        self.memory.record_presence(now=at(2026, 10, 15, 17, 0))
+        sit = self.memory.compute_greeting_situation(self.conv, now=at(2026, 10, 15, 18, 9))
+        self.assertEqual(sit["situation"], "continuous")
+        self.assertIn("just not writing", sit["truth_line"])
+        self.assertIn("This is not a welcome-back moment", sit["truth_line"])
+        self.assertEqual(sit["truth_line"].count(" ago"), 1)   # ONE phrase only
+        self.assertIsNotNone(self.chat._greeting_time_lie_check(
+            sit, "It's been a day or two, hasn't it?", ""))
+
+    def test_visit_after_the_last_message_sets_the_return_phrase(self):
+        uid = self.memory.append_message("user", "see you", conversation_id=self.conv)
+        self.set_time(uid, "2026-10-11 20:00")
+        self.memory.record_presence(now=at(2026, 10, 14, 22, 0))
+        sit = self.memory.compute_greeting_situation(self.conv, now=at(2026, 10, 15, 18, 0))
+        self.assertEqual(sit["situation"], "return")
+        self.assertIn("was last here in the app last night", sit["truth_line"])
+        self.assertIn("did not write anything", " ".join(sit["details"]))
+        self.assertEqual(sit["last_contact"]["phrase"], "last night")
+        self.assertIsNotNone(self.chat._greeting_time_lie_check(sit, "It's been days!", ""))
+
+    def test_without_visits_it_measures_from_messages_as_before(self):
+        self.talked_last_night()
+        sit = self.memory.compute_greeting_situation(self.conv, now=at(2026, 10, 15, 18, 9))
+        self.assertEqual(sit["situation"], "return")
+        self.assertIn("last night", sit["truth_line"])
+        self.assertIsNone(sit["last_seen"])
+
+    def test_a_ping_right_after_the_last_message_changes_nothing(self):
+        self.talked_last_night()
+        self.memory.record_presence(now=at(2026, 10, 14, 23, 35))
+        sit = self.memory.compute_greeting_situation(self.conv, now=at(2026, 10, 15, 18, 9))
+        self.assertEqual(sit["situation"], "return")
+        self.assertNotIn("did not write", " ".join(sit["details"]))
+
+    # --- the routes -------------------------------------------------------
+    def test_greet_route_records_the_visit_after_measuring(self):
+        from unittest.mock import patch
+        seen_during = []
+        pack = self.chat.AmadeusPack(assistant_reply_ENG="Hi.", assistant_reply_JPS="やあ。")
+
+        def fake_generate(**kw):
+            seen_during.append(self.memory.load_last_seen())
+            return pack, 7, self.conv
+        self.chat.setKey("sk-test")
+        with patch.object(self.api, "model_ready", return_value={"ready": True, "reason": ""}), \
+             patch.object(self.api, "generate_greeting", side_effect=fake_generate):
+            res = self.client.post("/greet", json={})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(seen_during, [None])        # it did not see its own visit
+        self.assertEqual(len(self.visits()), 1)      # ...which is recorded after
+
+    def test_presence_route(self):
+        res = self.client.post("/presence", json={"conversation_id": self.conv})
+        self.assertEqual(res.json, {"ok": True})
+        self.assertEqual(len(self.visits()), 1)
+
+    def test_presence_route_is_quiet_during_first_launch(self):
+        self.memory.save_ceremony_state("intro")
+        res = self.client.post("/presence", json={})
+        self.assertEqual(res.json["recorded"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

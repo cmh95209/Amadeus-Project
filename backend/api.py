@@ -42,6 +42,48 @@ from pathlib import Path
 application = Flask(__name__)
 CORS(application)
 
+
+# "Last seen" presence (2026-10-15, memory.record_presence): every greeting
+# request means the user is in the app. It is recorded AFTER the request has
+# run, so the greeting itself measured the user's PREVIOUS visit, not the
+# one it is starting. Never breaks a response.
+import re as _re
+_PRESENCE_PATHS = _re.compile(
+    r"^/(greet|conversations/\d+/greet|greetings/\d+/regenerate)$")
+
+
+@application.after_request
+def _record_presence_after_greeting(response):
+    if request.method == "POST" and _PRESENCE_PATHS.match(request.path or ""):
+        try:
+            # Not during the first-launch ceremony: nothing may touch the
+            # store before she is online (her wake-up is a first meeting
+            # anyway), and the ceremony guards promise exactly that.
+            if memory.load_ceremony_state() == memory.CEREMONY_DONE:
+                memory.record_presence()
+        except Exception as exc:
+            print("[Flask] Presence not recorded:", repr(exc))
+    return response
+
+
+# pre: the WebUI window is visible (it pings on an interval and when the
+#      window comes back into view)
+# post: the current visit is extended, or a new one started; 200 {"ok": true}
+@application.route("/presence", methods=["POST"])
+def presence():
+    body = request.get_json(silent=True)
+    conv = body.get("conversation_id") if isinstance(body, dict) else None
+    if not (isinstance(conv, int) and not isinstance(conv, bool)):
+        conv = None
+    if memory.load_ceremony_state() != memory.CEREMONY_DONE:
+        return jsonify({"ok": True, "recorded": False})  # first launch: no store
+    try:
+        memory.record_presence(conv)
+    except Exception as exc:
+        print("[Flask] Presence not recorded:", repr(exc))
+        return jsonify({"ok": False}), 500
+    return jsonify({"ok": True})
+
 _speech_requests: dict[str, tuple[float, str, int | None]] = {}
 _speech_requests_lock = threading.Lock()
 # One wake-up at a time (see _serve_wake_up): generation takes seconds, and

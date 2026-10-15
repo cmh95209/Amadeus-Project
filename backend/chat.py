@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import concurrent.futures
+from datetime import datetime
 import stats
 import ja_voice
 import webfetch
@@ -2357,6 +2358,7 @@ _GREETING_CLAIM_EN = {
         r"couple of|many|some)\s+days\b",
         r"\b(a|one|1)\s+day\s+(ago|since|now|or two|or so)\b",
         r"\bbeen\s+(a|one|1)\s+(whole\s+|full\s+)?day\b",
+        r"\bbeen\s+days\b",
         r"\bdays?\s+(ago|since|now|have passed|had passed|went by|without)\b",
         r"\bfor days\b",
     ],
@@ -2519,7 +2521,8 @@ def _greeting_timing_log_line(kind: str, conversation_id, situation,
     seen = situation.get("last_seen")
     return (f"[Amadeus] Greeting timing: kind={kind} tab={conversation_id} "
             f"situation={situation.get('situation')} phrase=\"{phrase}\" "
-            f"last_seen={stamp(seen)} last_talked={stamp(last)} "
+            f"last_seen={stamp(seen)} "
+            f"last_talked={stamp(situation.get('last_talked', last))} "
             f"net={net_result}")
 
 
@@ -2536,7 +2539,8 @@ def _greeting_timing_log_line(kind: str, conversation_id, situation,
 def generate_greeting(mode: str = "startup",
                       conversation_id: int | None = None,
                       previous_conversation_id: int | None = None,
-                      group: int | None = None) -> tuple[AmadeusPack, int, int]:
+                      group: int | None = None,
+                      presence_before: datetime | None = None) -> tuple[AmadeusPack, int, int]:
     # group: set only by regenerate_greeting - the new line is stored as a
     # further version of that greeting (same version group).
     switch = (mode == "switch")
@@ -2584,7 +2588,7 @@ def generate_greeting(mode: str = "startup",
         situation = store.compute_greeting_situation(
             conversation_id,
             previous_conversation_id=previous_conversation_id,
-            switch=switch)
+            switch=switch, presence_before=presence_before)
     except Exception:
         situation = None
     # The synthetic arrival line is the LAST thing in the greeting prompt -
@@ -2807,10 +2811,12 @@ def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
     store.ensure_greeting_group(row["id"])
     store.set_message_active(row["id"], False)
     try:
+        # The same moment: only visits known when the original line was
+        # spoken count (the user is in the app NOW, regenerating it).
         return generate_greeting(
             mode=kind, conversation_id=row["conversation_id"],
             previous_conversation_id=row["from_conversation_id"],
-            group=row["group"])
+            group=row["group"], presence_before=row.get("created_at"))
     except BaseException:
         store.set_message_active(row["id"], True)
         raise
