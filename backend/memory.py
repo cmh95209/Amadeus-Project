@@ -1842,15 +1842,20 @@ def maybe_roll_summary(conversation_id=None) -> None:
         _start_roll_worker()
 
 
-def build_prompt_messages(token_budget: int | None = None, exclude_ids=None) -> List[Dict[str, str]]:
+# conversation_id: None = the active tab (every reply); a greeting passes the
+# tab it is written for, so a tab switch mid-generation cannot swap the
+# history under it.
+def build_prompt_messages(token_budget: int | None = None, exclude_ids=None,
+                          conversation_id=None) -> List[Dict[str, str]]:
     if token_budget is None:
         token_budget = load_context_budget()
-    messages = load_memory_for_prompt(exclude_ids=exclude_ids)
+    messages = load_memory_for_prompt(conversation_id=conversation_id,
+                                      exclude_ids=exclude_ids)
     # Rolling summary: drop the rows the stored summary already covers and
     # hand the summary over as a leading system message (it merges into the
     # one system message the chat template requires). No summary yet -> the
     # prompt is byte-identical to the pre-feature behaviour.
-    summary_text, covers = _rolling_summary_state()
+    summary_text, covers = _rolling_summary_state(conversation_id)
     if (summary_text or "").strip() and covers > 0:
         messages = [m for m in messages if (m.get("id") or 0) > covers]
         messages = [{"role": "system",
@@ -2386,6 +2391,19 @@ def create_conversation(title: str | None = None) -> int:
     conn.close()
     save_active_conversation(conv_id)
     return conv_id
+
+
+def conversation_exists(conversation_id: int) -> bool:
+    """True when a conversation with this id exists. Never modifies memory."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute("SELECT 1 FROM conversations WHERE id = ?",
+                        (int(conversation_id),)).fetchone()
+    finally:
+        conn.close()
+    return row is not None
 
 
 def set_active_conversation(conversation_id: int) -> int:

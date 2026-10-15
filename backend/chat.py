@@ -2272,20 +2272,26 @@ _PACK_RULES_JA_ONLY = {
 }
 
 
-def _store_greeting_line(pack: "AmadeusPack") -> tuple[int, int]:
-    """Persist a startup greeting as a normal assistant message.
+def _store_greeting_line(pack: "AmadeusPack",
+                         conversation_id: int | None = None) -> tuple[int, int]:
+    """Persist a greeting as a normal assistant message.
 
     There is no user turn to remove on failure - her line simply never
     enters memory and the caller's exception propagates untouched. The row
     is flagged as a greeting so the reply-versioning logic (regenerate,
     undo, the version arrows in the UI) treats it as its own standalone
-    line instead of a version of a neighboring reply.
+    line instead of a version of a neighboring reply. conversation_id pins
+    the row to the tab the line was written for (None = the active tab);
+    a generated greeting always passes it, because the user may switch
+    tabs while it is being written.
     Returns (assistant_id, conversation_id)."""
+    if conversation_id is None:
+        conversation_id = store.load_active_conversation()
     assistant_id = store.append_message(
-        "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS,
-        is_greeting=True
+        "assistant", pack.assistant_reply_ENG, conversation_id=conversation_id,
+        japanese=pack.assistant_reply_JPS, is_greeting=True
     )
-    return assistant_id, store.load_active_conversation()
+    return assistant_id, int(conversation_id)
 
 
 # ---------- GREETING TIME-LIE NET (2026-10-05) -------------------------------
@@ -2516,6 +2522,10 @@ def generate_greeting(mode: str = "startup",
         # Startup: the greeted tab is the active one (the timing context's
         # per-tab anchor and the situation both key off it).
         conversation_id = store.load_active_conversation()
+    # Pinned from here on: the history, the summary and the stored row all
+    # use THIS tab, even if the user switches tabs while the line is being
+    # written (2026-10-15 fix - the line used to land in whichever tab was
+    # active when generation finished).
     # The ONE situation the code measured for this tab (first / unanswered /
     # continuous / return / unknown). The timing block carries its truth
     # line (load_internal_context) and the time-lie net below checks the
@@ -2588,7 +2598,8 @@ def generate_greeting(mode: str = "startup",
     # - prompt-only, never stored in memory. The correction retry reuses
     # the same prompt shape with the pointed correction as the tail line.
     def _greeting_call(client, arrival_line):
-        ctx = list(store.build_prompt_messages(exclude_ids=exclude_ids))
+        ctx = list(store.build_prompt_messages(
+            exclude_ids=exclude_ids, conversation_id=conversation_id))
         ctx.append({"role": "user", "content": arrival_line})
         # The private timing block (2026-10-05: the locked SITUATION truth
         # line + the situation's details) - the same block normal replies
@@ -2695,7 +2706,7 @@ def generate_greeting(mode: str = "startup",
                                  if corrected is not None
                                  else "correction failed"))
                 pack = _greeting_fallback_pack(situation)
-    assistant_id, conv_id = _store_greeting_line(pack)
+    assistant_id, conv_id = _store_greeting_line(pack, conversation_id)
     print("[Amadeus] Greeting generated and stored (assistant id %d)." % assistant_id)
     return pack, assistant_id, conv_id
 

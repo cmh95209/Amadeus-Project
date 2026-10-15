@@ -1003,12 +1003,14 @@ def greet():
     })
 
 
-# pre: the target conversation exists (this route activates it, so the
-#      greeting is generated against - and stored in - exactly that tab) and
-#      the configured model is servable. There are NO staleness/cooldown
-#      gates: a topic-switch acknowledgment is voiced on every switch, so the
-#      previous tab is captured first (to name the topic change) and passed
-#      into the timing context.
+# pre: the target conversation exists and the client has already activated
+#      it (/conversations/<id>/activate); this route does NOT change the
+#      active tab - the greeting is pinned to conversation_id, so it is
+#      generated against and stored in exactly that tab even if the user
+#      switches again while it is being written. The configured model is
+#      servable. There are NO staleness/cooldown gates: a topic-switch
+#      acknowledgment is voiced on every switch; the client sends the tab
+#      the user left ({"previous_id": n}) to name the topic change.
 # post: stores ONE line as a plain assistant line in the target tab and mints
 #       the speech id - the same shape as /greet. A not-ready model returns
 #       200 with {"ready": false, "reason": ...}: the client treats that as
@@ -1017,9 +1019,8 @@ def greet():
 def greet_conversation(conversation_id):
     # While the first-launch ceremony runs, tab switches deliver no line:
     # the chat box stays locked until the wake-up (or fallback) line lands,
-    # and nothing may speak before it. The guard sits BEFORE the target
-    # tab is activated, so a switch can never change the active
-    # conversation mid-ceremony.
+    # and nothing may speak before it. The guard sits before ANY store
+    # access.
     ceremony_state = memory.load_ceremony_state()
     if ceremony_state != memory.CEREMONY_DONE:
         return jsonify({"ready": False,
@@ -1042,9 +1043,9 @@ def greet_conversation(conversation_id):
             previous_id = memory.load_active_conversation()
         except Exception:
             previous_id = None
-    try:
-        memory.set_active_conversation(conversation_id)
-    except ValueError:
+    # Existence check only - activating here would yank the active tab back
+    # if the user has already switched on (2026-10-15 fix).
+    if not memory.conversation_exists(conversation_id):
         return jsonify({"message": "Conversation not found"}), 404
     ready = model_ready()
     if not ready["ready"]:

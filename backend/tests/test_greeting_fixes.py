@@ -14,6 +14,7 @@
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -113,6 +114,113 @@ class ReturnWelcomeBackTests(_FreshAppTests):
             with self.subTest(situation=situation):
                 self.assertIsNotNone(self.chat._greeting_time_lie_check(
                     self.sit(situation), "", "久しぶり。"))
+
+
+class _SwitchingLLM:
+    """A fake model that, while 'writing' the line, lets the user switch to
+    another tab (the race fix 3 closes). Records the prompt it was given."""
+
+    def __init__(self, memory, switch_to):
+        self.memory = memory
+        self.switch_to = switch_to
+        self.messages = None
+
+    def bind_tools(self, tools, tool_choice=None):
+        return self
+
+    def invoke(self, messages):
+        self.memory.set_active_conversation(self.switch_to)
+        if self.messages is None:
+            self.messages = messages
+        return SimpleNamespace(
+            content="", tool_call_chunks=None,
+            tool_calls=[{"name": "AmadeusPack", "args": {
+                "assistant_reply_JPS": "で、こっちの話ね。",
+                "assistant_reply_ENG": "So, about this one."}}])
+
+
+class GreetingPinnedToItsTabTests(_FreshAppTests):
+    """Fix 3: the history read and the stored row follow the greeted tab."""
+
+    def setUp(self):
+        super().setUp()
+        self.memory.save_ceremony_state("done")
+        self.chat.setKey("sk-test")
+        self.tab_a = self.memory.load_active_conversation()
+        self.memory.append_message("user", "ALPHA-ONLY-LINE",
+                                   conversation_id=self.tab_a)
+        self.tab_b = self.memory.create_conversation("Tab B")
+        self.memory.append_message("user", "BRAVO-ONLY-LINE",
+                                   conversation_id=self.tab_b)
+
+    def run_greeting(self, fake, **kw):
+        fake_stats = SimpleNamespace(load_stat=lambda key: 50.0)
+        fake_ja = SimpleNamespace(
+            build_voice_context=lambda trust: {"role": "system", "content": "v"})
+        with patch.object(self.chat, "get_llm", lambda *a, **k: fake), \
+             patch.object(self.chat, "_finalize", lambda pack, llm: pack), \
+             patch.object(self.chat, "ja_voice", fake_ja), \
+             patch.object(self.chat, "stats", fake_stats):
+            return self.chat.generate_greeting(**kw)
+
+    def prompt_text(self, fake):
+        return "\n".join(str(m.get("content")) for m in fake.messages)
+
+    def greeting_rows(self):
+        return [(r[2], r[4]) for r in self.rows() if r[5]]
+
+    def test_switch_greeting_lands_in_its_tab_when_user_hops_on(self):
+        self.memory.set_active_conversation(self.tab_a)
+        fake = _SwitchingLLM(self.memory, switch_to=self.tab_b)
+        _pack, _aid, conv_id = self.run_greeting(
+            fake, mode="switch", conversation_id=self.tab_a)
+        self.assertEqual(conv_id, self.tab_a)
+        self.assertEqual(self.greeting_rows(),
+                         [("So, about this one.", self.tab_a)])
+
+    def test_startup_greeting_reads_and_stores_the_tab_active_at_start(self):
+        self.memory.set_active_conversation(self.tab_a)
+        fake = _SwitchingLLM(self.memory, switch_to=self.tab_b)
+        _pack, _aid, conv_id = self.run_greeting(fake)
+        self.assertEqual(conv_id, self.tab_a)
+        self.assertEqual(self.greeting_rows(),
+                         [("So, about this one.", self.tab_a)])
+
+    def test_history_comes_from_the_greeted_tab_not_the_active_one(self):
+        # The user is already looking at B when A's greeting is written.
+        self.memory.set_active_conversation(self.tab_b)
+        fake = _SwitchingLLM(self.memory, switch_to=self.tab_b)
+        self.run_greeting(fake, mode="switch", conversation_id=self.tab_a)
+        history = [m for m in fake.messages if m.get("role") != "system"]
+        history_text = "\n".join(str(m.get("content")) for m in history)
+        self.assertIn("ALPHA-ONLY-LINE", history_text)
+        self.assertNotIn("BRAVO-ONLY-LINE", history_text)
+
+    def test_switch_route_no_longer_changes_the_active_tab(self):
+        # The user switched on to B; a late greeting request for A must not
+        # yank the active tab back to A.
+        self.memory.set_active_conversation(self.tab_b)
+        pack = self.chat.AmadeusPack(
+            assistant_reply_ENG="Hm.", assistant_reply_JPS="ふむ。")
+        with self.model(True), patch.object(
+                self.api, "generate_greeting",
+                side_effect=lambda **kw: (pack, 7, kw["conversation_id"])):
+            res = self.client.post(f"/conversations/{self.tab_a}/greet",
+                                   json={"previous_id": self.tab_b})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["conversation_id"], self.tab_a)
+        self.assertEqual(self.memory.load_active_conversation(), self.tab_b)
+
+    def test_switch_route_unknown_tab_is_404(self):
+        with self.model(True):
+            res = self.client.post("/conversations/9999/greet", json={})
+        self.assertEqual(res.status_code, 404)
+
+    def test_build_prompt_messages_default_is_still_the_active_tab(self):
+        self.memory.set_active_conversation(self.tab_b)
+        text = "\n".join(m["content"] for m in self.memory.build_prompt_messages())
+        self.assertIn("BRAVO-ONLY-LINE", text)
+        self.assertNotIn("ALPHA-ONLY-LINE", text)
 
 
 if __name__ == "__main__":
