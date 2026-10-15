@@ -211,7 +211,9 @@ class OtherConversationFactsTests(unittest.TestCase):
         c1, c3, c4 = _seed_live_shape(self.h)
         facts = store.other_conversation_facts(now=NOW)
         self.assertEqual(facts["anchor"]["conversation_id"], c3)
-        self.assertEqual(facts["anchor"]["phrase"], "two days ago")
+        # Calendar wording (2026-10-15): 09-18 23:30 -> 09-21 18:30 is three
+        # calendar days back.
+        self.assertEqual(facts["anchor"]["phrase"], "a few days ago")
         self.assertEqual(facts["anchor"]["title"], "Goodnight")
         self.assertIn("good night, i'll look forward to talking",
                       facts["anchor"]["content"])
@@ -363,7 +365,7 @@ class CrossTabTimingTests(unittest.TestCase):
         self.assertIn("Private timing context for this greeting only:",
                       content)
         self.assertIn("SITUATION:", content)
-        self.assertIn("the last time you talked was two days ago",
+        self.assertIn("the last time you talked was a few days ago",
                       content)
         self.assertIn("(2026-09-18 23:30)", content)
         self.assertIn('"Goodnight"', content)
@@ -395,7 +397,7 @@ class CrossTabTimingTests(unittest.TestCase):
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=c3)["content"]
         self.assertIn(
-            "the user's last message in this conversation was two days ago",
+            "the user's last message in this conversation was a few days ago",
             content)
         self.assertIn("genuinely away", content)
         self.assertNotIn("in the conversation", content)
@@ -408,7 +410,7 @@ class CrossTabTimingTests(unittest.TestCase):
         fresh = self.h.new_conv("Fresh")
         content = store.load_internal_context(
             now=NOW, is_greeting=True, conversation_id=fresh)["content"]
-        self.assertIn("the last time you talked was two days ago", content)
+        self.assertIn("the last time you talked was a few days ago", content)
         self.assertIn("They have not sent a message in this conversation "
                       "yet.", content)
         self.assertNotIn(CROSS_MARK, content)
@@ -459,7 +461,7 @@ class CrossTabTimingTests(unittest.TestCase):
             now=NOW, is_greeting=True, conversation_id=c1,
             is_return=False, previous_conversation_id=c3)["content"]
         self.assertIn("SITUATION:", content)
-        self.assertIn("the last time you talked was two days ago", content)
+        self.assertIn("the last time you talked was a few days ago", content)
         self.assertIn("genuinely away", content)
         # The previous-tab re-orientation line (pure data + its phrase).
         # Its phrase is computed from the REAL clock (the seed is pinned to

@@ -406,6 +406,94 @@ def _gap_phrase(seconds: float) -> str:
     return "over a year ago"
 
 
+# Calendar-aware contact wording (2026-10-15). _gap_phrase works in elapsed
+# hours only, so a user who left at 23:29 and came back at 18:09 the next
+# day (18 h 40 min) was "a day or two ago" - she repeated it, and it was
+# false. People think in clock and calendar: that gap is "last night". The
+# code still does ALL the time maths and hands her one finished phrase; she
+# never sees a number or a timestamp to interpret (the lesson of the
+# 2026-09-21 "7 days" -> "yesterday" failure).
+#
+# Rules (local time of this PC):
+#   * under 6 h: hours wording ALWAYS, even across midnight (23:29 -> 00:40
+#     is "a couple of hours ago", never "yesterday");
+#   * same calendar day: by the part of day it was (after midnight = "last
+#     night");
+#   * previous calendar day: "last night" (left 18:00 or later), else
+#     "yesterday morning" / "yesterday afternoon";
+#   * two days back: "the day before yesterday"; 3-6 days: "a few" /
+#     "several days ago"; a week and beyond: the _gap_phrase ladder.
+def _contact_phrase(then: datetime, now: datetime | None = None) -> str:
+    then_l = then.astimezone()
+    now_l = (now or datetime.now().astimezone()).astimezone()
+    seconds = max(0.0, (now_l.astimezone(timezone.utc)
+                        - then_l.astimezone(timezone.utc)).total_seconds())
+    hours = seconds / 3600
+    if hours < 1:
+        return "less than an hour ago"
+    if hours < 3:
+        return "a couple of hours ago"
+    if hours < 6:
+        return "a few hours ago"
+    day_diff = (now_l.date() - then_l.date()).days
+    hour = then_l.hour
+    if day_diff <= 0:
+        if hour < 5:
+            return "last night"
+        if hour < 12:
+            return "this morning"
+        if hour < 17:
+            return "earlier this afternoon"
+        return "earlier this evening"
+    if day_diff == 1:
+        if hour >= 18:
+            return "last night"
+        if hour < 12:
+            return "yesterday morning"
+        return "yesterday afternoon"
+    if day_diff == 2:
+        return "the day before yesterday"
+    if day_diff <= 4:
+        return "a few days ago"
+    if day_diff <= 6:
+        return "several days ago"
+    return _gap_phrase(max(seconds, 7 * 86400))
+
+
+# The time SCALE each contact phrase stands for - what the greeting time-lie
+# net compares a claimed gap against (chat._greeting_time_lie_check). Same-
+# day wording and "last night" are hours-scale: "a day or two" / "a day"
+# after "last night" overstates it.
+CONTACT_PHRASE_SCALE = {
+    "less than an hour ago": "hours",
+    "a couple of hours ago": "hours",
+    "a few hours ago": "hours",
+    "this morning": "hours",
+    "earlier this afternoon": "hours",
+    "earlier this evening": "hours",
+    "last night": "hours",
+    "yesterday morning": "days",
+    "yesterday afternoon": "days",
+    "the day before yesterday": "days",
+    "a few days ago": "days",
+    "several days ago": "days",
+    # _gap_phrase's ladder (a week and beyond; older callers).
+    "several hours ago": "hours",
+    "about a day ago": "hours",
+    "a day or two ago": "days",
+    "two days ago": "days",
+    "a couple of days ago": "days",
+    "about a week ago": "weeks",
+    "more than a week ago": "weeks",
+    "about two weeks ago": "weeks",
+    "a few weeks ago": "weeks",
+    "about two months ago": "months",
+    "a few months ago": "months",
+    "several months ago": "months",
+    "over a year ago": "years",
+}
+
+
 def _gap_string(seconds: float) -> str:
     """'7 days, 19 hours' style wording, from seconds (the raw-number form
     the timing block quotes alongside the casual phrase)."""
@@ -464,7 +552,7 @@ def _last_user_timing(now: datetime | None = None) -> Dict[str, object]:
         out["previous_time"] = previous_time
         out["gap"] = gap
         out["elapsed_seconds"] = elapsed
-        out["phrase"] = _gap_phrase(elapsed)
+        out["phrase"] = _contact_phrase(previous_time, now_local)
         out["reliable"] = True
     except (TypeError, ValueError, KeyError, OverflowError, OSError):
         pass
@@ -510,7 +598,8 @@ def load_conversation_anchor(conversation_id: int,
     except (TypeError, ValueError):
         return None
     return {"created_at": created_at, "time": previous_time,
-            "elapsed_seconds": elapsed, "phrase": _gap_phrase(elapsed),
+            "elapsed_seconds": elapsed,
+            "phrase": _contact_phrase(previous_time, now_local),
             "content": content or "",
             "title": (title or "").strip() or "New chat"}
 
@@ -554,7 +643,8 @@ def load_last_assistant_line(conversation_id: int,
     except (TypeError, ValueError):
         return None
     return {"content": content or "", "time": time,
-            "phrase": _gap_phrase(elapsed), "is_greeting": bool(greeting)}
+            "phrase": _contact_phrase(time, now_local),
+            "is_greeting": bool(greeting)}
 
 
 # The deterministic backstop against a model that does not count its own
@@ -670,7 +760,7 @@ def previous_contact_timing(now: datetime | None = None) -> Dict[str, object] | 
         "time": time,
         "created_at": created_at,
         "elapsed_seconds": elapsed,
-        "phrase": _gap_phrase(elapsed),
+        "phrase": _contact_phrase(time, now_local),
         "gap": _gap_string(elapsed),
         "title": (title or "").strip() or "New chat",
         "content": text[:120] + ("..." if len(text) > 120 else ""),
@@ -756,7 +846,7 @@ def other_conversation_facts(now: datetime | None = None) -> Dict[str, object]:
             "created_at": created_at,
             "time": time,
             "elapsed_seconds": elapsed,
-            "phrase": _gap_phrase(elapsed),
+            "phrase": _contact_phrase(time, now_local),
             "content": text[:MAX_CONTENT_CHARS]
                         + ("..." if len(text) > MAX_CONTENT_CHARS else ""),
             "digest": digest,
@@ -1083,7 +1173,7 @@ def load_previous_tab_summary(previous_conversation_id: int | None = None,
         elapsed = (datetime.now().astimezone()
                    - time.astimezone(timezone.utc)).total_seconds()
         if elapsed >= 0:
-            phrase = _gap_phrase(elapsed)
+            phrase = _contact_phrase(time)
     except (TypeError, ValueError):
         pass
     return {

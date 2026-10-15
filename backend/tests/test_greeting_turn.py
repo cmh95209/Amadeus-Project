@@ -81,7 +81,7 @@ class GapPhraseTests(unittest.TestCase):
                  "created_at": (now - timedelta(days=3)).strftime("%Y-%m-%d %H:%M")}]
         with patch.object(store, "load_memory_raw", return_value=rows):
             content = store.load_internal_context(now)["content"]
-        self.assertIn("Put casually, the last message was a couple of days ago.", content)
+        self.assertIn("Put casually, the last message was a few days ago.", content)
         self.assertIn("never 'yesterday' and never 'a week'", content)
 
 
