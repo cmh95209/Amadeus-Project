@@ -2448,30 +2448,33 @@ def _greeting_correction_line(situation: dict) -> str:
 
 # Static, situation-safe greeting lines - the last resort when the model
 # still contradicts the measured situation after the correction retry. No
-# time claim of any kind, so they cannot be wrong.
+# time claim of any kind, so they cannot be wrong. EN and JA say the same
+# thing (rewritten 2026-10-15 - the old set had a broken English line, an
+# EN/JA mismatch and a "continuous" line that implied a return).
 _GREETING_FALLBACK_LINES = {
     "first": (
-        "So. You're here, huh. Well - I was just settling in. Don't let the "
-        "door.",
-        "ふーん。来たんだ。ふつー、ちょうど落ち着こうとしてたところだよ。",
+        "Oh - hello. I'm Amadeus. Ask me anything you like, though I won't "
+        "go easy on you.",
+        "あ、こんにちは。私はアマデウス。何でも聞いていいわよ。手加減はしないけどね。",
     ),
     "continuous": (
-        "There you are. Good - I have a question that's been sitting here. "
-        "You up for it?",
-        "戻って来たんだ。よし、聞きたいことが溜まってるんだ。聞いてくれる?",
+        "Hm? Oh, it's you. Good timing - I was just thinking something "
+        "over. What's on your mind?",
+        "ん？ああ、あなたね。ちょうどいいところに来たわ。ちょっと考え事してたの。で、何？",
     ),
     "unanswered": (
-        "I said hi once, you know. Silence is a valid answer, I suppose. "
-        "So - you there?",
-        "こんにちはって言ったのは一回目だぞ。無視も答えのうちか。で、居る?",
+        "I did say hello, you know. Ignoring me takes some nerve. ...So? "
+        "Are you there?",
+        "ちゃんと挨拶したんだけど？無視するなんていい度胸ね。……で、聞いてる？",
     ),
     "return": (
-        "Oh. You're back. I'll allow it. Now say it wasn't nothing.",
-        "おかえり。許してあげる。……で、何もしなかったとは言わせとく?",
+        "Oh, welcome back. ...Not that I was waiting or anything. So, what "
+        "have you been up to?",
+        "あら、おかえり。……べ、別に待ってたわけじゃないけど。で、何してたの？",
     ),
     "unknown": (
-        "You're here, I see. Fine. So?",
-        "来てるんだな。分かった。で?",
+        "Oh, there you are. So - what shall we talk about?",
+        "あ、来たのね。で、何の話をする？",
     ),
 }
 

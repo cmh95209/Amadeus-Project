@@ -116,6 +116,44 @@ class ReturnWelcomeBackTests(_FreshAppTests):
                     self.sit(situation), "", "久しぶり。"))
 
 
+class FallbackLinesTests(_FreshAppTests):
+    """Fix 6: the static backup lines are complete, bilingual and can never
+    trip the time-lie net in the situation they are served for."""
+
+    SITUATIONS = ("first", "continuous", "unanswered", "return", "unknown")
+
+    def test_every_situation_has_a_line(self):
+        self.assertEqual(set(self.chat._GREETING_FALLBACK_LINES),
+                         set(self.SITUATIONS))
+
+    def test_lines_pass_the_net_for_their_own_situation(self):
+        for situation in self.SITUATIONS:
+            en, ja = self.chat._GREETING_FALLBACK_LINES[situation]
+            for fresh in (False, True):
+                with self.subTest(situation=situation, fresh=fresh):
+                    sit = {"situation": situation, "unanswered_fresh": fresh,
+                           "last_contact": {"phrase": "less than an hour ago",
+                                            "time": None}}
+                    self.assertIsNone(
+                        self.chat._greeting_time_lie_check(sit, en, ja))
+
+    def test_lines_are_bilingual_and_complete(self):
+        for situation, (en, ja) in self.chat._GREETING_FALLBACK_LINES.items():
+            with self.subTest(situation=situation):
+                self.assertRegex(en, r"[A-Za-z]")
+                self.assertNotRegex(ja, r"[A-Za-z]")
+                self.assertRegex(en.rstrip(), r"[.?!]$")
+                self.assertRegex(ja.rstrip(), r"[。？！]$")
+
+    def test_only_the_return_line_welcomes_back(self):
+        for situation, (en, ja) in self.chat._GREETING_FALLBACK_LINES.items():
+            if situation == "return":
+                continue
+            with self.subTest(situation=situation):
+                self.assertNotIn("welcome back", en.lower())
+                self.assertNotIn("おかえり", ja)
+
+
 class _SwitchingLLM:
     """A fake model that, while 'writing' the line, lets the user switch to
     another tab (the race fix 3 closes). Records the prompt it was given."""
