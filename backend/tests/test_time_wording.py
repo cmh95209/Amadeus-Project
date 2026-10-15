@@ -183,5 +183,54 @@ class ReturnTruthLineTests(_FreshAppTests):
         self.assertNotRegex(sit["truth_line"], r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}")
 
 
+class TimingLogLineTests(_FreshAppTests):
+    """D: one diagnostic line per greeting - times and decisions, no text."""
+
+    def test_log_line_shape(self):
+        sit = {"situation": "return",
+               "last_contact": {"phrase": "last night", "time": at(2026, 10, 14, 23, 29)},
+               "last_seen": {"time": at(2026, 10, 15, 16, 53)}}
+        line = self.chat._greeting_timing_log_line("startup", 16, sit, "ok")
+        self.assertEqual(
+            line,
+            '[Amadeus] Greeting timing: kind=startup tab=16 situation=return '
+            'phrase="last night" last_seen=2026-10-15 16:53 '
+            'last_talked=2026-10-14 23:29 net=ok')
+
+    def test_log_line_without_situation_or_times(self):
+        self.assertIn("situation=unavailable",
+                      self.chat._greeting_timing_log_line("switch", 3, None, "no-situation"))
+        line = self.chat._greeting_timing_log_line(
+            "startup", 1, {"situation": "first", "last_contact": None}, "ok")
+        self.assertIn("last_seen=- last_talked=-", line)
+
+    def test_generate_greeting_prints_it(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        class Fake:
+            def bind_tools(self, *a, **k):
+                return self
+
+            def invoke(self, messages):
+                return SimpleNamespace(content="", tool_call_chunks=None, tool_calls=[
+                    {"name": "AmadeusPack", "args": {"assistant_reply_JPS": "こんにちは。",
+                                                     "assistant_reply_ENG": "Hello."}}])
+        self.memory.save_ceremony_state("done")
+        buf = io.StringIO()
+        with patch.object(self.chat, "get_llm", lambda *a, **k: Fake()), \
+             patch.object(self.chat, "_finalize", lambda p, l: p), \
+             patch.object(self.chat, "ja_voice", SimpleNamespace(
+                 build_voice_context=lambda t: {"role": "system", "content": "v"})), \
+             patch.object(self.chat, "stats", SimpleNamespace(load_stat=lambda k: 50.0)), \
+             redirect_stdout(buf):
+            self.chat.generate_greeting()
+        log = buf.getvalue()
+        self.assertIn("[Amadeus] Greeting timing: kind=startup", log)
+        self.assertNotIn("Hello.", log.split("Greeting timing:")[1].splitlines()[0])
+
+
 if __name__ == "__main__":
     unittest.main()

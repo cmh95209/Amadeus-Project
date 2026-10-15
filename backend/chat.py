@@ -2501,6 +2501,28 @@ def _greeting_fallback_pack(situation: dict) -> "AmadeusPack":
     return AmadeusPack(assistant_reply_JPS=ja, assistant_reply_ENG=en)
 
 
+def _greeting_timing_log_line(kind: str, conversation_id, situation,
+                               net_result: str) -> str:
+    """ONE diagnostic backend-log line per greeting (2026-10-15): what the
+    code measured and told her - times and decisions only, never chat text -
+    so a wrong-sounding greeting can be diagnosed from the log without
+    opening the user's chats."""
+    def stamp(entry):
+        when = (entry or {}).get("time") if isinstance(entry, dict) else None
+        return f"{when:%Y-%m-%d %H:%M}" if when is not None else "-"
+
+    if situation is None:
+        return (f"[Amadeus] Greeting timing: kind={kind} tab={conversation_id} "
+                f"situation=unavailable net={net_result}")
+    last = situation.get("last_contact") or {}
+    phrase = last.get("phrase") or "-"
+    seen = situation.get("last_seen")
+    return (f"[Amadeus] Greeting timing: kind={kind} tab={conversation_id} "
+            f"situation={situation.get('situation')} phrase=\"{phrase}\" "
+            f"last_seen={stamp(seen)} last_talked={stamp(last)} "
+            f"net={net_result}")
+
+
 # pre: the saved model server is reachable and serving the configured model
 #      (see model_ready); no user message is appended - the greeting is her
 #      turn, and storing it is what lets a later startup notice it
@@ -2711,7 +2733,9 @@ def generate_greeting(mode: str = "startup",
     # correction, and if it STILL contradicts, a static situation-safe line
     # ships. Voice and tone are never touched - only provably false time
     # claims (hard facts, soft voice).
+    net_result = "no-situation"
     if situation is not None:
+        net_result = "ok"
         violation = _greeting_time_lie_check(
             situation, pack.assistant_reply_ENG, pack.assistant_reply_JPS)
         if violation:
@@ -2731,18 +2755,22 @@ def generate_greeting(mode: str = "startup",
                     situation, corrected.assistant_reply_ENG,
                     corrected.assistant_reply_JPS) is None:
                 pack = corrected
+                net_result = "corrected"
             else:
                 print("[Amadeus] Greeting %s - serving the situation-safe "
                       "line." % ("correction still contradicted"
                                  if corrected is not None
                                  else "correction failed"))
                 pack = _greeting_fallback_pack(situation)
+                net_result = "fallback-line"
+    kind = (store.GREETING_KIND_SWITCH if switch
+            else store.GREETING_KIND_WAKE if wake
+            else store.GREETING_KIND_STARTUP)
+    print(_greeting_timing_log_line(kind, conversation_id, situation, net_result))
     try:
         assistant_id, conv_id = _store_greeting_line(
             pack, conversation_id, after_user_id=after_user_id,
-            kind=(store.GREETING_KIND_SWITCH if switch
-                  else store.GREETING_KIND_WAKE if wake
-                  else store.GREETING_KIND_STARTUP),
+            kind=kind,
             from_conversation_id=previous_conversation_id if switch else None,
             group=group)
     except GreetingSuperseded:
