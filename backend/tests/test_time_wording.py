@@ -80,5 +80,52 @@ class ContactPhraseTests(_FreshAppTests):
                 self.assertIn(self.phrase(then, now), self.memory.CONTACT_PHRASE_SCALE)
 
 
+class HistoryTimeNoteTests(_FreshAppTests):
+    """A2: history notes say WHEN a message was said, in the same wording."""
+
+    def note(self, created, prev, now):
+        return self.memory._time_note(created, prev, now)
+
+    def test_note_uses_calendar_wording_not_arithmetic(self):
+        now = at(2026, 10, 15, 18, 9)
+        note = self.note("2026-10-14 23:29", "2026-10-14 18:00", now)
+        self.assertEqual(note, "[Time note: the following was said last night.]")
+        self.assertNotRegex(note, r"\d")
+
+    def test_no_note_without_a_real_break(self):
+        self.assertIsNone(self.note("2026-10-14 23:29", "2026-10-14 22:00",
+                                    at(2026, 10, 15, 18, 0)))
+        self.assertIsNone(self.note("2026-10-14 23:29", None, at(2026, 10, 15, 18, 0)))
+        self.assertIsNone(self.note("garbage", "2026-10-14 10:00", at(2026, 10, 15, 18, 0)))
+
+    def test_older_notes(self):
+        now = at(2026, 10, 15, 18, 0)
+        self.assertEqual(self.note("2026-10-13 10:00", "2026-10-12 10:00", now),
+                         "[Time note: the following was said the day before yesterday.]")
+        self.assertEqual(self.note("2026-10-01 10:00", "2026-09-20 10:00", now),
+                         "[Time note: the following was said about two weeks ago.]")
+
+    def test_notes_reach_the_prompt_history(self):
+        conv = self.memory.load_active_conversation()
+        u1 = self.memory.append_message("user", "old question", conversation_id=conv)
+        a1 = self.memory.append_message("assistant", "old answer", conversation_id=conv)
+        u2 = self.memory.append_message("user", "new question", conversation_id=conv)
+        import sqlite3
+        db = sqlite3.connect("data/memory.db")
+        db.execute("UPDATE messages SET created_at = '2020-01-01 10:00' WHERE id IN (?, ?)", (u1, a1))
+        db.commit()
+        db.close()
+        b = self.memory.append_message("assistant", "a reply after the break",
+                                       conversation_id=conv)
+        texts = [m["content"] for m in self.memory.load_memory_for_prompt(conv)]
+        noted = [t for t in texts if t.startswith("[Time note:")]
+        self.assertEqual(len(noted), 0)  # the newest user line stays clean
+        u3 = self.memory.append_message("user", "and another", conversation_id=conv)
+        texts = [m["content"] for m in self.memory.load_memory_for_prompt(conv)]
+        self.assertTrue(any(t.startswith("[Time note: the following was said less than an hour ago.]")
+                            for t in texts), texts)
+        self.assertTrue(all(isinstance(x, int) for x in (u2, b, u3)))
+
+
 if __name__ == "__main__":
     unittest.main()

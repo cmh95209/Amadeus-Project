@@ -1353,10 +1353,10 @@ def load_internal_context(now: datetime | None = None, is_greeting=False,
         )
         tail = (
             "- When you mention how long it has been, use the phrase above (or the "
-            "time notes on older messages) and match the real gap: a few days is "
-            "'a couple of days', never 'yesterday' and never 'a week'; a few weeks "
-            "is 'a few weeks', never 'a few days'. Do not round a gap up or down "
-            "across that kind of difference.\n"
+            "time notes on older messages) as-is and match the real gap: 'last "
+            "night' is never 'a day or two'; a few days is never 'yesterday' and "
+            "never 'a week'; a few weeks is never 'a few days'. Do not round a gap "
+            "up or down across that kind of difference.\n"
             "- A conversation gap is not proof the user was away from the app. "
             "Do not assume their location, activity, or reason for the silence.\n"
             f"- {long_gap_bullet} {gap_note}\n"
@@ -1990,26 +1990,23 @@ def build_prompt_messages(token_budget: int | None = None, exclude_ids=None,
 #       carries no dates at all, so without these notes she can only GUESS
 #       when an old message happened (observed 2026-09-20: a week-old thread
 #       answered as "yesterday").
-def _time_note(created_at, prev_created_at):
+# 2026-10-15: the note no longer hands her arithmetic ("about 17 hours have
+# passed") that could clash with the calendar phrase of the timing block
+# ("last night"); it says WHEN the message was said, measured from now, in
+# the same _contact_phrase wording - every time fact she sees agrees.
+def _time_note(created_at, prev_created_at, now: datetime | None = None):
     if not created_at or not prev_created_at:
         return None
     try:
         then = datetime.fromisoformat(prev_created_at).astimezone()
-        now_ = datetime.fromisoformat(created_at).astimezone()
+        this = datetime.fromisoformat(created_at).astimezone()
     except (TypeError, ValueError):
         return None
-    seconds = (now_ - then).total_seconds()
+    seconds = (this - then).total_seconds()
     if seconds < 2 * 3600:
         return None
-    hours = int(seconds // 3600)
-    if hours >= 48:
-        amount, unit = hours // 24, "day"
-    else:
-        amount, unit = hours, "hour"
-    verb = "has" if amount == 1 else "have"
-    plural = "" if amount == 1 else "s"
-    return (f"[Time note: about {amount} {unit}{plural} {verb} "
-            f"passed since the previous message.]")
+    return (f"[Time note: the following was said "
+            f"{_contact_phrase(this, now)}.]")
 
 
 # pre: rows is a list of (id, role) tuples in ascending id order for one conversation
@@ -2747,9 +2744,11 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
     last_user_index = max(
         (i for i, row in enumerate(rows) if row[1] == "user"), default=-1
     )
+    now_local = datetime.now().astimezone()  # one "now" for every note
     for i, (mid, role, content, japanese, created_at) in enumerate(rows):
         base = japanese if (role == "assistant" and japanese) else content
-        note = None if i == last_user_index else _time_note(created_at, prev_created_at)
+        note = (None if i == last_user_index
+                else _time_note(created_at, prev_created_at, now_local))
         out.append({"id": mid, "role": role,
                     "content": note + " " + base if note else base})
         prev_created_at = created_at
