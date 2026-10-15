@@ -2280,7 +2280,10 @@ class GreetingSuperseded(Exception):
 
 def _store_greeting_line(pack: "AmadeusPack",
                          conversation_id: int | None = None,
-                         after_user_id: int | None = None) -> tuple[int, int]:
+                         after_user_id: int | None = None,
+                         kind: str | None = None,
+                         from_conversation_id: int | None = None,
+                         group: int | None = None) -> tuple[int, int]:
     """Persist a greeting as a normal assistant message.
 
     There is no user turn to remove on failure - her line simply never
@@ -2293,22 +2296,19 @@ def _store_greeting_line(pack: "AmadeusPack",
     tabs while it is being written. after_user_id (the tab's newest user
     message id when the greeting started) makes the save conditional: if
     the user has spoken there since, nothing is stored and
-    GreetingSuperseded is raised.
+    GreetingSuperseded is raised. kind / from_conversation_id record WHY
+    she spoke (what greeting regenerate needs to write it again); group
+    links a regenerated version to its earlier versions. Callers that pass
+    no kind store a scripted line (the fixed first-launch texts).
     Returns (assistant_id, conversation_id)."""
     if conversation_id is None:
         conversation_id = store.load_active_conversation()
-    if after_user_id is not None:
-        assistant_id = store.append_greeting_if_quiet(
-            conversation_id, pack.assistant_reply_ENG,
-            pack.assistant_reply_JPS, after_user_id)
-        if assistant_id is None:
-            raise GreetingSuperseded(
-                "the user spoke first - greeting dropped")
-        return assistant_id, int(conversation_id)
-    assistant_id = store.append_message(
-        "assistant", pack.assistant_reply_ENG, conversation_id=conversation_id,
-        japanese=pack.assistant_reply_JPS, is_greeting=True
-    )
+    assistant_id = store.append_greeting_if_quiet(
+        conversation_id, pack.assistant_reply_ENG, pack.assistant_reply_JPS,
+        after_user_id, kind=kind or store.GREETING_KIND_SCRIPTED,
+        from_conversation_id=from_conversation_id, group=group)
+    if assistant_id is None:
+        raise GreetingSuperseded("the user spoke first - greeting dropped")
     return assistant_id, int(conversation_id)
 
 
@@ -2528,7 +2528,10 @@ def _greeting_fallback_pack(situation: dict) -> "AmadeusPack":
 #       Raises on total failure so the /greet route can report it cleanly.
 def generate_greeting(mode: str = "startup",
                       conversation_id: int | None = None,
-                      previous_conversation_id: int | None = None) -> tuple[AmadeusPack, int, int]:
+                      previous_conversation_id: int | None = None,
+                      group: int | None = None) -> tuple[AmadeusPack, int, int]:
+    # group: set only by regenerate_greeting - the new line is stored as a
+    # further version of that greeting (same version group).
     switch = (mode == "switch")
     wake = (mode == "wake")
     if wake:
@@ -2751,12 +2754,54 @@ def generate_greeting(mode: str = "startup",
                 pack = _greeting_fallback_pack(situation)
     try:
         assistant_id, conv_id = _store_greeting_line(
-            pack, conversation_id, after_user_id=after_user_id)
+            pack, conversation_id, after_user_id=after_user_id,
+            kind=(store.GREETING_KIND_SWITCH if switch
+                  else store.GREETING_KIND_WAKE if wake
+                  else store.GREETING_KIND_STARTUP),
+            from_conversation_id=previous_conversation_id if switch else None,
+            group=group)
     except GreetingSuperseded:
         print("[Amadeus] Greeting dropped - the user spoke first.")
         raise
     print("[Amadeus] Greeting generated and stored (assistant id %d)." % assistant_id)
     return pack, assistant_id, conv_id
+
+# pre: message_id names a greeting row (see memory.load_greeting_row)
+# post: a fresh version of that greeting, written for the SAME moment (its
+#       saved kind, tab and the tab the user came from), is stored as a
+#       further version in the same version group and becomes the viewed
+#       one; the previous version stays saved (hidden) for the arrows. Only
+#       her latest visible line can be regenerated, never a scripted
+#       first-launch line. While the new line is written the old version is
+#       hidden, so the situation check and her history never see it (no
+#       "you ignored my greeting" about her own previous version). Any
+#       failure - or the user speaking first - restores the old version.
+#       Raises LookupError (no such row) / ValueError (not allowed).
+def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
+    row = store.load_greeting_row(message_id)
+    if row is None:
+        raise LookupError("Message not found")
+    if row["role"] != "assistant" or not row["is_greeting"]:
+        raise ValueError("Only her greetings can be regenerated here")
+    if row["kind"] == store.GREETING_KIND_SCRIPTED:
+        raise ValueError("This is a scripted line - it can't be regenerated")
+    if not row["active"] or not row["is_latest"]:
+        raise ValueError("Only her latest line can be regenerated")
+    # Older greetings predate the saved kind: treat them as startup ones.
+    kind = row["kind"] if row["kind"] in (
+        store.GREETING_KIND_STARTUP, store.GREETING_KIND_SWITCH,
+        store.GREETING_KIND_WAKE) else store.GREETING_KIND_STARTUP
+    store.ensure_greeting_group(row["id"])
+    store.set_message_active(row["id"], False)
+    try:
+        return generate_greeting(
+            mode=kind, conversation_id=row["conversation_id"],
+            previous_conversation_id=row["from_conversation_id"],
+            group=row["group"])
+    except BaseException:
+        store.set_message_active(row["id"], True)
+        raise
+
 
 def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     llm = get_llm(API_KEY, LLM_Model)

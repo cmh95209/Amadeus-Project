@@ -6,6 +6,7 @@ from chat import (
     generate_greeting,
     apply_interaction_trust,
     regenerateReply,
+    regenerate_greeting,
     setKey,
     has_api_key,
     resetMemory,
@@ -1083,6 +1084,44 @@ def greet_conversation(conversation_id):
                         "superseded": True})
     except Exception as exc:
         print("[Flask] Switch-greeting failure:", repr(exc))
+        return jsonify({"message": _llm_error_message(exc)}), 502
+    speech_id = _mint_speech_id(pack, assistant_id)
+    return jsonify({
+        "ready": True,
+        "response": pack.assistant_reply_ENG,
+        "speech_id": speech_id,
+        "assistant_id": assistant_id,
+        "conversation_id": conv_id,
+    })
+
+
+# pre: message_id is her latest visible line and a generated greeting
+#      (chat.regenerate_greeting enforces both)
+# post: a new version of that greeting is stored (the old one stays as an
+#       earlier version) and returned in the /greet shape. Not allowed ->
+#       400 with a plain message; unknown id -> 404; the user spoke first
+#       -> 200 {"ready": false, "superseded": true}; a model failure -> 502
+#       with the old version restored.
+@application.route("/greetings/<int:message_id>/regenerate", methods=["POST"])
+def regenerate_greeting_route(message_id):
+    if memory.load_ceremony_state() != memory.CEREMONY_DONE:
+        return jsonify({"message": "Not available during the first launch."}), 400
+    if not has_api_key():
+        return jsonify({"message": "No API key. Add one in Settings."}), 400
+    ready = model_ready()
+    if not ready["ready"]:
+        return jsonify({"message": f"The AI server isn't ready: {ready['reason']}"}), 503
+    try:
+        pack, assistant_id, conv_id = regenerate_greeting(message_id)
+    except LookupError:
+        return jsonify({"message": "Message not found"}), 404
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except GreetingSuperseded:
+        return jsonify({"ready": False, "reason": "user spoke first",
+                        "superseded": True})
+    except Exception as exc:
+        print("[Flask] Greeting-regenerate failure:", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
     speech_id = _mint_speech_id(pack, assistant_id)
     return jsonify({

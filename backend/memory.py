@@ -536,6 +536,7 @@ def load_last_assistant_line(conversation_id: int,
         row = c.execute(
             "SELECT content, created_at, greeting FROM messages "
             "WHERE conversation_id = ? AND role = 'assistant' "
+            "AND COALESCE(active, 1) = 1 "
             "ORDER BY id DESC LIMIT 1",
             (int(conversation_id),),
         ).fetchone()
@@ -585,7 +586,8 @@ def recent_greeting_count(conversation_id: int, now: datetime | None = None,
         _ensure_messages_table(c)
         (n,) = c.execute(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ? "
-            "AND role = 'assistant' AND greeting = 1 AND created_at > ?",
+            "AND role = 'assistant' AND greeting = 1 AND created_at > ? "
+            "AND COALESCE(active, 1) = 1",
             (int(conversation_id), cutoff),
         ).fetchone()
     finally:
@@ -1066,7 +1068,8 @@ def load_previous_tab_summary(previous_conversation_id: int | None = None,
         row = c.execute(
             "SELECT m.content, m.created_at, c.title FROM messages m "
             "JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT 1",
+            "WHERE m.conversation_id = ? AND COALESCE(m.active, 1) = 1 "
+            "ORDER BY m.id DESC LIMIT 1",
             (pid,),
         ).fetchone()
     finally:
@@ -1403,6 +1406,17 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
                       "quickly."),
             ],
         )
+
+    # Greeting regenerate (2026-10-15): WHY a greeting was spoken, so it can
+    # be written again for the same moment, plus the link between its
+    # versions. All NULL on older rows (an unknown-kind greeting regenerates
+    # as a startup one; a NULL group = its own single version).
+    #   greeting_kind  - "startup" | "switch" | "wake" | "scripted"
+    #   greeting_from  - the tab the user came from (switch greetings)
+    #   greeting_group - the FIRST version's id, shared by every version
+    _add_column(c, "messages", "greeting_kind", "TEXT")
+    _add_column(c, "messages", "greeting_from", "INTEGER")
+    _add_column(c, "messages", "greeting_group", "INTEGER")
 
     # Migrate pre-session databases: fold everything into one conversation.
     _ensure_conversations(c)
@@ -1916,9 +1930,15 @@ def _group_reply_turns(rows) -> List[List[int]]:
     """Group a session's rows (ascending id, each a (id, role, greeting) tuple)
     into "reply turns". A user message is its own turn, and a consecutive run
     of ordinary assistant messages (all regenerations of one reply) forms one
-    turn. A greeting is ALWAYS its own turn: it has no user turn of its own,
-    so it must never be lumped into the version stack of a neighboring reply.
-    Returns the ids of each turn, in order."""
+    turn. A greeting is never lumped into the version stack of a neighboring
+    reply (it has no user turn of its own): it is its own turn, together
+    with its OWN regenerated versions only - consecutive greeting rows that
+    share a greeting_group (the optional 4th tuple item; NULL = the row's
+    own id). Returns the ids of each turn, in order."""
+    def greeting_key(row):
+        group = row[3] if len(row) > 3 else None
+        return group if group else row[0]
+
     groups: List[List[int]] = []
     i, n = 0, len(rows)
     while i < n:
@@ -1927,8 +1947,13 @@ def _group_reply_turns(rows) -> List[List[int]]:
             i += 1
         else:
             if rows[i][2]:
-                groups.append([rows[i][0]])
-                i += 1
+                key = greeting_key(rows[i])
+                j = i + 1
+                while (j < n and rows[j][1] == "assistant" and rows[j][2]
+                       and greeting_key(rows[j]) == key):
+                    j += 1
+                groups.append([r[0] for r in rows[i:j]])
+                i = j
                 continue
             j = i
             while j < n and not rows[j][2] and rows[j][1] == "assistant":
@@ -1939,18 +1964,22 @@ def _group_reply_turns(rows) -> List[List[int]]:
 
 
 # pre: row is one (id, role, content, created_at, audio, japanese, active,
-#      conversation_id, greeting) tuple
+#      conversation_id, greeting[, greeting_group, greeting_kind]) tuple
 # post: the plain dict shape the UI expects (audio_url / has_japanese when
-#      present; is_greeting on a standalone greeting turn). Assistant rows
-#      always carry "japanese" (her spoken line, "" when none) so the UI can
-#      show it under the English when the user turns that on.
+#      present; is_greeting on a standalone greeting turn, plus
+#      greeting_regenerable unless it is a scripted first-launch line).
+#      Assistant rows always carry "japanese" (her spoken line, "" when
+#      none) so the UI can show it under the English when the user turns
+#      that on.
 def _message_item(row) -> Dict[str, str]:
-    mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row
+    mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row[:9]
+    kind = row[10] if len(row) > 10 else None
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
             "active": bool((active if active is not None else 1)),
             "conversation_id": conv_id}
     if greeting:
         item["is_greeting"] = True
+        item["greeting_regenerable"] = kind != GREETING_KIND_SCRIPTED
     if audio:
         item["audio_url"] = "/message_audio/" + audio
     if role == "assistant":
@@ -1978,7 +2007,7 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
     c.execute(
         "SELECT id, role, content, created_at, audio, japanese, active, conversation_id, "
-        "greeting "
+        "greeting, greeting_group, greeting_kind "
         "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         (conv,),
     )
@@ -1987,7 +2016,8 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
     by_id = {r[0]: r for r in rows}
     out = []
-    for turn in _group_reply_turns([(r[0], r[1], r[8] if r[8] else 0) for r in rows]):
+    for turn in _group_reply_turns(
+            [(r[0], r[1], r[8] if r[8] else 0, r[9]) for r in rows]):
         for pos, mid in enumerate(turn):
             row = by_id[mid]
             if len(turn) > 1 and (row[6] if row[6] is not None else 1) != 1:
@@ -2061,17 +2091,30 @@ def latest_user_message_id(conversation_id: int) -> int:
         conn.close()
 
 
-# pre: after_user_id = latest_user_message_id(conversation_id) taken when the
-#      greeting STARTED being written
-# post: the greeting row is stored and its id returned - unless the user has
-#       sent a message in that conversation since then, in which case nothing
-#       is stored and None is returned (the user spoke first; her greeting
-#       would now be out of place). The check and the insert run inside ONE
-#       write transaction (BEGIN IMMEDIATE), so a user message can never slip
-#       in between them.
+# The kinds of greeting line (messages.greeting_kind). Scripted lines (the
+# fixed first-launch intro / trying / reminder / fallback texts) are never
+# regenerated; every other kind is written by the model and can be.
+GREETING_KIND_STARTUP = "startup"
+GREETING_KIND_SWITCH = "switch"
+GREETING_KIND_WAKE = "wake"
+GREETING_KIND_SCRIPTED = "scripted"
+
+
+# pre: after_user_id, when given, = latest_user_message_id(conversation_id)
+#      taken when the greeting STARTED being written
+# post: the greeting row is stored (with its kind, the tab the user came
+#       from, and its version group) and its id returned - unless
+#       after_user_id is given and the user has sent a message in that
+#       conversation since then, in which case nothing is stored and None is
+#       returned (the user spoke first; her greeting would now be out of
+#       place). The check and the insert run inside ONE write transaction
+#       (BEGIN IMMEDIATE), so a user message can never slip in between them.
 def append_greeting_if_quiet(conversation_id: int, content: str,
                              japanese: str | None,
-                             after_user_id: int) -> int | None:
+                             after_user_id: int | None,
+                             kind: str | None = None,
+                             from_conversation_id: int | None = None,
+                             group: int | None = None) -> int | None:
     conv = int(conversation_id)
     conn = _connect_db()
     try:
@@ -2079,21 +2122,74 @@ def append_greeting_if_quiet(conversation_id: int, content: str,
         _ensure_messages_table(c)
         conn.commit()
         c.execute("BEGIN IMMEDIATE")
-        (newest,) = c.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM messages "
-            "WHERE conversation_id = ? AND role = 'user'", (conv,)).fetchone()
-        if int(newest) > int(after_user_id):
-            conn.rollback()
-            return None
+        if after_user_id is not None:
+            (newest,) = c.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages "
+                "WHERE conversation_id = ? AND role = 'user'", (conv,)).fetchone()
+            if int(newest) > int(after_user_id):
+                conn.rollback()
+                return None
         c.execute(
-            "INSERT INTO messages (role, content, conversation_id, japanese, greeting) "
-            "VALUES ('assistant', ?, ?, ?, 1)", (content, conv, japanese))
+            "INSERT INTO messages (role, content, conversation_id, japanese, greeting, "
+            "greeting_kind, greeting_from, greeting_group) "
+            "VALUES ('assistant', ?, ?, ?, 1, ?, ?, ?)",
+            (content, conv, japanese, kind,
+             None if from_conversation_id is None else int(from_conversation_id),
+             None if group is None else int(group)))
         new_id = c.lastrowid
         c.execute(
             "UPDATE conversations SET updated_at = strftime('%Y-%m-%d %H:%M','now','localtime') "
             "WHERE id = ?", (conv,))
         conn.commit()
         return new_id
+    finally:
+        conn.close()
+
+
+# pre: message_id exists (or not)
+# post: everything greeting regenerate needs about one row, or None when it
+#       is missing: {"id", "conversation_id", "role", "is_greeting", "kind",
+#       "from_conversation_id", "group" (NULL -> its own id), "active",
+#       "is_latest" (no visible row after it in its conversation)}.
+#       Never modifies memory.
+def load_greeting_row(message_id: int) -> Dict[str, object] | None:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute(
+            "SELECT id, conversation_id, role, greeting, greeting_kind, "
+            "greeting_from, greeting_group, active FROM messages WHERE id = ?",
+            (int(message_id),)).fetchone()
+        if row is None:
+            return None
+        mid, conv, role, greeting, kind, from_id, group, active = row
+        (newer,) = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND id > ? "
+            "AND COALESCE(active, 1) = 1", (conv, mid)).fetchone()
+    finally:
+        conn.close()
+    return {
+        "id": mid, "conversation_id": conv, "role": role,
+        "is_greeting": bool(greeting), "kind": kind,
+        "from_conversation_id": from_id,
+        "group": group if group else mid,
+        "active": (active if active is not None else 1) == 1,
+        "is_latest": newer == 0,
+    }
+
+
+# pre: message_id exists
+# post: the row joins its own version group (greeting_group = its id) when
+#       it had none - done when a first regenerate makes it "version 1"
+def ensure_greeting_group(message_id: int) -> None:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        c.execute("UPDATE messages SET greeting_group = id "
+                  "WHERE id = ? AND greeting_group IS NULL", (int(message_id),))
+        conn.commit()
     finally:
         conn.close()
 
@@ -2216,10 +2312,11 @@ def activate_version(message_id: int):
         return None
     _, conv, role = row
     cids = c.execute(
-        "SELECT id, role, greeting FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
+        "SELECT id, role, greeting, greeting_group FROM messages "
+        "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     turn = next((g for g in _group_reply_turns(
-        [(i, r, (g if g else 0)) for i, r, g in cids])
+        [(i, r, (g if g else 0), gg) for i, r, g, gg in cids])
         if int(message_id) in g), None)
     if turn is None:
         conn.close()
@@ -2243,10 +2340,11 @@ def get_trailing_turn(conversation_id=None) -> List[int]:
     c = conn.cursor()
     _ensure_messages_table(c)
     cids = c.execute(
-        "SELECT id, role, greeting FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
+        "SELECT id, role, greeting, greeting_group FROM messages "
+        "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     conn.close()
-    turns = _group_reply_turns([(i, r, g if g else 0) for i, r, g in cids])
+    turns = _group_reply_turns([(i, r, g if g else 0, gg) for i, r, g, gg in cids])
     return turns[-1] if turns else []
 
 
@@ -2296,9 +2394,10 @@ def undo_last_assistant(conversation_id=None):
         conn.close()
         return None
     cids = c.execute(
-        "SELECT id, role, greeting FROM messages WHERE conversation_id = ? ORDER BY id ASC", (conv,)
+        "SELECT id, role, greeting, greeting_group FROM messages "
+        "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
-    turns = _group_reply_turns([(i, r, g if g else 0) for i, r, g in cids])
+    turns = _group_reply_turns([(i, r, g if g else 0, gg) for i, r, g, gg in cids])
     turn = turns[-1] if turns else []
     if not turn:
         conn.close()
