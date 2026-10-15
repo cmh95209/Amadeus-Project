@@ -245,6 +245,25 @@ button {
   box-shadow: 0 0 12px rgba(229, 185, 79, 0.35);
 }
 
+.status-dot.neutral {
+  background: #818c9d;
+  box-shadow: none;
+}
+
+/* Something is in progress (model loading, she is waking up). */
+.status-dot.pulse {
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.pulse { animation: none; }
+}
+
 .settings-help { color: #99a5b7; font-size: 12px; line-height: 1.5; margin: 8px 0 20px; }
 .settings-error { color: #e3b5b5; font-size: 13px; }
 

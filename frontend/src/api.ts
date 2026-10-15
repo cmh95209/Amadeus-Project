@@ -579,6 +579,10 @@ export type ConnectionStatus = {
   model_found: boolean;
   batch_warning?: string;
   error?: string;
+  /** The server is up but says it is still loading the model. */
+  loading?: boolean;
+  /** Is the voice engine answering? undefined from older backends. */
+  voice_reachable?: boolean;
 };
 
 export async function getLLMServer(): Promise<string> {
@@ -630,6 +634,8 @@ export async function testConnection(): Promise<ConnectionStatus> {
     model_found: data.model_found === true,
     batch_warning: typeof data.batch_warning === "string" ? data.batch_warning : undefined,
     error: typeof data.error === "string" ? data.error : undefined,
+    loading: data.loading === true,
+    voice_reachable: typeof data.voice_reachable === "boolean" ? data.voice_reachable : undefined,
   };
 }
 

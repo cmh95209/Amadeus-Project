@@ -1,7 +1,8 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
-import { placeGreeting } from "./greetingFlow";
+import { deriveFooter, placeGreeting } from "./greetingFlow";
+import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
 import {
   API_BASE,
@@ -95,6 +96,21 @@ export default function App() {
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Connecting to Amadeus...");
+  // The footer's health inputs (deriveFooter): is the backend answering at
+  // all, and where the startup greeting stands. A refresh that already
+  // greeted this session starts settled ("done").
+  const [backendDown, setBackendDown] = useState(false);
+  const [greetPhase, setGreetPhase] = useState<GreetPhase>(() =>
+    typeof sessionStorage !== "undefined" && sessionStorage.getItem("amadeusGreeted") === "1"
+      ? "done" : "idle");
+  // When the AI server first answered WITHOUT listing the configured model
+  // (null = not in that state): "loading..." for a grace period, then
+  // "check the model name".
+  const notListedSince = useRef<number | null>(null);
+  const slowGreetTimer = useRef<number | null>(null);
+  // How the startup load (initialize) went. If it FAILED (backend down at
+  // launch), the connection probe re-runs it once the backend answers.
+  const initState = useRef<"pending" | "ok" | "failed">("pending");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [apiKey, setApiKeyInput] = useState("");
@@ -119,8 +135,14 @@ export default function App() {
   messages.forEach((m, i) => {
     if (m.role !== "user") lastAssistantIndex = i;
   });
-  const idleStatus = status === "Online" || status === "Memory cleared" || status === "This conversation was cleared" || status.startsWith("Model set to ");
-  const footerStatus = missingKey && idleStatus ? "No API key" : status;
+  const footer = deriveFooter({
+    status,
+    backendDown,
+    missingKey,
+    conn: connStatus,
+    notListedForMs: notListedSince.current === null ? null : Date.now() - notListedSince.current,
+    greetPhase,
+  });
   const connStatusText = !connStatus
     ? "Not tested yet."
     : !connStatus.reachable
@@ -294,11 +316,37 @@ export default function App() {
     }
   }
 
-  async function fireGreeting(justSaved = false) {
+  // The footer follows the greeting (deriveFooter): "waking up" while it is
+  // written, "still waking up" after 15 s (a model that loads on the first
+  // request), then Ready. A failure on a reachable model gets ONE automatic
+  // retry 10 s later; if that fails too the footer says she couldn't greet
+  // but the user can talk - never a silent "is it even working?".
+  function settleGreetPhase(phase: GreetPhase) {
+    if (slowGreetTimer.current !== null) {
+      window.clearTimeout(slowGreetTimer.current);
+      slowGreetTimer.current = null;
+    }
+    setGreetPhase(phase);
+  }
+
+  async function fireGreeting(justSaved = false, isRetry = false) {
     if (greetingInFlight.current || greetedThisSession.current) return;
-    if (loading) return; // do not interrupt an in-flight turn
+    if (loading) {
+      // Do not interrupt an in-flight turn. A retry that cannot run must
+      // still settle the footer (her reply will prove the line works).
+      if (isRetry) settleGreetPhase("failed");
+      return;
+    }
     greetingInFlight.current = true;
     const spokeBefore = userSpokeSeq.current;
+    setGreetPhase((p) => (p === "slow" ? p : "waking"));
+    if (slowGreetTimer.current === null) {
+      slowGreetTimer.current = window.setTimeout(() => {
+        slowGreetTimer.current = null;
+        setGreetPhase((p) => (p === "waking" ? "slow" : p));
+      }, 15000);
+    }
+    let failed = false;
     try {
       const g = await getGreeting(justSaved);
       if (g.ceremony) setCeremonyState(g.ceremony); // gate + note follow this
@@ -307,10 +355,18 @@ export default function App() {
         // line, and the conversation is already going - no re-fire.
         greetedThisSession.current = true;
         sessionStorage.setItem("amadeusGreeted", "1");
+        settleGreetPhase("done");
         return;
       }
       const line = g.response;
-      if (!line) return; // nothing to say this probe; it re-fires
+      if (!line || (!g.ready && !(g.kind === "intro" || g.kind === "trying" || g.kind === "reminder"))) {
+        // Nothing to say this probe (model not servable yet, or the
+        // ceremony is waiting): back to idle, and let the next probe that
+        // finds the model re-fire it.
+        modelWasFound.current = false;
+        settleGreetPhase("idle");
+        return;
+      }
       // The ceremony wait-lines (intro / trying / reminder) are spoken but
       // do NOT finish the ceremony - they keep the box locked and the
       // probes going. A wake-up, the fallback, or an ordinary greeting
@@ -321,11 +377,11 @@ export default function App() {
       // connect their model.
       const ceremonialWait =
         g.kind === "intro" || g.kind === "trying" || g.kind === "reminder";
-      if (!g.ready && !ceremonialWait) return; // model not up; probe re-fires
       if (!ceremonialWait) {
         greetedThisSession.current = true;
         sessionStorage.setItem("amadeusGreeted", "1");
       }
+      settleGreetPhase(ceremonialWait ? "idle" : "done");
       setMessages((current) => placeGreeting(current,
         { role: "assistant", content: line, id: g.assistantId, is_greeting: true }));
       if (g.speechUrl) rememberVoiceLine(g.assistantId); // the Replay button
@@ -338,9 +394,18 @@ export default function App() {
         void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
       }
     } catch {
-      // A greeting failure is silent by design - never shown as an error.
+      // A greeting failure never shows as an error popup; the footer says
+      // what happened instead (after the one retry).
+      failed = true;
     } finally {
       greetingInFlight.current = false;
+    }
+    if (failed) {
+      if (isRetry) {
+        settleGreetPhase("failed");
+      } else {
+        window.setTimeout(() => void fireGreeting(false, true), 10000);
+      }
     }
   }
 
@@ -380,6 +445,18 @@ export default function App() {
     try {
       const status = await testConnection();
       setConnStatus(status);
+      setBackendDown(false);
+      if (initState.current === "failed") { // backend came back
+        initState.current = "pending";
+        void initialize();
+      }
+      // Reachable but the configured model is not listed (yet): remember
+      // since when - "loading..." for a grace period, then "check the name".
+      if (status.reachable && !status.loading && status.model_configured && !status.model_found) {
+        if (notListedSince.current === null) notListedSince.current = Date.now();
+      } else {
+        notListedSince.current = null;
+      }
       const found = status.reachable && status.model_found;
       // Two re-fires: the classic one (the model just became servable -
       // the "I forgot to start it" case), and the ceremony one (while she
@@ -394,6 +471,7 @@ export default function App() {
       modelWasFound.current = found;
     } catch {
       setConnStatus(null); // even the backend is unreachable
+      setBackendDown(true);
     }
   }
 
@@ -411,6 +489,30 @@ export default function App() {
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // While the AI server is loading the model (or has not listed it yet),
+  // check every 5 s instead of every 30 s, so the footer flips to Ready
+  // as soon as it can.
+  useEffect(() => {
+    const loadingish = !!connStatus && connStatus.reachable &&
+      (connStatus.loading === true || (connStatus.model_configured && !connStatus.model_found));
+    if (!loadingish) return;
+    const id = window.setTimeout(() => void refreshConnection(), 5000);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connStatus]);
+
+  // One-off notices ("Conversation renamed", an audio hint, ...) settle back
+  // after a few seconds so the footer returns to the app's real state.
+  // Running actions (texts ending in "...") stay until their code clears them.
+  useEffect(() => {
+    if (status === "Online" || status.endsWith("...")) return;
+    const shown = status;
+    const id = window.setTimeout(() => {
+      setStatus((current) => (current === shown ? "Online" : current));
+    }, 8000);
+    return () => window.clearTimeout(id);
+  }, [status]);
 
   async function handleTestConnection() {
     if (connTesting) return;
@@ -460,16 +562,17 @@ export default function App() {
         setDisplayedConvId(convs.active_id);
       }
       setStatus("Online");
+      setBackendDown(false);
+      initState.current = "ok";
       // Startup greeting: fires once now if the model is already servable,
-      // and again (still once per session) the instant it comes up. Silent
-      // on failure - a greeting must never break the app loading.
+      // and again (still once per session) the instant it comes up. Never
+      // an error popup - the footer reports how it went.
       void fireGreeting();
-    } catch (error) {
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "Backend unavailable"
-      );
+    } catch {
+      // The footer says "Backend not running"; the connection probe re-runs
+      // this the moment the backend answers again.
+      initState.current = "failed";
+      setBackendDown(true);
     }
   }
 
@@ -550,6 +653,9 @@ export default function App() {
       });
 
       setStatus("Online");
+      // A real reply proves the line works: an unsettled or failed startup
+      // greeting no longer needs to be reported.
+      settleGreetPhase("done");
       if (reply.speechUrl && await speechReady) {
         void characterRef.current?.playSpeech(reply.speechUrl).catch((error) => {
           setStatus(error instanceof Error ? error.message : "Speech playback failed");
@@ -1091,12 +1197,7 @@ export default function App() {
 
         <footer className="system-footer" role="status" aria-live="polite">
           <span
-            className={
-              connStatus && !connStatus.reachable ? "status-dot offline"
-              : footerStatus === "No API key" ? "status-dot warning"
-              : status === "Online" ? "status-dot online"
-              : "status-dot"
-            }
+            className={`status-dot ${footer.dot}${footer.pulse ? " pulse" : ""}`}
             title={
               connStatus && !connStatus.reachable
                 ? `Model server offline: ${connStatus.address}`
@@ -1107,7 +1208,7 @@ export default function App() {
           />
 
           <span>
-            {footerStatus}
+            {footer.text}
           </span>
         </footer>
       </section>
