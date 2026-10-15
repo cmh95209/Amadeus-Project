@@ -327,6 +327,23 @@ class PresenceTests(_FreshAppTests):
         self.assertEqual(sit["situation"], "return")
         self.assertNotIn("did not write", " ".join(sit["details"]))
 
+    def test_window_back_after_a_night_is_still_a_return(self):
+        # Minimised overnight; the window comes back into view at 09:00
+        # (its first ping), and a tab switch follows a moment later: the
+        # arrival's own ping must not hide the night.
+        self.talked_last_night()
+        self.memory.record_presence(now=at(2026, 10, 14, 23, 40))
+        self.memory.record_presence(now=at(2026, 10, 15, 9, 0))
+        sit = self.memory.compute_greeting_situation(
+            self.conv, now=at(2026, 10, 15, 9, 1), switch=True)
+        self.assertEqual(sit["situation"], "return")
+        self.assertIn("last night", sit["truth_line"])
+        # ...but after a few minutes back, they are simply here.
+        self.memory.record_presence(now=at(2026, 10, 15, 9, 5))
+        sit = self.memory.compute_greeting_situation(
+            self.conv, now=at(2026, 10, 15, 9, 6), switch=True)
+        self.assertEqual(sit["situation"], "continuous")
+
     # --- the routes -------------------------------------------------------
     def test_greet_route_records_the_visit_after_measuring(self):
         from unittest.mock import patch

@@ -323,6 +323,21 @@ export async function getGreeting(justSaved = false): Promise<GreetingReply> {
   return fetchGreetingReport(`${API_BASE}/greet`, justSaved ? { just_saved: true } : {});
 }
 
+// "I'm here": the window is visible. Feeds her "last seen" (a greeting
+// never mistakes a quiet visit for an absence). Fire-and-forget: a failed
+// ping is simply skipped.
+export async function sendPresence(conversationId?: number | null): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(typeof conversationId === "number" ? { conversation_id: conversationId } : {}),
+    });
+  } catch {
+    // The backend may be down; the next ping tries again.
+  }
+}
+
 // A new version of her latest greeting, written for the same moment. Errors
 // (not her latest line, scripted, model down) throw with a plain message.
 export async function regenerateGreeting(messageId: number): Promise<GreetingReply> {

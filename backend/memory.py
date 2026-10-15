@@ -795,6 +795,11 @@ GREETING_PRESENCE_WINDOW = 2 * 3600
 # never handed two times to compare.
 VISIT_MERGE_SECONDS = 10 * 60
 VISITS_KEEP = 200
+# A visit that started this recently is the ARRIVAL happening right now (the
+# window just came back into view, or the app just opened): a greeting
+# measures from the visit BEFORE it - otherwise "here just now" would hide
+# an overnight absence behind the arrival's own first ping.
+VISIT_ARRIVAL_SECONDS = 2 * 60
 _VISIT_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -849,7 +854,8 @@ def record_presence(conversation_id: int | None = None,
         conn.close()
 
 
-def load_last_seen(before: datetime | None = None) -> datetime | None:
+def load_last_seen(before: datetime | None = None,
+                   now: datetime | None = None) -> datetime | None:
     """When the user was last seen in the app (newest visit ping), or None
     when no visit is recorded (older installs: the greeting then measures
     from messages only, exactly as before). before (greeting regenerate)
@@ -867,12 +873,16 @@ def load_last_seen(before: datetime | None = None) -> datetime | None:
         conn.close()
     best = None
     cap = before.astimezone() if before is not None else None
-    for started_at, last_seen_at in rows:
+    now_local = (now or datetime.now().astimezone()).astimezone()
+    for index, (started_at, last_seen_at) in enumerate(rows):
         try:
             started = datetime.fromisoformat(started_at).astimezone()
             seen = datetime.fromisoformat(last_seen_at).astimezone()
         except (TypeError, ValueError):
             continue
+        if (cap is None and index == 0
+                and (now_local - started).total_seconds() < VISIT_ARRIVAL_SECONDS):
+            continue  # the arrival happening right now
         if cap is not None:
             if started >= cap:
                 continue
@@ -1057,7 +1067,7 @@ def compute_greeting_situation(conversation_id: int,
     # regenerate: only what was known when the original line was spoken.
     out["last_seen"] = None
     try:
-        seen_time = load_last_seen(presence_before)
+        seen_time = load_last_seen(presence_before, now_local)
     except Exception:
         seen_time = None
     if seen_time is not None and seen_time <= now_local + timedelta(minutes=1):

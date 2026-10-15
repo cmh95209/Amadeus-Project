@@ -28,6 +28,7 @@ import {
   undoLastReply,
   regenerate,
   regenerateGreeting,
+  sendPresence,
   activateReplyVersion,
   regenerateMessageVoice,
   getVoiceRetention,
@@ -495,6 +496,26 @@ export default function App() {
       void refreshConversations();
     }, 30000);
     return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // "Last seen" presence: ping every 5 minutes while the window is visible,
+  // and the moment it comes back into view. The app-open itself is recorded
+  // by the greeting request (after it measured the previous visit); a
+  // refresh that already greeted this session pings right away instead.
+  useEffect(() => {
+    const ping = () => {
+      if (document.visibilityState === "visible") {
+        void sendPresence(displayedConvIdRef.current);
+      }
+    };
+    if (greetedThisSession.current) ping();
+    const id = window.setInterval(ping, 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", ping);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", ping);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
