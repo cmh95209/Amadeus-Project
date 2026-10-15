@@ -79,5 +79,41 @@ class SwitchGreetingPreviousTabTests(_FreshAppTests):
         self.assertIn("good night!", summary["last_message"])
 
 
+class ReturnWelcomeBackTests(_FreshAppTests):
+    """Fix 2: absence wording is true on a genuine return."""
+
+    @staticmethod
+    def sit(situation, phrase=None):
+        last = ({"phrase": phrase, "time": None, "conversation_id": 1,
+                 "title": "T"} if phrase else None)
+        return {"situation": situation, "unanswered_fresh": False,
+                "last_contact": last}
+
+    def test_absence_wording_passes_on_a_return(self):
+        sit = self.sit("return", phrase="a couple of days ago")
+        for eng, ja in (
+            ("Long time no see.", "久しぶり。"),
+            ("It's been a while, huh.", "久しぶりだね。"),
+            ("Since we last talked, I read three papers.", ""),
+            ("Haven't heard from you, so I wondered.", "連絡がなかったから。"),
+        ):
+            with self.subTest(eng=eng, ja=ja):
+                self.assertIsNone(
+                    self.chat._greeting_time_lie_check(sit, eng, ja))
+
+    def test_overstated_gap_is_still_caught_on_a_return(self):
+        sit = self.sit("return", phrase="two days ago")
+        self.assertIsNotNone(self.chat._greeting_time_lie_check(
+            sit, "Long time no see - it's been a week!", "久しぶり、一週間ぶりだね。"))
+        self.assertIsNotNone(self.chat._greeting_time_lie_check(
+            sit, "", "久しぶり。何ヶ月ぶり?"))
+
+    def test_absence_wording_is_still_a_lie_when_never_away(self):
+        for situation in ("continuous", "first", "unanswered", "unknown"):
+            with self.subTest(situation=situation):
+                self.assertIsNotNone(self.chat._greeting_time_lie_check(
+                    self.sit(situation), "", "久しぶり。"))
+
+
 if __name__ == "__main__":
     unittest.main()

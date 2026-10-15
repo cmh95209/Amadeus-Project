@@ -2388,12 +2388,16 @@ def _greeting_time_lie_check(situation: dict, eng: str, ja: str) -> str | None:
     stated buckets) so it can only reject a real lie, never a mood."""
     sit = situation.get("situation")
     eng_l = (eng or "").lower()
-    for pat in _GREETING_ABSENCE_EN:
-        if re.search(pat, eng_l):
-            return f"EN absence construction matched /{pat}/"
-    for pat in _GREETING_ABSENCE_JA:
-        if pat in (ja or ""):
-            return f"JA absence phrase matched {pat!r}"
+    # On a genuine return the user WAS away, so absence wording ("久しぶり",
+    # "it's been a while") is true - only an overstated gap is a lie there
+    # (2026-10-15 fix: the natural Japanese welcome-back was being bounced).
+    if sit != "return":
+        for pat in _GREETING_ABSENCE_EN:
+            if re.search(pat, eng_l):
+                return f"EN absence construction matched /{pat}/"
+        for pat in _GREETING_ABSENCE_JA:
+            if pat in (ja or ""):
+                return f"JA absence phrase matched {pat!r}"
     if sit == "unanswered" and situation.get("unanswered_fresh") \
             and "welcome back" in eng_l:
         return "EN 'welcome back' on a greeting the user never left"
