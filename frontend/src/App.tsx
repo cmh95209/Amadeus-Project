@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
+import { placeGreeting } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
 import {
   API_BASE,
@@ -151,6 +152,11 @@ export default function App() {
   const modelWasFound = useRef<boolean | null>(null);
   const greetingInFlight = useRef<boolean>(false);
   const switchGreetingInFlight = useRef<boolean>(false);
+  // Bumped on every message the user sends. A greeting compares it before
+  // and after its request: a change means the user spoke while she was
+  // writing, so a late line is slotted above their message and stays quiet
+  // (her reply to them speaks instead).
+  const userSpokeSeq = useRef<number>(0);
   // First-launch ceremony (the backend /greet drives it): where she stands
   // per the last /greet report - null until the first report, "intro" /
   // "connecting" while she is still coming online, "done" when the
@@ -292,9 +298,17 @@ export default function App() {
     if (greetingInFlight.current || greetedThisSession.current) return;
     if (loading) return; // do not interrupt an in-flight turn
     greetingInFlight.current = true;
+    const spokeBefore = userSpokeSeq.current;
     try {
       const g = await getGreeting(justSaved);
       if (g.ceremony) setCeremonyState(g.ceremony); // gate + note follow this
+      if (g.superseded) {
+        // The user spoke while she was writing: the backend dropped the
+        // line, and the conversation is already going - no re-fire.
+        greetedThisSession.current = true;
+        sessionStorage.setItem("amadeusGreeted", "1");
+        return;
+      }
       const line = g.response;
       if (!line) return; // nothing to say this probe; it re-fires
       // The ceremony wait-lines (intro / trying / reminder) are spoken but
@@ -312,15 +326,16 @@ export default function App() {
         greetedThisSession.current = true;
         sessionStorage.setItem("amadeusGreeted", "1");
       }
-      setMessages((current) => [
-        ...current,
-        { role: "assistant", content: line, id: g.assistantId, is_greeting: true },
-      ]);
+      setMessages((current) => placeGreeting(current,
+        { role: "assistant", content: line, id: g.assistantId, is_greeting: true }));
+      if (g.speechUrl) rememberVoiceLine(g.assistantId); // the Replay button
+      // The user spoke while she was writing: the line is shown (above
+      // their message) but not voiced - her reply to them speaks instead.
+      if (userSpokeSeq.current !== spokeBefore) return;
       // She animates even when the browser blocks audio on a fresh load.
       characterRef.current?.playMotion("TapReaction");
       if (g.speechUrl) {
         void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
-        rememberVoiceLine(g.assistantId); // surfaces the existing Replay button
       }
     } catch {
       // A greeting failure is silent by design - never shown as an error.
@@ -339,19 +354,20 @@ export default function App() {
   async function fireSwitchGreeting(convId: number, previousId: number | null) {
     if (switchGreetingInFlight.current || loading) return;
     switchGreetingInFlight.current = true;
+    const spokeBefore = userSpokeSeq.current;
     try {
       const g = await getConversationGreeting(convId, previousId);
-      if (!g.ready || !g.response) return; // gated or model not up: no line
+      // Gated, model not up, or the user spoke first (superseded): no line.
+      if (!g.ready || !g.response) return;
       if (displayedConvIdRef.current !== convId) return; // tab moved on; drop
       const line = g.response;
-      setMessages((current) => [
-        ...current,
-        { role: "assistant", content: line, id: g.assistantId, is_greeting: true },
-      ]);
+      setMessages((current) => placeGreeting(current,
+        { role: "assistant", content: line, id: g.assistantId, is_greeting: true }));
+      if (g.speechUrl) rememberVoiceLine(g.assistantId);
+      if (userSpokeSeq.current !== spokeBefore) return; // her reply speaks
       characterRef.current?.playMotion("TapReaction");
       if (g.speechUrl) {
         void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
-        rememberVoiceLine(g.assistantId);
       }
     } catch {
       // A switch-greeting failure is silent by design - never breaks the switch.
@@ -484,6 +500,7 @@ export default function App() {
       () => false
     );
 
+    userSpokeSeq.current += 1;
     setMessages((current) => [
       ...current,
       {

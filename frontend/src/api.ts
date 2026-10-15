@@ -243,6 +243,9 @@ export type GreetingReply = {
    *  (ceremony wait-lines that do NOT finish the ceremony), "wake" |
    *  "fallback" (ceremony finished), or absent (ordinary greeting). */
   kind?: string;
+  /** True when the user sent a message while the greeting was being
+   *  written: the backend dropped the line (not an error, no retry). */
+  superseded?: boolean;
 };
 
 async function fetchGreetingReport(
@@ -270,7 +273,12 @@ async function fetchGreetingReport(
       (kind === "intro" || kind === "trying" || kind === "reminder") &&
       typeof data.response === "string";
     if (!isWaitLine) {
-      return { ready: false, reason: typeof data.reason === "string" ? data.reason : undefined, ceremony };
+      return {
+        ready: false,
+        reason: typeof data.reason === "string" ? data.reason : undefined,
+        ceremony,
+        superseded: data.superseded === true,
+      };
     }
     return {
       ready: false,

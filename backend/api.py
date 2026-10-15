@@ -18,6 +18,7 @@ from chat import (
     reset_llm,
     AmadeusPack,
     _store_greeting_line,
+    GreetingSuperseded,
 )
 
 import ceremony
@@ -988,6 +989,12 @@ def greet():
                         "ceremony": memory.CEREMONY_DONE})
     try:
         pack, assistant_id, conv_id = generate_greeting()
+    except GreetingSuperseded:
+        # The user spoke first while the line was being written: no line,
+        # not an error - the conversation is already going.
+        return jsonify({"ready": False, "reason": "user spoke first",
+                        "superseded": True,
+                        "ceremony": memory.CEREMONY_DONE})
     except Exception as exc:
         print("[Flask] Greeting failure:", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
@@ -1054,6 +1061,9 @@ def greet_conversation(conversation_id):
         pack, assistant_id, conv_id = generate_greeting(
             mode="switch", conversation_id=conversation_id,
             previous_conversation_id=previous_id)
+    except GreetingSuperseded:
+        return jsonify({"ready": False, "reason": "user spoke first",
+                        "superseded": True})
     except Exception as exc:
         print("[Flask] Switch-greeting failure:", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502

@@ -2272,8 +2272,15 @@ _PACK_RULES_JA_ONLY = {
 }
 
 
+class GreetingSuperseded(Exception):
+    """The user sent a message in the greeted tab while the greeting was
+    being written: the line is dropped (never stored) - the conversation
+    has already moved on, and her reply to the user takes its place."""
+
+
 def _store_greeting_line(pack: "AmadeusPack",
-                         conversation_id: int | None = None) -> tuple[int, int]:
+                         conversation_id: int | None = None,
+                         after_user_id: int | None = None) -> tuple[int, int]:
     """Persist a greeting as a normal assistant message.
 
     There is no user turn to remove on failure - her line simply never
@@ -2283,10 +2290,21 @@ def _store_greeting_line(pack: "AmadeusPack",
     line instead of a version of a neighboring reply. conversation_id pins
     the row to the tab the line was written for (None = the active tab);
     a generated greeting always passes it, because the user may switch
-    tabs while it is being written.
+    tabs while it is being written. after_user_id (the tab's newest user
+    message id when the greeting started) makes the save conditional: if
+    the user has spoken there since, nothing is stored and
+    GreetingSuperseded is raised.
     Returns (assistant_id, conversation_id)."""
     if conversation_id is None:
         conversation_id = store.load_active_conversation()
+    if after_user_id is not None:
+        assistant_id = store.append_greeting_if_quiet(
+            conversation_id, pack.assistant_reply_ENG,
+            pack.assistant_reply_JPS, after_user_id)
+        if assistant_id is None:
+            raise GreetingSuperseded(
+                "the user spoke first - greeting dropped")
+        return assistant_id, int(conversation_id)
     assistant_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, conversation_id=conversation_id,
         japanese=pack.assistant_reply_JPS, is_greeting=True
@@ -2529,6 +2547,16 @@ def generate_greeting(mode: str = "startup",
     # use THIS tab, even if the user switches tabs while the line is being
     # written (2026-10-15 fix - the line used to land in whichever tab was
     # active when generation finished).
+    # "User spoke first" baseline: if a user message lands in this tab while
+    # the line is being written, the greeting is dropped at save time
+    # (GreetingSuperseded). The wake-up is exempt - the chat box is locked
+    # until it lands, and the ceremony must always finish.
+    after_user_id = None
+    if not wake:
+        try:
+            after_user_id = store.latest_user_message_id(conversation_id)
+        except Exception:
+            after_user_id = None
     # The ONE situation the code measured for this tab (first / unanswered /
     # continuous / return / unknown). The timing block carries its truth
     # line (load_internal_context) and the time-lie net below checks the
@@ -2709,7 +2737,12 @@ def generate_greeting(mode: str = "startup",
                                  if corrected is not None
                                  else "correction failed"))
                 pack = _greeting_fallback_pack(situation)
-    assistant_id, conv_id = _store_greeting_line(pack, conversation_id)
+    try:
+        assistant_id, conv_id = _store_greeting_line(
+            pack, conversation_id, after_user_id=after_user_id)
+    except GreetingSuperseded:
+        print("[Amadeus] Greeting dropped - the user spoke first.")
+        raise
     print("[Amadeus] Greeting generated and stored (assistant id %d)." % assistant_id)
     return pack, assistant_id, conv_id
 

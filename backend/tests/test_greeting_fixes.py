@@ -261,5 +261,101 @@ class GreetingPinnedToItsTabTests(_FreshAppTests):
         self.assertNotIn("ALPHA-ONLY-LINE", text)
 
 
+class _UserSpeaksLLM:
+    """A fake model during whose 'writing' the user sends a message in the
+    greeted tab (the race fix 5 handles)."""
+
+    def __init__(self, memory, conversation_id, speak=True):
+        self.memory = memory
+        self.conversation_id = conversation_id
+        self.speak = speak
+
+    def bind_tools(self, tools, tool_choice=None):
+        return self
+
+    def invoke(self, messages):
+        if self.speak:
+            self.memory.append_message("user", "hey, quick question",
+                                       conversation_id=self.conversation_id)
+            self.speak = False
+        return SimpleNamespace(
+            content="", tool_call_chunks=None,
+            tool_calls=[{"name": "AmadeusPack", "args": {
+                "assistant_reply_JPS": "あら、来たのね。",
+                "assistant_reply_ENG": "Oh, you're here."}}])
+
+
+class UserSpokeFirstTests(GreetingPinnedToItsTabTests):
+    """Fix 5: a greeting the user already spoke past is dropped, never
+    stored; one that finished first is kept (above their message)."""
+
+    # Inherit the harness, not the fix-3 tests.
+    test_switch_greeting_lands_in_its_tab_when_user_hops_on = None
+    test_startup_greeting_reads_and_stores_the_tab_active_at_start = None
+    test_history_comes_from_the_greeted_tab_not_the_active_one = None
+    test_switch_route_no_longer_changes_the_active_tab = None
+    test_switch_route_unknown_tab_is_404 = None
+    test_build_prompt_messages_default_is_still_the_active_tab = None
+
+    def test_startup_greeting_dropped_when_user_spoke_first(self):
+        self.memory.set_active_conversation(self.tab_a)
+        fake = _UserSpeaksLLM(self.memory, self.tab_a)
+        with self.assertRaises(self.chat.GreetingSuperseded):
+            self.run_greeting(fake)
+        self.assertEqual(self.greeting_rows(), [])
+
+    def test_switch_greeting_dropped_when_user_spoke_first(self):
+        fake = _UserSpeaksLLM(self.memory, self.tab_b)
+        with self.assertRaises(self.chat.GreetingSuperseded):
+            self.run_greeting(fake, mode="switch", conversation_id=self.tab_b)
+        self.assertEqual(self.greeting_rows(), [])
+
+    def test_message_in_another_tab_does_not_drop_it(self):
+        self.memory.set_active_conversation(self.tab_a)
+        fake = _UserSpeaksLLM(self.memory, self.tab_b)
+        self.run_greeting(fake)
+        self.assertEqual(self.greeting_rows(), [("Oh, you're here.", self.tab_a)])
+
+    def test_quiet_greeting_is_stored_as_usual(self):
+        self.memory.set_active_conversation(self.tab_a)
+        self.run_greeting(_UserSpeaksLLM(self.memory, self.tab_a, speak=False))
+        self.assertEqual(self.greeting_rows(), [("Oh, you're here.", self.tab_a)])
+
+    def test_greeting_that_finished_first_stays_above_the_message(self):
+        self.memory.set_active_conversation(self.tab_a)
+        _pack, gid, _cid = self.run_greeting(
+            _UserSpeaksLLM(self.memory, self.tab_a, speak=False))
+        uid = self.memory.append_message("user", "and now me",
+                                         conversation_id=self.tab_a)
+        self.assertLess(gid, uid)
+
+    def test_wake_up_is_never_dropped(self):
+        self.memory.set_active_conversation(self.tab_a)
+        fake = _UserSpeaksLLM(self.memory, self.tab_a)
+        self.run_greeting(fake, mode="wake")
+        self.assertEqual(len(self.greeting_rows()), 1)
+
+    def test_routes_answer_superseded_not_an_error(self):
+        def boom(**kw):
+            raise self.chat.GreetingSuperseded("user spoke first")
+        for path in ("/greet", f"/conversations/{self.tab_b}/greet"):
+            with self.subTest(path=path), self.model(True), patch.object(
+                    self.api, "generate_greeting", side_effect=boom):
+                res = self.client.post(path, json={})
+                self.assertEqual(res.status_code, 200)
+                self.assertIs(res.json["ready"], False)
+                self.assertIs(res.json["superseded"], True)
+
+    def test_append_greeting_if_quiet_directly(self):
+        base = self.memory.latest_user_message_id(self.tab_a)
+        self.assertGreater(base, 0)
+        gid = self.memory.append_greeting_if_quiet(self.tab_a, "hi", "やあ", base)
+        self.assertIsNotNone(gid)
+        self.memory.append_message("user", "new", conversation_id=self.tab_a)
+        self.assertIsNone(self.memory.append_greeting_if_quiet(
+            self.tab_a, "hi again", "また", base))
+        self.assertEqual(self.memory.latest_user_message_id(9999), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

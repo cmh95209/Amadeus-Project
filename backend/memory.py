@@ -2045,6 +2045,59 @@ def append_message(_role: str, _content: str, conversation_id=None, japanese=Non
     return new_id
 
 
+def latest_user_message_id(conversation_id: int) -> int:
+    """Id of the newest user message in a conversation (0 when none).
+    Never modifies memory."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        (newest,) = c.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM messages "
+            "WHERE conversation_id = ? AND role = 'user'",
+            (int(conversation_id),)).fetchone()
+        return int(newest)
+    finally:
+        conn.close()
+
+
+# pre: after_user_id = latest_user_message_id(conversation_id) taken when the
+#      greeting STARTED being written
+# post: the greeting row is stored and its id returned - unless the user has
+#       sent a message in that conversation since then, in which case nothing
+#       is stored and None is returned (the user spoke first; her greeting
+#       would now be out of place). The check and the insert run inside ONE
+#       write transaction (BEGIN IMMEDIATE), so a user message can never slip
+#       in between them.
+def append_greeting_if_quiet(conversation_id: int, content: str,
+                             japanese: str | None,
+                             after_user_id: int) -> int | None:
+    conv = int(conversation_id)
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        c.execute("BEGIN IMMEDIATE")
+        (newest,) = c.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM messages "
+            "WHERE conversation_id = ? AND role = 'user'", (conv,)).fetchone()
+        if int(newest) > int(after_user_id):
+            conn.rollback()
+            return None
+        c.execute(
+            "INSERT INTO messages (role, content, conversation_id, japanese, greeting) "
+            "VALUES ('assistant', ?, ?, ?, 1)", (content, conv, japanese))
+        new_id = c.lastrowid
+        c.execute(
+            "UPDATE conversations SET updated_at = strftime('%Y-%m-%d %H:%M','now','localtime') "
+            "WHERE id = ?", (conv,))
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
 # pre: message_id exists (or not)
 # post: True only when that row was stored as a startup greeting (the
 #       is_greeting flag) - such a row is a standalone turn with no user
