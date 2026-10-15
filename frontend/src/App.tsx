@@ -27,6 +27,7 @@ import {
   deleteMessage,
   undoLastReply,
   regenerate,
+  regenerateGreeting,
   activateReplyVersion,
   regenerateMessageVoice,
   getVoiceRetention,
@@ -382,8 +383,13 @@ export default function App() {
         sessionStorage.setItem("amadeusGreeted", "1");
       }
       settleGreetPhase(ceremonialWait ? "idle" : "done");
-      setMessages((current) => placeGreeting(current,
-        { role: "assistant", content: line, id: g.assistantId, is_greeting: true }));
+      // Scripted first-launch lines (intro / trying / reminder / fallback)
+      // can never be regenerated; ordinary greetings and the wake-up can.
+      const regenerable = g.kind === undefined || g.kind === "wake";
+      setMessages((current) => placeGreeting(current, {
+        role: "assistant", content: line, id: g.assistantId, is_greeting: true,
+        greeting_regenerable: regenerable,
+      }));
       if (g.speechUrl) rememberVoiceLine(g.assistantId); // the Replay button
       // The user spoke while she was writing: the line is shown (above
       // their message) but not voiced - her reply to them speaks instead.
@@ -426,8 +432,10 @@ export default function App() {
       if (!g.ready || !g.response) return;
       if (displayedConvIdRef.current !== convId) return; // tab moved on; drop
       const line = g.response;
-      setMessages((current) => placeGreeting(current,
-        { role: "assistant", content: line, id: g.assistantId, is_greeting: true }));
+      setMessages((current) => placeGreeting(current, {
+        role: "assistant", content: line, id: g.assistantId, is_greeting: true,
+        greeting_regenerable: true,
+      }));
       if (g.speechUrl) rememberVoiceLine(g.assistantId);
       if (userSpokeSeq.current !== spokeBefore) return; // her reply speaks
       characterRef.current?.playMotion("TapReaction");
@@ -1155,6 +1163,33 @@ export default function App() {
     }
   }
 
+  // Her latest greeting, written again for the same moment. The old line is
+  // kept as an earlier version (the version arrows appear after the reload).
+  async function handleRegenerateGreeting(messageId: number) {
+    if (loading) return;
+    characterRef.current?.stopSpeech();
+    const speechReady = characterRef.current?.prepareSpeech().then(
+      () => true,
+      () => false
+    );
+    setLoading(true);
+    setStatus("Amadeus is rethinking her greeting...");
+    try {
+      const g = await regenerateGreeting(messageId);
+      setMessages(await getMemory());
+      setStatus("Online");
+      if (g.ready && g.speechUrl && (await speechReady)) {
+        void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
+        rememberVoiceLine(g.assistantId);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not regenerate her greeting");
+      void refreshConnection();
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <main className="shell">
       {/* Character Panel */}
@@ -1404,9 +1439,22 @@ export default function App() {
                     </>
                   )}
 
-                  {/* A startup greeting has no user message behind it: Regenerate
-                      and Undo are no-ops for it, so the buttons stay hidden (Edit
-                      and Delete still work on the line itself). */}
+                  {/* Her greeting has no user message behind it, so the reply
+                      Regenerate/Undo don't apply. Instead, while it is the very
+                      last line of the chat, it gets its own Regenerate (a new
+                      version for the same moment); no Undo - Delete covers it.
+                      Scripted first-launch lines never get the button. */}
+                  {message.is_greeting && message.greeting_regenerable !== false &&
+                    typeof message.id === "number" &&
+                    index === messages.length - 1 && !loading && (
+                    <button
+                      type="button"
+                      title="Have her greet you again, differently"
+                      onClick={() => void handleRegenerateGreeting(message.id as number)}
+                    >
+                      ↻ Regenerate
+                    </button>
+                  )}
                   {message.role !== "user" && index === lastAssistantIndex && !loading &&
                     !message.is_greeting && (
                     <>

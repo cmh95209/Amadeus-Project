@@ -18,6 +18,9 @@ export type MemoryMessage = {
   active?: boolean;
   version?: number;
   total_versions?: number;
+  /** Greetings only: false for a scripted first-launch line, which can
+   *  never be regenerated. */
+  greeting_regenerable?: boolean;
   version_ids?: number[];
   is_greeting?: boolean;
 };
@@ -318,6 +321,12 @@ export async function getGreeting(justSaved = false): Promise<GreetingReply> {
   // (a fresh attempt: re-say "checking the line", restart its reminder
   // clock) - the 30 s probes send nothing.
   return fetchGreetingReport(`${API_BASE}/greet`, justSaved ? { just_saved: true } : {});
+}
+
+// A new version of her latest greeting, written for the same moment. Errors
+// (not her latest line, scripted, model down) throw with a plain message.
+export async function regenerateGreeting(messageId: number): Promise<GreetingReply> {
+  return fetchGreetingReport(`${API_BASE}/greetings/${messageId}/regenerate`);
 }
 
 // previousId = the tab the user LEFT. The client activates the target tab
