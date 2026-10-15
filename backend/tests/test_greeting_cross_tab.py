@@ -367,7 +367,8 @@ class CrossTabTimingTests(unittest.TestCase):
         self.assertIn("SITUATION:", content)
         self.assertIn("the last time you talked was a few days ago",
                       content)
-        self.assertIn("(2026-09-18 23:30)", content)
+        # 2026-10-15: the finished phrase only - no raw timestamp to interpret.
+        self.assertNotIn("(2026-09-18 23:30)", content)
         self.assertIn('"Goodnight"', content)
         self.assertIn("genuinely away", content)
         # The anchor tab's digest (no rolling summary -> newest user line).

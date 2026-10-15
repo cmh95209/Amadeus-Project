@@ -2372,26 +2372,11 @@ _GREETING_CLAIM_JA = {
 }
 _GREETING_SCALE_ORDER = {"none": 0, "hours": 1, "days": 2,
                          "weeks": 3, "months": 4, "years": 5}
-_GREETING_BUCKET_SCALE = {
-    # Exactly the phrases _gap_phrase can hand out (memory.py) - any phrase
-    # missing here (there should be none) degrades to the "days" bucket.
-    "less than an hour": "hours",
-    "a few hours ago": "hours",
-    "several hours ago": "hours",
-    "about a day ago": "hours",
-    "a day or two ago": "days",
-    "two days ago": "days",
-    "a couple of days ago": "days",
-    "several days ago": "days",
-    "about a week ago": "weeks",
-    "more than a week ago": "weeks",
-    "about two weeks ago": "weeks",
-    "a few weeks ago": "weeks",
-    "about two months ago": "months",
-    "a few months ago": "months",
-    "several months ago": "months",
-    "over a year ago": "years",
-}
+# The time scale of each contact phrase now lives next to the phrase table
+# (memory.CONTACT_PHRASE_SCALE, 2026-10-15): "last night" and same-day
+# wording are hours-scale, so "a day or two" after "last night" is caught.
+# A phrase missing there (there should be none) degrades to "days".
+_GREETING_BUCKET_SCALE = store.CONTACT_PHRASE_SCALE
 
 
 def _claimed_time_scale(eng: str, ja: str) -> str | None:
@@ -2458,12 +2443,12 @@ def _greeting_correction_line(situation: dict) -> str:
     if situation.get("situation") == "return":
         last = situation.get("last_contact") or {}
         phrase = last.get("phrase", "the measured gap")
-        when = last.get("time")
-        when_txt = (f" ({when:%Y-%m-%d %H:%M})" if when is not None else "")
+        # No timestamp (2026-10-15): she gets the finished phrase only - a
+        # raw time to interpret is exactly what made models misstate gaps.
         return (
             "[Correction: your previous line claimed a time gap that does "
-            f"not match the measured one. The measured gap is {phrase}"
-            f"{when_txt}. Rewrite the line naming ONLY that gap, in those "
+            f"not match the measured one. The measured gap is: {phrase}. "
+            "Rewrite the line naming ONLY that gap, in those "
             "words. Do not claim any longer gap.]"
         )
     return (

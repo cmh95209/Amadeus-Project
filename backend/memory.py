@@ -1077,15 +1077,14 @@ def compute_greeting_situation(conversation_id: int,
             if same_tab:
                 out["truth_line"] = (
                     f"SITUATION: the user's last message in this "
-                    f"conversation was {anchor['phrase']} "
-                    f"({anchor['time']:%Y-%m-%d %H:%M}). They were "
+                    f"conversation was {anchor['phrase']}. They were "
                     f"genuinely away. A brief, natural welcome-back is "
                     f"right; use the phrase above as-is, never a "
                     f"different gap.")
             else:
                 out["truth_line"] = (
                     f"SITUATION: the last time you talked was "
-                    f"{anchor['phrase']} ({anchor['time']:%Y-%m-%d %H:%M}), "
+                    f"{anchor['phrase']}, "
                     f"in the conversation \"{anchor['title']}\". They were "
                     f"genuinely away. A brief, natural welcome-back is "
                     f"right; use the phrase above as-is, never a "

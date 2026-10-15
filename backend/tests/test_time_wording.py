@@ -127,5 +127,61 @@ class HistoryTimeNoteTests(_FreshAppTests):
         self.assertTrue(all(isinstance(x, int) for x in (u2, b, u3)))
 
 
+class CalendarTimeCheckTests(_FreshAppTests):
+    """C: the time check knows "last night" is hours-scale."""
+
+    def sit(self, phrase, situation="return"):
+        return {"situation": situation, "unanswered_fresh": False,
+                "last_contact": {"phrase": phrase, "time": at(2026, 10, 14, 23, 29),
+                                 "title": "T", "conversation_id": 1},
+                "truth_line": "SITUATION: ..."}
+
+    def test_reported_line_is_caught(self):
+        sit = self.sit("last night")
+        for eng in ("It's been a day or two, hasn't it?", "It's been a day, huh.",
+                    "Days without you, honestly."):
+            with self.subTest(eng=eng):
+                self.assertIsNotNone(self.chat._greeting_time_lie_check(sit, eng, ""))
+
+    def test_truthful_lines_pass(self):
+        sit = self.sit("last night")
+        for eng in ("Since last night, huh?", "Welcome back. You left late last night.",
+                    "Hm, you're back. How was your day?"):
+            with self.subTest(eng=eng):
+                self.assertIsNone(self.chat._greeting_time_lie_check(sit, eng, ""))
+
+    def test_yesterday_phrases_allow_a_day(self):
+        self.assertIsNone(self.chat._greeting_time_lie_check(
+            self.sit("yesterday afternoon"), "It's been a day, huh.", ""))
+        self.assertIsNotNone(self.chat._greeting_time_lie_check(
+            self.sit("yesterday afternoon"), "It's been a week!", ""))
+
+    def test_every_new_phrase_has_a_known_scale(self):
+        for phrase in ("this morning", "earlier this afternoon", "earlier this evening",
+                       "last night", "yesterday morning", "the day before yesterday",
+                       "a few days ago", "a couple of hours ago", "less than an hour ago"):
+            self.assertIn(phrase, self.chat._GREETING_BUCKET_SCALE)
+
+    def test_correction_and_truth_line_carry_no_raw_time(self):
+        line = self.chat._greeting_correction_line(self.sit("last night"))
+        self.assertIn("last night", line)
+        self.assertNotRegex(line, r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}")
+
+
+class ReturnTruthLineTests(_FreshAppTests):
+    def test_return_situation_line_has_the_phrase_but_no_timestamp(self):
+        import sqlite3
+        conv = self.memory.load_active_conversation()
+        uid = self.memory.append_message("user", "good night", conversation_id=conv)
+        db = sqlite3.connect("data/memory.db")
+        db.execute("UPDATE messages SET created_at = '2026-10-14 23:29' WHERE id = ?", (uid,))
+        db.commit()
+        db.close()
+        sit = self.memory.compute_greeting_situation(conv, now=at(2026, 10, 15, 18, 9))
+        self.assertEqual(sit["situation"], "return")
+        self.assertIn("last night", sit["truth_line"])
+        self.assertNotRegex(sit["truth_line"], r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}")
+
+
 if __name__ == "__main__":
     unittest.main()
