@@ -109,31 +109,45 @@ def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
 
     Works for any local server (Unsloth, Ollama, llama.cpp, LM Studio, vLLM)
     or cloud provider (OpenRouter, OpenAI). Returns:
-    {"reachable": bool, "models": [model ids], "error": str or None}
+    {"reachable": bool, "models": [model ids], "error": str or None,
+     "loading": bool}
+    "loading" is True when the server is up but says it is still loading the
+    model: HTTP 503 (llama.cpp-style servers answer that while loading) or an
+    error reply whose text mentions loading. Servers that load on the first
+    request (Ollama, LM Studio) or are unreachable until ready (vLLM) never
+    report it - the WebUI covers those with timing.
     """
     url = base_url.rstrip("/") + "/models"
     headers = {"Authorization": f"Bearer {(api_key or '').strip() or 'unsloth'}"}
     try:
         response = requests.get(url, headers=headers, timeout=timeout)
     except Exception as exc:
-        return {"reachable": False, "models": [],
+        return {"reachable": False, "models": [], "loading": False,
                 "error": f"{type(exc).__name__}: {exc}"}
     if response.status_code == 401 or response.status_code == 403:
-        return {"reachable": True, "models": [],
+        return {"reachable": True, "models": [], "loading": False,
                 "error": f"Server is running but rejected the API key (HTTP {response.status_code})"}
     if response.status_code >= 400:
-        return {"reachable": True, "models": [],
+        try:
+            body_text = (response.text or "")[:500].lower()
+        except Exception:
+            body_text = ""
+        if response.status_code == 503 or "loading" in body_text:
+            return {"reachable": True, "models": [], "loading": True,
+                    "error": "Server is still loading the model"}
+        return {"reachable": True, "models": [], "loading": False,
                 "error": f"Server responded with HTTP {response.status_code}"}
     try:
         data = response.json()
     except ValueError:
-        return {"reachable": True, "models": [], "error": "Server reply was not JSON"}
+        return {"reachable": True, "models": [], "loading": False,
+                "error": "Server reply was not JSON"}
     models = []
     for item in (data.get("data") if isinstance(data, dict) else None) or []:
         mid = item.get("id") if isinstance(item, dict) else None
         if isinstance(mid, str):
             models.append(mid)
-    return {"reachable": True, "models": models, "error": None}
+    return {"reachable": True, "models": models, "loading": False, "error": None}
 
 
 def _effective_sampling(base_url: str, enable_thinking: bool):

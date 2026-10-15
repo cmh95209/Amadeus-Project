@@ -27,6 +27,8 @@ import memory
 import stats
 
 from tts import streamVoiceChunks, renderVoiceToPath
+import tts as tts_module
+import requests
 
 import chat
 import json
@@ -713,13 +715,28 @@ def test_connection():
         "address": address,
         "configured": bool(configured),
         "reachable": probe["reachable"],
+        "loading": bool(probe.get("loading")),
         "models": probe["models"],
         "configured_model": model_name,
         "model_configured": model_configured,
         "model_found": model_found,
         "batch_warning": batch_warning,
         "error": probe["error"],
+        "voice_reachable": _voice_engine_reachable(),
     })
+
+
+def _voice_engine_reachable(timeout: float = 2.0) -> bool:
+    """Is the voice engine (GPT-SoVITS) answering at all? Any HTTP reply
+    counts - its root path is not a real endpoint, so a 404 still means
+    "up". Read-only, never generates speech; feeds the footer's
+    "voice offline" note."""
+    url = getattr(tts_module, "GPTSOVITS_API_URL", "http://127.0.0.1:9880")
+    try:
+        requests.get(url, timeout=timeout)
+        return True
+    except Exception:
+        return False
 
 
 # pre: relpath points inside the backend folder (generated/ or assets/)

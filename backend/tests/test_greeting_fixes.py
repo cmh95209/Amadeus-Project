@@ -186,6 +186,81 @@ class DayWordingTests(_FreshAppTests):
             sit, "It's been two days, huh.", ""))
 
 
+class ModelLoadingDetectionTests(unittest.TestCase):
+    """Fix 7: the server probe reports "still loading the model"."""
+
+    def setUp(self):
+        backend = str(Path(__file__).resolve().parents[1])
+        if backend not in sys.path:
+            sys.path.insert(0, backend)
+        sys.modules.pop("llm", None)
+        import llm  # the real module (other suites stub it)
+        self.llm = llm
+        self.addCleanup(sys.modules.pop, "llm", None)
+
+    def probe(self, status, text="", json_body=None):
+        def fake_get(*a, **k):
+            resp = SimpleNamespace(status_code=status, text=text)
+            resp.json = (lambda: json_body) if json_body is not None else (
+                lambda: (_ for _ in ()).throw(ValueError("no json")))
+            return resp
+        with patch.object(self.llm.requests, "get", side_effect=fake_get):
+            return self.llm.test_server("http://127.0.0.1:8080/v1")
+
+    def test_503_means_loading(self):
+        res = self.probe(503, '{"error":{"message":"Loading model"}}')
+        self.assertTrue(res["reachable"])
+        self.assertTrue(res["loading"])
+
+    def test_error_text_mentioning_loading_means_loading(self):
+        self.assertTrue(self.probe(500, "model is loading, try later")["loading"])
+
+    def test_other_errors_are_not_loading(self):
+        self.assertFalse(self.probe(500, "internal error")["loading"])
+        self.assertFalse(self.probe(401, "nope")["loading"])
+
+    def test_healthy_server_is_not_loading(self):
+        res = self.probe(200, json_body={"data": [{"id": "m1"}]})
+        self.assertEqual(res["models"], ["m1"])
+        self.assertFalse(res["loading"])
+
+    def test_unreachable_is_not_loading(self):
+        with patch.object(self.llm.requests, "get",
+                          side_effect=ConnectionError("refused")):
+            res = self.llm.test_server("http://127.0.0.1:9/v1")
+        self.assertFalse(res["reachable"])
+        self.assertFalse(res["loading"])
+
+
+class ConnectionReportTests(_FreshAppTests):
+    """Fix 7: /testConnection carries the loading flag and the voice check."""
+
+    def report(self, probe, voice):
+        with patch.object(self.api.llm, "test_server", return_value=probe), \
+             patch.object(self.api, "_voice_engine_reachable",
+                          return_value=voice):
+            return self.client.get("/testConnection").json
+
+    def test_loading_and_voice_fields(self):
+        body = self.report({"reachable": True, "models": [], "loading": True,
+                            "error": "Server is still loading the model"},
+                           voice=False)
+        self.assertIs(body["loading"], True)
+        self.assertIs(body["voice_reachable"], False)
+        body = self.report({"reachable": True, "models": [], "error": None},
+                           voice=True)
+        self.assertIs(body["loading"], False)  # old probe shape: no key
+        self.assertIs(body["voice_reachable"], True)
+
+    def test_voice_probe_any_http_reply_counts_as_up(self):
+        with patch.object(self.api.requests, "get",
+                          return_value=SimpleNamespace(status_code=404)):
+            self.assertTrue(self.api._voice_engine_reachable())
+        with patch.object(self.api.requests, "get",
+                          side_effect=ConnectionError("refused")):
+            self.assertFalse(self.api._voice_engine_reachable())
+
+
 class _SwitchingLLM:
     """A fake model that, while 'writing' the line, lets the user switch to
     another tab (the race fix 3 closes). Records the prompt it was given."""
