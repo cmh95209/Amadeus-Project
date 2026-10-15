@@ -245,14 +245,14 @@ export type GreetingReply = {
   kind?: string;
 };
 
-async function fetchGreetingReport(path: string, justSaved = false): Promise<GreetingReply> {
+async function fetchGreetingReport(
+  path: string,
+  body: Record<string, unknown> = {},
+): Promise<GreetingReply> {
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // just_saved tells the backend the user JUST saved connection settings
-    // (a fresh attempt: re-say "checking the line", restart its reminder
-    // clock) - the 30 s probes send nothing.
-    body: JSON.stringify(justSaved ? { just_saved: true } : {}),
+    body: JSON.stringify(body),
   });
   const data = await parseResponse(response);
   if (typeof data.ready !== "boolean") {
@@ -306,11 +306,22 @@ async function fetchGreetingReport(path: string, justSaved = false): Promise<Gre
 }
 
 export async function getGreeting(justSaved = false): Promise<GreetingReply> {
-  return fetchGreetingReport(`${API_BASE}/greet`, justSaved);
+  // just_saved tells the backend the user JUST saved connection settings
+  // (a fresh attempt: re-say "checking the line", restart its reminder
+  // clock) - the 30 s probes send nothing.
+  return fetchGreetingReport(`${API_BASE}/greet`, justSaved ? { just_saved: true } : {});
 }
 
-export async function getConversationGreeting(id: number): Promise<GreetingReply> {
-  return fetchGreetingReport(`${API_BASE}/conversations/${id}/greet`);
+// previousId = the tab the user LEFT. The client activates the target tab
+// before asking for the greeting, so the backend can no longer see it.
+export async function getConversationGreeting(
+  id: number,
+  previousId?: number | null,
+): Promise<GreetingReply> {
+  return fetchGreetingReport(
+    `${API_BASE}/conversations/${id}/greet`,
+    typeof previousId === "number" ? { previous_id: previousId } : {},
+  );
 }
 
 

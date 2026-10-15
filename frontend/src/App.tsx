@@ -329,16 +329,18 @@ export default function App() {
     }
   }
 
-  // A switch greeting is aimed at one tab: fired only when the target
-  // clears the backend gates (stale enough + cooldown), stored as its own
-  // greeting line in that tab, and silent on failure (a tab switch must
-  // never break). The is_greeting flag already gives it its own line in the
-  // UI (no version arrows, Regenerate/Undo hidden).
-  async function fireSwitchGreeting(convId: number) {
+  // A switch greeting is aimed at one tab: fired on every switch (no
+  // cooldown), stored as its own greeting line in THAT tab (even if the
+  // user hops on before it lands - it then shows on return), and silent on
+  // failure (a tab switch must never break). previousId is the tab the user
+  // left, so she can name the topic change. The is_greeting flag already
+  // gives it its own line in the UI (no version arrows, Regenerate/Undo
+  // hidden).
+  async function fireSwitchGreeting(convId: number, previousId: number | null) {
     if (switchGreetingInFlight.current || loading) return;
     switchGreetingInFlight.current = true;
     try {
-      const g = await getConversationGreeting(convId);
+      const g = await getConversationGreeting(convId, previousId);
       if (!g.ready || !g.response) return; // gated or model not up: no line
       if (displayedConvIdRef.current !== convId) return; // tab moved on; drop
       const line = g.response;
@@ -815,6 +817,9 @@ export default function App() {
 
   async function switchConversation(id: number) {
     if (id === activeConvId || sessionsBusy || loading) return;
+    // Captured BEFORE the switch: once the target is activated the backend
+    // can no longer tell which tab the user came from.
+    const previousId = activeConvId;
     characterRef.current?.stopSpeech();
     setSessionsBusy(true);
     setStatus("Switching conversation...");
@@ -826,7 +831,7 @@ export default function App() {
       setDisplayedConvId(id);
       setStatus("Online");
       void refreshConversations();
-      void fireSwitchGreeting(id);
+      void fireSwitchGreeting(id, previousId);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not switch conversations");
     } finally {

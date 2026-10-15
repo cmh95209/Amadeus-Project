@@ -1027,13 +1027,21 @@ def greet_conversation(conversation_id):
                         "ceremony": ceremony_state})
     if not has_api_key():
         return jsonify({"message": "No API key. Add one in Settings."}), 400
-    # Capture the tab the user LEFT before activating the target - the
-    # topic-switch line names it. A failed read is non-fatal (None -> the
-    # line simply can't name the previous tab).
-    try:
-        previous_id = memory.load_active_conversation()
-    except Exception:
-        previous_id = None
+    # The tab the user LEFT - the topic-switch line names it. The client
+    # activates the target BEFORE asking for this greeting, so it sends the
+    # previous tab as {"previous_id": n}; the active tab is only a fallback
+    # for older clients (and is the target itself after a client-side
+    # switch, which load_previous_tab_summary drops). Missing / invalid /
+    # unknown -> None: the line simply can't name the previous tab.
+    body = request.get_json(silent=True)
+    raw_previous = body.get("previous_id") if isinstance(body, dict) else None
+    if isinstance(raw_previous, int) and not isinstance(raw_previous, bool):
+        previous_id = raw_previous
+    else:
+        try:
+            previous_id = memory.load_active_conversation()
+        except Exception:
+            previous_id = None
     try:
         memory.set_active_conversation(conversation_id)
     except ValueError:
