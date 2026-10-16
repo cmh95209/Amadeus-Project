@@ -145,6 +145,13 @@ class TtsHookTests(unittest.TestCase):
             payload = tts._request_payload("Alex、気温は23.5℃よ。")
         self.assertEqual(payload["text"], "アレックス、気温は23点5度よ。")
 
+    def test_payload_uses_the_steadier_voice_settings(self):
+        # Setting "B", picked by ear 2026-10-16; the seed stays random.
+        with mock.patch.object(tts, "REF_WAV", self.ref):
+            payload = tts._request_payload("こんにちは。")
+        self.assertEqual((payload["temperature"], payload["top_k"]), (0.7, 10))
+        self.assertEqual(payload["seed"], -1)
+
     def test_rewrite_error_falls_back_to_raw_text(self):
         def boom(*args):
             raise RuntimeError("bug")

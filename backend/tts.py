@@ -55,6 +55,11 @@ def _request_payload(text: str) -> dict:
         "speed_factor": 1.0,
         "fragment_interval": 0.15,
         "seed": -1,
+        # Steadier delivery (picked by ear 2026-10-16, setting "B"): the
+        # engine defaults (temperature 1, top_k 15) let short lines swing
+        # muted or high-pitched between takes. Still random per line.
+        "temperature": 0.7,
+        "top_k": 10,
         "media_type": "wav",
         "parallel_infer": True,
         "repetition_penalty": 1.35,
