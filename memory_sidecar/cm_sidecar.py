@@ -70,9 +70,27 @@ sys.path.insert(0, os.path.join(HERE, "lib"))   # vendored character_memory 0.1.
 # Detached-process home defaults (WORKING_BRIEF 2026-09-30 gotcha b):
 # processes spawned outside a full user session lack USERPROFILE/HOME, which
 # breaks sentence-transformers' cache resolution.
-os.environ.setdefault("USERPROFILE", r"C:\Users\user")
-os.environ.setdefault("HOME", r"C:\Users\user")
-os.environ.setdefault("LOCALAPPDATA", r"C:\Users\user\AppData\Local")
+# The fallback home is worked out for whoever runs it - never a fixed path.
+def _fallback_home() -> str:
+    for var in ("USERPROFILE", "HOME"):
+        if os.environ.get(var):
+            return os.environ[var]
+    if os.environ.get("HOMEDRIVE") and os.environ.get("HOMEPATH"):
+        return os.environ["HOMEDRIVE"] + os.environ["HOMEPATH"]
+    if os.environ.get("USERNAME"):
+        return os.path.join(os.environ.get("SystemDrive", "C:") + os.sep,
+                            "Users", os.environ["USERNAME"])
+    # Last resort: the profile folder this project was installed under.
+    parts = os.path.abspath(HERE).split(os.sep)
+    if len(parts) > 2 and parts[1].lower() == "users":
+        return os.sep.join(parts[:3])
+    return os.path.expanduser("~")
+
+
+_HOME = _fallback_home()
+os.environ.setdefault("USERPROFILE", _HOME)
+os.environ.setdefault("HOME", _HOME)
+os.environ.setdefault("LOCALAPPDATA", os.path.join(_HOME, "AppData", "Local"))
 # Low-RAM machines (e.g. the 18 GB test sandbox): the math libraries
 # (OpenBLAS/OMP/MKL, used by numpy + the in-process embedder) default to one
 # thread PER CPU CORE, and the per-thread buffers exhaust memory while the
