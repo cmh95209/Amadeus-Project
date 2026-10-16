@@ -10,7 +10,8 @@ no network:
   1. the weather / time / date / money examples from the listening test;
   2. the engine-specific fixes (no commas, no decimal points, 零時);
   3. text that must stay untouched (no digits, numbers glued to English);
-  4. tts._request_payload sends the rewritten text, and a rewriting error
+  4. layer 2: the saved name is spoken from its kana reading;
+  5. tts._request_payload sends the rewritten text, and a rewriting error
      falls back to the raw text instead of silencing her.
 """
 import sys
@@ -91,20 +92,61 @@ class UntouchedTextTests(unittest.TestCase):
                 self.assertEqual(to_spoken(text), text)
 
 
+class NameReadingTests(unittest.TestCase):
+    """Layer 2: the user's saved name is spoken from its kana reading."""
+
+    def test_latin_name_is_swapped_as_a_whole_word(self):
+        self.assertEqual(to_spoken("Alex、おかえり。Alexさんは元気?", "Alex", "アレックス"),
+                         "アレックス、おかえり。アレックスさんは元気?")
+        self.assertEqual(to_spoken("ALEXはどう?", "Alex", "アレックス"), "アレックスはどう?")
+        # A longer word that merely contains the name is left alone.
+        self.assertEqual(to_spoken("Alexanderの話", "Alex", "アレックス"), "Alexanderの話")
+
+    def test_name_and_numbers_together(self):
+        self.assertEqual(to_spoken("Alex、14:30に来て。", "Alex", "アレックス"),
+                         "アレックス、14時30分に来て。")
+
+    def test_no_reading_or_no_name_changes_nothing(self):
+        self.assertEqual(to_spoken("Alex、おかえり。", "Alex", ""), "Alex、おかえり。")
+        self.assertEqual(to_spoken("Alex、おかえり。", "", "アレックス"), "Alex、おかえり。")
+
+    def test_kanji_name_is_swapped_too(self):
+        self.assertEqual(to_spoken("健、おかえり。", "健", "アレックス"), "アレックス、おかえり。")
+
+    def test_rule_reading(self):
+        self.assertEqual(speech_text.rule_reading("JD"), "ジェーディー")
+        self.assertEqual(speech_text.rule_reading("アレックス"), "アレックス")
+        self.assertEqual(speech_text.rule_reading("ほん"), "ほん")
+        for needs_model in ("Alex", "Alex", "健", "", "M"):
+            with self.subTest(name=needs_model):
+                self.assertEqual(speech_text.rule_reading(needs_model), "")
+
+    def test_is_kana(self):
+        self.assertTrue(speech_text.is_kana("アレックス"))
+        self.assertTrue(speech_text.is_kana("アレックス・アレックス"))
+        for bad in ("", "Alex", "アレックスAlex", "健", "アレックス。"):
+            with self.subTest(text=bad):
+                self.assertFalse(speech_text.is_kana(bad))
+
+
 class TtsHookTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp.close()
         self.ref = Path(tmp.name)
         self.addCleanup(self.ref.unlink)
+        # Never read the live app's saved name from a test.
+        patcher = mock.patch.object(tts, "_saved_name", return_value=("Alex", "アレックス"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_payload_carries_the_spoken_form(self):
         with mock.patch.object(tts, "REF_WAV", self.ref):
-            payload = tts._request_payload("気温は23.5℃よ。")
-        self.assertEqual(payload["text"], "気温は23点5度よ。")
+            payload = tts._request_payload("Alex、気温は23.5℃よ。")
+        self.assertEqual(payload["text"], "アレックス、気温は23点5度よ。")
 
     def test_rewrite_error_falls_back_to_raw_text(self):
-        def boom(text):
+        def boom(*args):
             raise RuntimeError("bug")
         with mock.patch.object(tts, "REF_WAV", self.ref), \
                 mock.patch.object(tts, "to_spoken", boom):

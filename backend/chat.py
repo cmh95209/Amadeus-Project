@@ -12,6 +12,7 @@ import concurrent.futures
 from datetime import datetime
 import stats
 import ja_voice
+import speech_text
 import webfetch
 import weather
 import cm_bridge
@@ -2552,6 +2553,9 @@ def generate_greeting(mode: str = "startup",
         # instruction and the arrival line change.
         username = store.load_username().strip()
         if username:
+            reading = store.load_username_reading()
+            if reading:
+                username += f" (written {reading} in Japanese)"
             instruction = {
                 "role": WAKE_INSTRUCTION_NAMED["role"],
                 "content": WAKE_INSTRUCTION_NAMED["content"].replace(
@@ -3616,6 +3620,39 @@ def voice_line_for_edit(english_reply: str, previous_user) -> str:
     if not _has_japanese(jps):
         raise ValueError("model returned no Japanese")
     return jps
+
+
+_NAME_READING_TIMEOUT_S = 30
+
+
+def suggest_name_reading(name: str) -> str:
+    """A kana reading for the user's saved name, for the voice ("Alex" ->
+    アレックス). Initials and kana names need no model call (speech_text.
+    rule_reading); anything else costs ONE short call, made only when the
+    user saves the name. Returns '' when the model is unreachable or answers
+    with anything but kana - the user can then type the reading."""
+    rule = speech_text.rule_reading(name)
+    if rule or not (name or "").strip():
+        return rule
+    def _ask():
+        llm = get_llm(API_KEY, LLM_Model)
+        return llm.invoke([{"role": "user", "content": (
+            "How is this person's name written in Japanese katakana, as it "
+            "is actually pronounced (for a voice to say it)? Output ONLY the "
+            "katakana, nothing else.\n\nName: " + name.strip()[:60])}])
+    # The client's own timeout is a long generation ceiling; a Settings box
+    # must not wait that long, so the call is capped here.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        reply = pool.submit(_ask).result(timeout=_NAME_READING_TIMEOUT_S)
+        content = reply.content if isinstance(reply.content, str) else str(reply.content)
+        reading = _strip_thinking(content).strip().strip("\"'「」『』。").strip()
+    except Exception as e:
+        print("[Amadeus] Name reading suggestion failed:", repr(e))
+        return ""
+    finally:
+        pool.shutdown(wait=False)
+    return reading if speech_text.is_kana(reading) and len(reading) <= 20 else ""
 
 
 def backfill_japanese_voice() -> None:

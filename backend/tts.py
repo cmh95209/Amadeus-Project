@@ -20,11 +20,20 @@ STREAMING_MODE = int(os.getenv("GPTSOVITS_STREAMING_MODE", "1"))
 _speech_lock = threading.Lock()
 
 
+def _saved_name():
+    """(name, reading) from Settings; read per line so a change applies at
+    once. Imported lazily: memory pulls in the whole data layer."""
+    import memory
+    return memory.load_username(), memory.load_username_reading()
+
+
 def _spoken(text: str) -> str:
-    """Numbers -> kana so the engine never reads them in English (speech_text).
-    A rewriting bug must never silence her: fall back to the text as-is."""
+    """The user's name and numbers -> the forms the engine reads in Japanese
+    (speech_text). A rewriting bug must never silence her: fall back to the
+    text as-is."""
     try:
-        return to_spoken(text)
+        name, reading = _saved_name()
+        return to_spoken(text, name, reading)
     except Exception as exc:
         print(f"[AmadeusSpeak] to_spoken failed, speaking raw text: {exc!r}")
         return text

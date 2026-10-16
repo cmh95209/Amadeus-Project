@@ -625,22 +625,40 @@ export async function setLLMServer(address: string): Promise<string> {
   return typeof data.address === "string" ? data.address : address;
 }
 
-/** What the user goes by ("" = not set). Personal, like the other
- *  connection settings. */
-export async function getUsername(): Promise<string> {
-  const data = await parseResponse(await fetch(`${API_BASE}/getUsername`, { cache: "no-store" }));
-  return typeof data.username === "string" ? data.username : "";
+/** What the user goes by and how she SAYS it (kana reading for her voice;
+ *  "" = not set). Personal, like the other connection settings. */
+export type UsernameInfo = { name: string; reading: string };
+
+function usernameInfo(data: Record<string, unknown>, fallback: UsernameInfo): UsernameInfo {
+  return {
+    name: typeof data.username === "string" ? data.username : fallback.name,
+    reading: typeof data.reading === "string" ? data.reading : fallback.reading,
+  };
 }
 
-export async function setUsername(name: string): Promise<string> {
+export async function getUsername(): Promise<UsernameInfo> {
+  const data = await parseResponse(await fetch(`${API_BASE}/getUsername`, { cache: "no-store" }));
+  return usernameInfo(data, { name: "", reading: "" });
+}
+
+export async function setUsername(name: string, reading: string): Promise<UsernameInfo> {
   const data = await parseResponse(
     await fetch(`${API_BASE}/setUsername`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: name }),
+      body: JSON.stringify({ username: name, reading }),
     })
   );
-  return typeof data.username === "string" ? data.username : name;
+  return usernameInfo(data, { name, reading });
+}
+
+/** Ask the backend to fill in a reading for the saved name when it has
+ *  none ("" = it could not make one; the user can type it). */
+export async function suggestUsernameReading(): Promise<string> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/suggestUsernameReading`, { method: "POST" })
+  );
+  return typeof data.reading === "string" ? data.reading : "";
 }
 
 export async function testConnection(): Promise<ConnectionStatus> {

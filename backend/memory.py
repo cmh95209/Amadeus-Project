@@ -211,6 +211,30 @@ def save_username(name: str) -> str:
     return clean
 
 
+# How she SAYS the user's name (2026-10-16, voice layer 2): a kana reading
+# ("Alex" -> アレックス) saved next to the name. The voice engine reads a Latin
+# name with its English model; with a reading set she writes it in her
+# Japanese line and the TTS rewriter swaps any leftover Latin spelling for it
+# (speech_text.to_spoken). Empty = not set: behaviour as before.
+PATH_TO_USERNAME_READING = os.path.join(DATA_DIR, "username_reading.txt")
+
+
+def load_username_reading() -> str:
+    try:
+        with open(PATH_TO_USERNAME_READING, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_username_reading(reading: str) -> str:
+    """Persist the spoken reading of the user's name; '' clears it."""
+    clean = (reading or "").strip()
+    with open(PATH_TO_USERNAME_READING, "w", encoding="utf-8") as f:
+        f.write(clean)
+    return clean
+
+
 # ---------- CEREMONY STATE (NO SQL) ----------
 # Where the first-launch ceremony (ceremony.py) stands on THIS machine: one
 # line, "intro" (she introduced herself; the brain is not connected yet),
@@ -1538,10 +1562,13 @@ def load_internal_context(now: datetime | None = None, is_greeting=False,
     # pre-feature behaviour.
     username = load_username().strip()
     if username:
+        reading = load_username_reading()
         cross_lines.append(
             f"- The user goes by {username} (the name they saved in the "
             "settings). Address them by it naturally; it outranks any "
             "other name they may have mentioned."
+            + (f" In your Japanese line, write their name as {reading}."
+               if reading else "")
         )
     cross_block = (
 "\n".join(cross_lines) + "\n") if cross_lines else ""

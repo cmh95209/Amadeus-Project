@@ -39,6 +39,7 @@ import {
   setLLMServer,
   getUsername,
   setUsername,
+  suggestUsernameReading,
   testConnection,
   ConnectionStatus,
   Conversation,
@@ -94,6 +95,7 @@ export default function App() {
   const [contextBudget, setContextBudgetState] = useState<number>(40000);
   const [serverAddress, setServerAddressState] = useState<string>("");
   const [userName, setUserName] = useState("");
+  const [userNameReading, setUserNameReading] = useState("");
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -571,7 +573,7 @@ export default function App() {
           getVoiceRetention().catch(() => 100),
           getContextBudget().catch(() => 40000),
           getLLMServer().catch(() => ""),
-          getUsername().catch(() => ""),
+          getUsername().catch(() => ({ name: "", reading: "" })),
         ]);
 
       setMessages(memory);
@@ -582,7 +584,8 @@ export default function App() {
       setVoiceRetentionState(voiceCap);
       setContextBudgetState(budgetCap);
       setServerAddressState(serverAddr);
-      setUserName(savedName);
+      setUserName(savedName.name);
+      setUserNameReading(savedName.reading);
       if (convs) {
         setConversations(convs.conversations);
         setActiveConvId(convs.active_id);
@@ -764,11 +767,20 @@ export default function App() {
         setApiKeyInput("");
       }
       await setModel(nextModel);
-      await setUsername(userName);
+      const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
       await setContextBudget(contextBudget);
       await setLLMServer(serverAddress);
       void refreshConnection();
+      // A name with no reading yet: let the backend suggest how she says it
+      // (one short model call). Never overwrites what the user typed meanwhile.
+      if (savedName.name && !savedName.reading) {
+        void suggestUsernameReading()
+          .then((reading) => {
+            if (reading) setUserNameReading((current) => current || reading);
+          })
+          .catch(() => undefined);
+      }
       // The connection settings were JUST saved: during the first-launch
       // ceremony this is a fresh attempt - ask the backend to re-check the
       // line at once (she re-says "checking the line" / wakes up if the
@@ -1745,7 +1757,11 @@ export default function App() {
                 <input
                   value={userName}
                   disabled={settingsBusy}
-                  onChange={(event) => setUserName(event.target.value)}
+                  onChange={(event) => {
+                    setUserName(event.target.value);
+                    // The reading belonged to the old name.
+                    setUserNameReading("");
+                  }}
                   placeholder="what she should call you (optional)"
                   autoComplete="off"
                   spellCheck={false}
@@ -1755,6 +1771,25 @@ export default function App() {
               <p className="settings-help" id="your-name-help">
                 Optional. If you give her a name, she calls you by it. Leave
                 blank to clear it.
+              </p>
+
+              <label>
+                How she says it
+                <input
+                  value={userNameReading}
+                  disabled={settingsBusy || !userName.trim()}
+                  onChange={(event) => setUserNameReading(event.target.value)}
+                  placeholder={userName.trim() ? "suggested when you save (katakana)" : "set your name first"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  lang="ja"
+                  aria-describedby="name-reading-help"
+                />
+              </label>
+              <p className="settings-help" id="name-reading-help">
+                Her voice speaks Japanese, so your name is said from this
+                katakana (e.g. Alex → アレックス). Filled in for you when you save;
+                change it if it sounds wrong.
               </p>
 
               {connStatus && connStatus.reachable && connStatus.models.length > 0 && (

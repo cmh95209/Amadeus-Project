@@ -688,23 +688,53 @@ def set_llm_server():
 #       one from conversation, but the Settings value always outranks it)
 @application.route("/getUsername", methods=["GET"])
 def get_username():
-    response = jsonify({"username": memory.load_username()})
+    response = jsonify({"username": memory.load_username(),
+                        "reading": memory.load_username_reading()})
     response.headers["Cache-Control"] = "no-store"
     return response
 
 
-# pre: JSON body contains "username" (a string; '' clears the name)
+# pre: JSON body contains "username" (a string; '' clears the name) and
+#      optionally "reading" (how she says it, kana; '' clears it)
 # post: the name is persisted (data/username.txt, personal - never in git)
 #       and takes effect in the prompt from the next turn on (replies AND
-#       greetings)
+#       greetings). The reading (data/username_reading.txt) is saved when
+#       given; when it is NOT given and the name changed, the old reading
+#       belonged to the old name and is cleared.
 @application.route("/setUsername", methods=["POST"])
 def set_username():
     data = request.get_json(silent=True)
     name = data.get("username") if isinstance(data, dict) else None
     if not isinstance(name, str):
         return jsonify({"message": "Missing 'username' field"}), 400
+    reading = data.get("reading")
+    if reading is not None and not isinstance(reading, str):
+        return jsonify({"message": "'reading' must be a string"}), 400
+    previous = memory.load_username()
     saved = memory.save_username(name)
-    return jsonify({"status": "ok", "username": saved})
+    if reading is not None:
+        saved_reading = memory.save_username_reading(reading)
+    elif saved != previous:
+        saved_reading = memory.save_username_reading("")
+    else:
+        saved_reading = memory.load_username_reading()
+    return jsonify({"status": "ok", "username": saved, "reading": saved_reading})
+
+
+# pre: none (works on the saved name)
+# post: when a name is saved but has no reading yet, one is suggested
+#       (rule for initials/kana, else ONE short model call, capped at 30 s)
+#       and saved; returns the reading ('' = none could be made - the user
+#       can type it). An existing reading is returned untouched.
+@application.route("/suggestUsernameReading", methods=["POST"])
+def suggest_username_reading():
+    name = memory.load_username()
+    reading = memory.load_username_reading()
+    if name and not reading:
+        reading = chat.suggest_name_reading(name)
+        if reading:
+            memory.save_username_reading(reading)
+    return jsonify({"status": "ok", "username": name, "reading": reading})
 
 
 def _model_in_list(model_name: str, server_models: list[str]) -> bool:

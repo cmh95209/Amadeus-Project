@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Spoken-form rewriting for the voice (GPT-SoVITS) - layer 1: numbers.
+"""Spoken-form rewriting for the voice (GPT-SoVITS).
+
+Layer 1 = numbers (below). Layer 2 = the user's name: its saved kana reading
+replaces the Latin spelling (see to_spoken / rule_reading).
+
 
 GPT-SoVITS splits each line by language before speaking and reads Japanese
 through pyopenjtalk. Numbers trip it up in ways that sound English or broken:
@@ -125,14 +129,59 @@ def _normalize(text: str) -> str:
     return t
 
 
-def to_spoken(text: str) -> str:
-    """Rewrite numbers (with units, times, dates) into the notation the voice
-    engine reads naturally. Text with no digits comes back unchanged."""
+# --- layer 2: the user's name ------------------------------------------------
+_LETTERS = {
+    "A": "エー", "B": "ビー", "C": "シー", "D": "ディー", "E": "イー", "F": "エフ",
+    "G": "ジー", "H": "エイチ", "I": "アイ", "J": "ジェー", "K": "ケー", "L": "エル",
+    "M": "エム", "N": "エヌ", "O": "オー", "P": "ピー", "Q": "キュー", "R": "アール",
+    "S": "エス", "T": "ティー", "U": "ユー", "V": "ブイ", "W": "ダブリュー",
+    "X": "エックス", "Y": "ワイ", "Z": "ゼット",
+}
+_KANA_ONLY = re.compile(r"[ぁ-ゖァ-ヺー・ 　]+")
+
+
+def is_kana(text: str) -> bool:
+    """True for a non-empty run of hiragana/katakana (a usable reading)."""
+    return bool(text) and bool(_KANA_ONLY.fullmatch(text.strip()))
+
+
+def spell_letters(text: str) -> str:
+    """'JD' -> 'ジェーディー': Latin letters said one by one, Japanese style."""
+    return "".join(_LETTERS.get(c.upper(), c) for c in text if not c.isspace())
+
+
+def rule_reading(name: str) -> str:
+    """A reading that needs no model call, or '' when one is needed:
+    a kana name is its own reading; ALL-CAPS initials (2-4 letters) are
+    spelled out. Everything else ('Alex', 'Alex', kanji) needs the model."""
+    name = (name or "").strip()
+    if is_kana(name):
+        return name
+    if re.fullmatch(r"[A-Z]{2,4}", name):
+        return spell_letters(name)
+    return ""
+
+
+def _swap_name(text: str, name: str, reading: str) -> str:
+    """Replace the user's name, as a whole word, with its spoken reading."""
+    if not name or not reading or name == reading:
+        return text
+    if re.fullmatch(r"[A-Za-z][A-Za-z .'-]*", name):
+        pattern = r"(?<![A-Za-z])" + re.escape(name) + r"(?![A-Za-z])"
+        return re.sub(pattern, reading, text, flags=re.IGNORECASE)
+    return text.replace(name, reading)
+
+
+def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
+    """Rewrite text into the form the voice engine reads naturally:
+    the user's name -> its saved reading, then numbers (with units, times,
+    dates). Text with nothing to rewrite comes back unchanged."""
     if not text:
         return text
-    t = _normalize(text)
+    swapped = _swap_name(text, name, name_reading)
+    t = _normalize(swapped)
     if not re.search(r"\d", t):
-        return text
+        return swapped
     t = t.replace("PM2.5", PM25_SPOKEN)
     t = _sub(_ISO_DATE, _iso_date, t)
     t = _sub(_PHONE, _phone, t)
