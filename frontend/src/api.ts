@@ -652,6 +652,47 @@ export async function setUsername(name: string, reading: string): Promise<Userna
   return usernameInfo(data, { name, reading });
 }
 
+/** The user's pronouns ("" = not set) and what she calls them ("auto" =
+ *  let her decide from trust, "san"/"kun"/"chan"/"none"/"senpai"/"sama",
+ *  or "custom:<text>"). */
+export type UserProfile = { pronouns: string; address: string };
+
+function userProfile(data: Record<string, unknown>, fallback: UserProfile): UserProfile {
+  return {
+    pronouns: typeof data.pronouns === "string" ? data.pronouns : fallback.pronouns,
+    address: typeof data.address === "string" ? data.address : fallback.address,
+  };
+}
+
+export async function getUserProfile(): Promise<UserProfile> {
+  const data = await parseResponse(await fetch(`${API_BASE}/getUserProfile`, { cache: "no-store" }));
+  return userProfile(data, { pronouns: "", address: "auto" });
+}
+
+export async function setUserProfile(profile: UserProfile): Promise<UserProfile> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/setUserProfile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(profile),
+    })
+  );
+  return userProfile(data, profile);
+}
+
+/** A suggested reading for a name as typed (not saved yet); saves nothing.
+ *  "" = no reading could be made. Used by the Settings "Suggest" button. */
+export async function suggestNameReading(name: string): Promise<string> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/suggestNameReading`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    })
+  );
+  return typeof data.reading === "string" ? data.reading : "";
+}
+
 /** Ask the backend to fill in a reading for the saved name when it has
  *  none ("" = it could not make one; the user can type it). */
 export async function suggestUsernameReading(): Promise<string> {

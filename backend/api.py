@@ -737,6 +737,57 @@ def suggest_username_reading():
     return jsonify({"status": "ok", "username": name, "reading": reading})
 
 
+# pre: JSON body contains "name" (the name as typed in Settings - it need
+#      not be saved yet)
+# post: returns a suggested reading for it ('' = none could be made); saves
+#       NOTHING - the Settings "Suggest" button fills the box and Save then
+#       stores it (so Save makes no model call of its own). Initials / kana
+#       need no model call; otherwise one short call, capped at 30 s.
+@application.route("/suggestNameReading", methods=["POST"])
+def suggest_name_reading():
+    data = request.get_json(silent=True)
+    name = data.get("name") if isinstance(data, dict) else None
+    if not isinstance(name, str):
+        return jsonify({"message": "Missing 'name' field"}), 400
+    name = name.strip()
+    reading = chat.suggest_name_reading(name) if name else ""
+    return jsonify({"status": "ok", "name": name, "reading": reading})
+
+
+# pre: none
+# post: returns the user's pronouns ('' = not set) and what she calls them
+#       ('auto' = let her decide from the trust tier, a key of
+#       memory.ADDRESS_FORMS, or 'custom:<text>')
+@application.route("/getUserProfile", methods=["GET"])
+def get_user_profile():
+    response = jsonify({"pronouns": memory.load_pronouns(),
+                        "address": memory.load_address()})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# pre: JSON body with "pronouns" and/or "address" (strings; '' clears the
+#      pronouns, anything unknown for address means 'auto')
+# post: the given fields are persisted (data/user_pronouns.txt,
+#       data/user_address.txt - personal, never in git); her prompt uses
+#       them from the next turn on. The CharacterMemory sidecar reads the
+#       pronouns when it starts.
+@application.route("/setUserProfile", methods=["POST"])
+def set_user_profile():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not ({"pronouns", "address"} & data.keys()):
+        return jsonify({"message": "Send 'pronouns' and/or 'address'"}), 400
+    for field in ("pronouns", "address"):
+        if field in data and not isinstance(data[field], str):
+            return jsonify({"message": f"'{field}' must be a string"}), 400
+    if "pronouns" in data:
+        memory.save_pronouns(data["pronouns"])
+    if "address" in data:
+        memory.save_address(data["address"])
+    return jsonify({"status": "ok", "pronouns": memory.load_pronouns(),
+                    "address": memory.load_address()})
+
+
 def _model_in_list(model_name: str, server_models: list[str]) -> bool:
     """Does the configured model match anything the server advertises?
 

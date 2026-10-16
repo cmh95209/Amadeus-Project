@@ -779,7 +779,8 @@ def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
             "role": "user",
             "content": (
                 "Translate the following Japanese into natural spoken English. "
-                "Output ONLY the English text - no quotes, no commentary.\n\n"
+                "Output ONLY the English text - no quotes, no commentary.\n"
+                + "".join(h + "\n" for h in _user_hint_lines()) + "\n"
                 + (pack.assistant_reply_JPS or eng)[:1500]
             ),
         }])
@@ -917,7 +918,8 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
                 "role": "user",
                 "content": (
                     "Translate the following Japanese into natural spoken English. "
-                    "Output ONLY the English text - no quotes, no commentary.\n\n"
+                    "Output ONLY the English text - no quotes, no commentary.\n"
+                    + "".join(h + "\n" for h in _user_hint_lines()) + "\n"
                     + text[:1500]
                 ),
             }])
@@ -3273,6 +3275,30 @@ def _is_verbatim_echo(text: str, source: str, threshold: float = 0.9) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
 
+def _user_hint_lines() -> list:
+    """Who the user is, for prompts that turn her Japanese into English:
+    the saved name (her line spells it in kana - アレックス - so a translator
+    would otherwise romanize it as "Hon"), its Japanese ending kept as
+    "Alex-kun" (user decision 2026-10-16), and their pronouns. [] when
+    nothing is set."""
+    lines = []
+    try:
+        name = store.load_username().strip()
+        if name:
+            reading = store.load_username_reading()
+            lines.append(
+                f"The user's name is {name}"
+                + (f" (written {reading} in Japanese)" if reading else "")
+                + f". Write it as {name} in English and keep any Japanese "
+                f"ending she adds ({name}-kun, {name}-san, {name}-chan).")
+        pronouns = store.pronoun_sentence()
+        if pronouns:
+            lines.append(pronouns)
+    except Exception as exc:
+        print("[Amadeus] User hints skipped:", repr(exc))
+    return lines
+
+
 def _translate_reply_en(llm, jps: str, context_lines) -> str:
     """Voice-first call 2: the English display line for the Japanese line call
     1 already spoke. One short, fast call (JA line + a few context lines, not
@@ -3287,7 +3313,7 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
         "one of Amadeus's replies. Translate her Japanese line into natural, "
         "spoken English in her voice - keep her tone and meaning exactly. "
         "Output ONLY the English text - no quotes, no Japanese, no commentary.",
-    ]
+    ] + _user_hint_lines()
     for line in context_lines or ():
         if line and line.strip():
             lines.append(line.strip()[:300])
@@ -3717,6 +3743,9 @@ def _merge_summary_llm(current_summary: str, new_exchange: str) -> str:
         "uses; plain prose, no headers, no quotes. Output ONLY the updated "
         "summary, under 350 words."
     )
+    pronouns = store.pronoun_sentence()
+    if pronouns:
+        prompt += " " + pronouns + " Use them when the summary refers to the user."
     reply = llm.invoke([{"role": "user", "content": prompt}])
     content = reply.content if isinstance(reply.content, str) else str(reply.content)
     text = _strip_thinking(content).strip().strip(chr(34)).strip()

@@ -153,7 +153,7 @@ def spell_letters(text: str) -> str:
 def rule_reading(name: str) -> str:
     """A reading that needs no model call, or '' when one is needed:
     a kana name is its own reading; ALL-CAPS initials (2-4 letters) are
-    spelled out. Everything else ('Alex', 'Alex', kanji) needs the model."""
+    spelled out. Everything else ('Alex', 'Sam', kanji) needs the model."""
     name = (name or "").strip()
     if is_kana(name):
         return name

@@ -106,6 +106,63 @@ def load_voice_block() -> str:
     return DEFAULT_VOICE_BLOCK
 
 
+# What she calls the user when the Settings say "let her decide"
+# (2026-10-16, user-approved table): the forms each closeness tier allows,
+# by the user's pronouns - he/him (m), she/her (f), anything else or unset
+# (n: never the gendered くん/ちゃん). "" = the bare name (呼び捨て).
+_TIER_FORMS = {
+    "Distant":    {"m": ["さん"], "f": ["さん"], "n": ["さん"]},
+    "Cautious":   {"m": ["さん"], "f": ["さん"], "n": ["さん"]},
+    "Warming up": {"m": ["さん", "くん"], "f": ["さん", "ちゃん"], "n": ["さん"]},
+    "Familiar":   {"m": ["くん", ""], "f": ["ちゃん", ""], "n": [""]},
+    "Close":      {"m": [""], "f": [""], "n": [""]},
+}
+_TEASING_FORM = {"m": "くん", "f": "ちゃん"}
+
+
+def _pronoun_group(pronouns: str) -> str:
+    p = (pronouns or "").strip().lower()
+    if p.startswith("she"):
+        return "f"
+    if p.startswith("he"):
+        return "m"
+    return "n"
+
+
+def address_rule(tier: str) -> str:
+    """The 'how to address the user' line for her voice block; '' when no
+    name is saved (nothing to address them by)."""
+    import memory
+    name = memory.load_username().strip()
+    if not name:
+        return ""
+    jname = memory.load_username_reading() or name
+    setting = memory.load_address()
+    if setting.startswith("custom:"):
+        return ("ADDRESSING THE USER: always call them "
+                f"{setting[len('custom:'):]} - the user chose this. "
+                "Use the name only where it is natural, not in every sentence.")
+    if setting in memory.ADDRESS_FORMS:
+        form = jname + memory.ADDRESS_FORMS[setting]
+        return (f"ADDRESSING THE USER: always call them {form} - the user "
+                "chose this; do not use any other ending. Use the name only "
+                "where it is natural, not in every sentence.")
+    group = _pronoun_group(memory.load_pronouns())
+    forms = _TIER_FORMS.get(tier, _TIER_FORMS["Warming up"])[group]
+    allowed = " / ".join(jname + f for f in forms)
+    rule = (f"ADDRESSING THE USER: their name in Japanese is {jname}. At this "
+            f"closeness tier you may call them: {allowed}. Pick one and stay "
+            "consistent with how you addressed them in your recent lines; move "
+            "to a new form only when this list offers one you have not used "
+            "yet - and if you do, you may note it once, lightly. Never use a "
+            "form that is not on this list. Use the name only where it is "
+            "natural, not in every sentence.")
+    if tier == "Close" and group in _TEASING_FORM:
+        rule += (f" Only when teasing them, {jname}{_TEASING_FORM[group]} "
+                 "is fine.")
+    return rule
+
+
 def build_voice_context(trust_value) -> dict:
     """System message that governs assistant_reply_JPS for the next reply."""
     block = load_voice_block()
@@ -113,4 +170,11 @@ def build_voice_context(trust_value) -> dict:
     head = ("VOICE / 声 (this block governs assistant_reply_JPS only): ")
     head += "Current closeness tier: " + tier + " trust " + str(int(trust_value)) + " out of 100."
     head += chr(10) + "Use the register of that tier, and follow the anti-caricature tsundere rules."
+    try:
+        rule = address_rule(tier)
+    except Exception as exc:  # a settings hiccup must never block a reply
+        print("[Amadeus] Address rule skipped:", repr(exc))
+        rule = ""
+    if rule:
+        head += chr(10) + rule
     return {"role": "system", "content": head + chr(10) + chr(10) + block}

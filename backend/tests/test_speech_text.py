@@ -117,13 +117,13 @@ class NameReadingTests(unittest.TestCase):
         self.assertEqual(speech_text.rule_reading("JD"), "ジェーディー")
         self.assertEqual(speech_text.rule_reading("アレックス"), "アレックス")
         self.assertEqual(speech_text.rule_reading("ほん"), "ほん")
-        for needs_model in ("Alex", "Alex", "健", "", "M"):
+        for needs_model in ("Alex", "Sam", "健", "", "M"):
             with self.subTest(name=needs_model):
                 self.assertEqual(speech_text.rule_reading(needs_model), "")
 
     def test_is_kana(self):
         self.assertTrue(speech_text.is_kana("アレックス"))
-        self.assertTrue(speech_text.is_kana("アレックス・アレックス"))
+        self.assertTrue(speech_text.is_kana("アレックス・サム"))
         for bad in ("", "Alex", "アレックスAlex", "健", "アレックス。"):
             with self.subTest(text=bad):
                 self.assertFalse(speech_text.is_kana(bad))

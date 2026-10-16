@@ -235,6 +235,69 @@ def save_username_reading(reading: str) -> str:
     return clean
 
 
+# The user's pronouns and what she calls them (2026-10-16, both optional,
+# set in Settings). Pronouns ('' = not set; "he/him", "she/her",
+# "they/them" or any custom text) reach every place a model writes ABOUT
+# the user in the third person: her prompt, the rolling summary, the English
+# translation and the CharacterMemory extractor. The address setting is a
+# key of ADDRESS_FORMS, or "custom:<text>"; '' / "auto" = let her decide
+# from the trust tier (ja_voice.address_rule).
+PATH_TO_PRONOUNS = os.path.join(DATA_DIR, "user_pronouns.txt")
+PATH_TO_ADDRESS = os.path.join(DATA_DIR, "user_address.txt")
+# key -> the ending she adds to the user's name ("" = the bare name)
+ADDRESS_FORMS = {"san": "さん", "kun": "くん", "chan": "ちゃん", "none": "",
+                 "senpai": "先輩", "sama": "様"}
+_CUSTOM_PREFIX = "custom:"
+
+
+def load_pronouns() -> str:
+    try:
+        with open(PATH_TO_PRONOUNS, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_pronouns(pronouns: str) -> str:
+    """Persist the user's pronouns; '' clears them. Capped: free text."""
+    clean = " ".join((pronouns or "").split())[:40]
+    with open(PATH_TO_PRONOUNS, "w", encoding="utf-8") as f:
+        f.write(clean)
+    return clean
+
+
+def load_address() -> str:
+    """'auto' (let her decide), a key of ADDRESS_FORMS, or 'custom:<text>'."""
+    try:
+        with open(PATH_TO_ADDRESS, "r", encoding="utf-8") as f:
+            value = f.read().strip()
+    except OSError:
+        return "auto"
+    if value in ADDRESS_FORMS or (value.startswith(_CUSTOM_PREFIX)
+                                  and value[len(_CUSTOM_PREFIX):].strip()):
+        return value
+    return "auto"
+
+
+def save_address(value: str) -> str:
+    """Persist what she calls the user; anything unknown means 'auto'."""
+    value = (value or "").strip()
+    if value.startswith(_CUSTOM_PREFIX):
+        text = " ".join(value[len(_CUSTOM_PREFIX):].split())[:30]
+        value = _CUSTOM_PREFIX + text if text else "auto"
+    elif value not in ADDRESS_FORMS:
+        value = "auto"
+    with open(PATH_TO_ADDRESS, "w", encoding="utf-8") as f:
+        f.write(value)
+    return value
+
+
+def pronoun_sentence() -> str:
+    """'The user uses she/her pronouns.' - '' when not set."""
+    pronouns = load_pronouns()
+    return f"The user uses {pronouns} pronouns." if pronouns else ""
+
+
 # ---------- CEREMONY STATE (NO SQL) ----------
 # Where the first-launch ceremony (ceremony.py) stands on THIS machine: one
 # line, "intro" (she introduced herself; the brain is not connected yet),
@@ -1569,6 +1632,16 @@ def load_internal_context(now: datetime | None = None, is_greeting=False,
             "other name they may have mentioned."
             + (f" In your Japanese line, write their name as {reading}."
                if reading else "")
+            + (" If you add a Japanese ending to their name (さん, くん, "
+               "ちゃん, 先輩...), keep it in the English line too "
+               f"({username}-kun, {username}-san); no ending = just "
+               f"{username}.")
+        )
+    pronouns = pronoun_sentence()
+    if pronouns:
+        cross_lines.append(
+            f"- {pronouns} Use them whenever you refer to the user in the "
+            "third person (for example in the English line)."
         )
     cross_block = (
 "\n".join(cross_lines) + "\n") if cross_lines else ""

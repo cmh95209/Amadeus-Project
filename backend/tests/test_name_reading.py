@@ -61,7 +61,7 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(res.status_code, 400)
 
 
-class SuggestTests(_FreshAppTests):
+class _SuggestHelpers:
     def _fake(self, answer=None, error=None):
         calls = []
 
@@ -76,6 +76,8 @@ class SuggestTests(_FreshAppTests):
         with patch.object(self.chat, "get_llm", return_value=fake):
             return self.client.post("/suggestUsernameReading").json["reading"]
 
+
+class SuggestTests(_SuggestHelpers, _FreshAppTests):
     def test_model_reading_is_saved(self):
         self.memory.save_username("Alex")
         fake, calls = self._fake("「アレックス」")
@@ -108,6 +110,43 @@ class SuggestTests(_FreshAppTests):
     def test_no_name_does_nothing(self):
         fake, calls = self._fake("アレックス")
         self.assertEqual(self._suggest(fake), "")
+        self.assertEqual(calls, [])
+
+
+class SuggestButtonTests(_SuggestHelpers, _FreshAppTests):
+    """The Settings "Suggest" button: a reading for the name AS TYPED, saved
+    nowhere; once Save stores it, the save-time suggestion makes no call."""
+
+    def _button(self, fake, body):
+        with patch.object(self.chat, "get_llm", return_value=fake):
+            return self.client.post("/suggestNameReading", json=body)
+
+    def test_suggests_for_an_unsaved_name_without_saving(self):
+        fake, calls = self._fake("アレックス")
+        res = self._button(fake, {"name": " Alex "})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["reading"], "アレックス")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.memory.load_username(), "")
+        self.assertEqual(self.memory.load_username_reading(), "")
+
+    def test_initials_and_empty_need_no_call(self):
+        fake, calls = self._fake("unused")
+        self.assertEqual(self._button(fake, {"name": "JD"}).json["reading"], "ジェーディー")
+        self.assertEqual(self._button(fake, {"name": "  "}).json["reading"], "")
+        self.assertEqual(calls, [])
+
+    def test_bad_input_is_400(self):
+        fake, _ = self._fake("アレックス")
+        for body in ({}, {"name": 5}):
+            with self.subTest(body=body):
+                self.assertEqual(self._button(fake, body).status_code, 400)
+
+    def test_save_after_suggest_makes_no_model_call(self):
+        # The button filled the box; Save sends it with the name.
+        self.client.post("/setUsername", json={"username": "Alex", "reading": "アレックス"})
+        fake, calls = self._fake("アレックス")
+        self.assertEqual(self._suggest(fake), "アレックス")
         self.assertEqual(calls, [])
 
 

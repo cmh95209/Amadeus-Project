@@ -588,6 +588,44 @@ button {
   border-color: rgba(115, 151, 201, 0.55);
 }
 
+/* "How she says it": the reading box with its Suggest button beside it. */
+.modal .reading-row {
+  display: flex;
+  gap: 9px;
+  align-items: stretch;
+}
+
+.modal .reading-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.modal .reading-row button {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* Dropdowns (pronouns / what she calls you) match the text inputs. */
+.modal select {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  outline: none;
+  font: inherit;
+  color: #edf1f7;
+  background: #0b1017;
+}
+
+.modal select:focus {
+  border-color: rgba(115, 151, 201, 0.55);
+}
+
+.modal select option {
+  background: #0b1017;
+  color: #edf1f7;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

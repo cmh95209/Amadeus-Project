@@ -40,6 +40,9 @@ import {
   getUsername,
   setUsername,
   suggestUsernameReading,
+  suggestNameReading,
+  getUserProfile,
+  setUserProfile,
   testConnection,
   ConnectionStatus,
   Conversation,
@@ -62,6 +65,22 @@ function baseModelName(name: string): string {
   return name.trim().split("/").pop() ?? "";
 }
 
+// Settings choices for the "about you" section.
+const PRONOUN_PRESETS = ["he/him", "she/her", "they/them"];
+// [value, label]; labels show the user's own name ("Alex" until one is set).
+function addressOptions(name: string): [string, string][] {
+  const n = name.trim() || "Alex";
+  return [
+    ["auto", "Let her decide (changes with trust)"],
+    ["san", `さん — polite (${n}-san)`],
+    ["kun", `くん — friendly (${n}-kun)`],
+    ["chan", `ちゃん — cute / affectionate (${n}-chan)`],
+    ["none", `No ending — very familiar (${n})`],
+    ["senpai", `先輩 — playful "senior" (${n}-senpai)`],
+    ["sama", `様 — over-the-top formal (${n}-sama)`],
+    ["custom", "Custom…"],
+  ];
+}
 export default function App() {
   const [messages, setMessages] = useState<MemoryMessage[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -96,6 +115,14 @@ export default function App() {
   const [serverAddress, setServerAddressState] = useState<string>("");
   const [userName, setUserName] = useState("");
   const [userNameReading, setUserNameReading] = useState("");
+  const [readingSuggesting, setReadingSuggesting] = useState(false);
+  const [readingNote, setReadingNote] = useState("");
+  // Pronouns: "" (not set), a preset, or "custom" + pronounsCustom.
+  const [pronounsChoice, setPronounsChoice] = useState("");
+  const [pronounsCustom, setPronounsCustom] = useState("");
+  // What she calls you: "auto" (let her decide), a preset key, or "custom".
+  const [addressChoice, setAddressChoice] = useState("auto");
+  const [addressCustom, setAddressCustom] = useState("");
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -562,7 +589,7 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr, savedName] =
+      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr, savedName, profile] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
@@ -574,6 +601,7 @@ export default function App() {
           getContextBudget().catch(() => 40000),
           getLLMServer().catch(() => ""),
           getUsername().catch(() => ({ name: "", reading: "" })),
+          getUserProfile().catch(() => ({ pronouns: "", address: "auto" })),
         ]);
 
       setMessages(memory);
@@ -586,6 +614,18 @@ export default function App() {
       setServerAddressState(serverAddr);
       setUserName(savedName.name);
       setUserNameReading(savedName.reading);
+      if (!profile.pronouns || PRONOUN_PRESETS.includes(profile.pronouns)) {
+        setPronounsChoice(profile.pronouns);
+      } else {
+        setPronounsChoice("custom");
+        setPronounsCustom(profile.pronouns);
+      }
+      if (profile.address.startsWith("custom:")) {
+        setAddressChoice("custom");
+        setAddressCustom(profile.address.slice("custom:".length));
+      } else {
+        setAddressChoice(profile.address || "auto");
+      }
       if (convs) {
         setConversations(convs.conversations);
         setActiveConvId(convs.active_id);
@@ -746,6 +786,27 @@ export default function App() {
     }
   }
 
+  // Settings "Suggest": a reading for the name as typed, right now (nothing
+  // is saved - Save stores the box, and then makes no model call itself).
+  async function handleSuggestReading() {
+    const name = userName.trim();
+    if (!name || readingSuggesting) return;
+    setReadingSuggesting(true);
+    setReadingNote("");
+    try {
+      const reading = await suggestNameReading(name);
+      if (reading) {
+        setUserNameReading(reading);
+      } else {
+        setReadingNote("Couldn't suggest one right now - type it in katakana instead.");
+      }
+    } catch {
+      setReadingNote("Couldn't suggest one right now - type it in katakana instead.");
+    } finally {
+      setReadingSuggesting(false);
+    }
+  }
+
   async function saveModel() {
     const nextModel = model.trim();
 
@@ -771,6 +832,20 @@ export default function App() {
       await setVoiceRetention(voiceRetention);
       await setContextBudget(contextBudget);
       await setLLMServer(serverAddress);
+      // Saved last and never fatal: a backend older than this WebUI has no
+      // /setUserProfile yet, and that must not undo the settings above.
+      let profileSaved = true;
+      try {
+        await setUserProfile({
+          pronouns: pronounsChoice === "custom" ? pronounsCustom.trim() : pronounsChoice,
+          address:
+            addressChoice === "custom"
+              ? (addressCustom.trim() ? `custom:${addressCustom.trim()}` : "auto")
+              : addressChoice,
+        });
+      } catch {
+        profileSaved = false;
+      }
       void refreshConnection();
       // A name with no reading yet: let the backend suggest how she says it
       // (one short model call). Never overwrites what the user typed meanwhile.
@@ -790,7 +865,11 @@ export default function App() {
       void fireGreeting(true);
 
       setStatus(`Model set to ${nextModel}`);
-      setSettingsNotice("Connection settings saved.");
+      setSettingsNotice(
+        profileSaved
+          ? "Connection settings saved."
+          : "Connection settings saved, but pronouns / what she calls you were not (restart the backend, then save again)."
+      );
       // Keep Settings open so drafts in the Personality section are preserved.
     } catch (error) {
       setSettingsError(
@@ -1761,6 +1840,7 @@ export default function App() {
                     setUserName(event.target.value);
                     // The reading belonged to the old name.
                     setUserNameReading("");
+                    setReadingNote("");
                   }}
                   placeholder="what she should call you (optional)"
                   autoComplete="off"
@@ -1775,21 +1855,104 @@ export default function App() {
 
               <label>
                 How she says it
-                <input
-                  value={userNameReading}
-                  disabled={settingsBusy || !userName.trim()}
-                  onChange={(event) => setUserNameReading(event.target.value)}
-                  placeholder={userName.trim() ? "suggested when you save (katakana)" : "set your name first"}
-                  autoComplete="off"
-                  spellCheck={false}
-                  lang="ja"
-                  aria-describedby="name-reading-help"
-                />
+                <div className="reading-row">
+                  <input
+                    value={userNameReading}
+                    disabled={settingsBusy || !userName.trim()}
+                    onChange={(event) => {
+                      setUserNameReading(event.target.value);
+                      setReadingNote("");
+                    }}
+                    placeholder={userName.trim() ? "press Suggest, or type katakana" : "set your name first"}
+                    autoComplete="off"
+                    spellCheck={false}
+                    lang="ja"
+                    aria-describedby="name-reading-help"
+                  />
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => void handleSuggestReading()}
+                    disabled={settingsBusy || readingSuggesting || !userName.trim()}
+                  >
+                    {readingSuggesting ? "Suggesting…" : "Suggest"}
+                  </button>
+                </div>
               </label>
+              {readingNote && <p className="settings-error" role="status">{readingNote}</p>}
               <p className="settings-help" id="name-reading-help">
                 Her voice speaks Japanese, so your name is said from this
-                katakana (e.g. Alex → アレックス). Filled in for you when you save;
-                change it if it sounds wrong.
+                katakana (e.g. Alex → アレックス). Press Suggest to fill it in,
+                or leave it empty and it's suggested when you save. Change it
+                if it sounds wrong.
+              </p>
+
+              <label>
+                Your pronouns
+                <select
+                  value={pronounsChoice}
+                  disabled={settingsBusy}
+                  onChange={(event) => setPronounsChoice(event.target.value)}
+                  aria-describedby="pronouns-help"
+                >
+                  <option value="">Not set</option>
+                  {PRONOUN_PRESETS.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                  <option value="custom">Custom…</option>
+                </select>
+              </label>
+              {pronounsChoice === "custom" && (
+                <label>
+                  Custom pronouns
+                  <input
+                    value={pronounsCustom}
+                    disabled={settingsBusy}
+                    onChange={(event) => setPronounsCustom(event.target.value)}
+                    placeholder="e.g. xe/xem"
+                    maxLength={40}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+              )}
+              <p className="settings-help" id="pronouns-help">
+                Optional. Used when she, her memory and the translation talk
+                about you. Her spoken Japanese rarely needs them.
+              </p>
+
+              <label>
+                What she calls you
+                <select
+                  value={addressChoice}
+                  disabled={settingsBusy}
+                  onChange={(event) => setAddressChoice(event.target.value)}
+                  aria-describedby="address-help"
+                >
+                  {addressOptions(userName).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              {addressChoice === "custom" && (
+                <label>
+                  Custom form of address
+                  <input
+                    value={addressCustom}
+                    disabled={settingsBusy}
+                    onChange={(event) => setAddressCustom(event.target.value)}
+                    placeholder="e.g. a nickname, in katakana or kanji"
+                    maxLength={30}
+                    autoComplete="off"
+                    spellCheck={false}
+                    lang="ja"
+                  />
+                </label>
+              )}
+              <p className="settings-help" id="address-help">
+                "Let her decide" starts polite (さん) and gets more familiar as
+                trust grows, taking your pronouns into account. The ending also
+                shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
               </p>
 
               {connStatus && connStatus.reachable && connStatus.models.length > 0 && (

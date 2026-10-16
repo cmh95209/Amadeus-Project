@@ -43,7 +43,8 @@ Design decisions:
 - Port 9870 (not 8080/8000/5050/9880/8888), bound to 127.0.0.1 only.
   Test/advanced overrides (every fresh install uses the defaults):
   CM_SIDECAR_PORT, CM_DATA_DIR, CM_ASSETS_DIR, CM_SEED_DIR,
-  CM_SERVER_FILE, CM_MODEL_FILE, CM_KEY_FILE, CM_ENGINE_DELAY_SECONDS.
+  CM_SERVER_FILE, CM_MODEL_FILE, CM_KEY_FILE, CM_PRONOUNS_FILE,
+  CM_ENGINE_DELAY_SECONDS.
 
 Endpoints:
   GET  /health
@@ -124,6 +125,22 @@ PERSONA_BLURB = (
 SERVER_FILE = os.environ.get("CM_SERVER_FILE") or os.path.join(PROJECT_ROOT, "backend", "llm_server.txt")
 MODEL_FILE = os.environ.get("CM_MODEL_FILE") or os.path.join(PROJECT_ROOT, "backend", "data", "llm_model.txt")
 KEY_FILE = os.environ.get("CM_KEY_FILE") or os.path.join(PROJECT_ROOT, "backend", "data", "api_key.txt")
+# The user's pronouns, set in the app's Settings (2026-10-16; '' = not set).
+# Read once when the engine is built, so a change applies after a sidecar
+# restart; memories already stored are not rewritten.
+PRONOUNS_FILE = os.environ.get("CM_PRONOUNS_FILE") or os.path.join(PROJECT_ROOT, "backend", "data", "user_pronouns.txt")
+
+
+def _persona_with_pronouns() -> str:
+    """PERSONA_BLURB plus the user's pronouns when set, so the extractor
+    writes memories about the user with them instead of guessing."""
+    try:
+        pronouns = open(PRONOUNS_FILE, encoding="utf-8").read().strip()
+    except OSError:
+        pronouns = ""
+    if not pronouns:
+        return PERSONA_BLURB
+    return PERSONA_BLURB + f" The user uses {pronouns} pronouns; use them when writing about the user."
 
 
 def log(msg):
@@ -352,7 +369,7 @@ def _build_engine():
                 UserDirectiveMemory(store, HybridSearch(_emb)),
             ]
             agent = CharacterAgent(directory=ASSETS, name="Amadeus", save_directory=DATA_DIR,
-                                   persona=PERSONA_BLURB)
+                                   persona=_persona_with_pronouns())
             agent.load(llm=get_llm(), embedder=_emb, memories=memories)
             t1 = time.time()
             agent.build()
