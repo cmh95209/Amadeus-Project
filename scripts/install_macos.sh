@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.2  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.3  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -22,7 +22,7 @@
 #     bash install_macos.sh ~/Some/Folder   # or anywhere you like
 #
 #  WHAT'S NEW IN v1.0 (October 2026) - first Mac release:
-#   - Mirrors the Windows installer v4.11 step for step: same toolboxes,
+#   - Mirrors the Windows installer v4.12 step for step: same toolboxes,
 #     same package lists, same voice patches, same pre-downloads.
 #   - On Apple Silicon Macs her voice engine uses the chip's built-in
 #     accelerator (MPS); on Intel Macs it runs on the CPU.
@@ -39,6 +39,13 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.3 (October 2026, app v2.1):
+#   - Installs e2k, the small offline model her voice uses to say English
+#     words the Japanese way.
+#   - An existing install updates even though the project's published
+#     history was cleaned up once (it used to stop with "has diverged"):
+#     a copy holding nothing of your own is moved onto the new history.
 #
 #  WHAT'S NEW IN v1.2 (October 2026):
 #   - The FFmpeg check no longer tries to install it or suggests Homebrew:
@@ -224,7 +231,7 @@ clone_or_update() {
 #  BANNER
 # ----------------------------------------------------------------------------
 printf '%s%s%s\n' "$C_BOLD" "============================================================" "$C_RESET" | tee_to
-printf '%s AMADEUS INSTALLER for MAC OS  v1.2%s\n' "$C_BOLD" "$C_RESET" | tee_to
+printf '%s AMADEUS INSTALLER for MAC OS  v1.3%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s This installs everything Amadeus needs on this Mac:%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s\n' "   - the app (into: $INSTALL_DIR)" | tee_to
 printf '%s\n' "   - three Python toolboxes: the app, her memory, her voice" | tee_to
@@ -477,8 +484,22 @@ if [ -d "$PROJ/.git" ]; then
         || die "Could not reach the project repository." \
                "Check your internet connection, then re-run the installer."
     if ! git -C "$PROJ" merge --ff-only --quiet "origin/$BRANCH"; then
-        die "Your existing Amadeus copy has diverged and cannot be updated automatically." \
-            "Easiest fix: delete the folder $PROJ and re-run this installer (a fresh copy is created)."
+        # v2.1 (2026-10): the published history was rewritten once (personal
+        # details taken out of old commits). Move onto it ONLY when this copy
+        # holds nothing of the user's own: every commit the new branch lacks
+        # was published by this project, and both still share the original
+        # project's history. The personal files are stashed above.
+        own="$(git -C "$PROJ" log --format=%an "origin/$BRANCH..HEAD" 2>/dev/null \
+               | grep -v -x -e 'cmh95209' -e 'Amadeus Local Build' || true)"
+        if git -C "$PROJ" merge-base HEAD "origin/$BRANCH" >/dev/null 2>&1 \
+           && [ -z "$own" ] \
+           && git -C "$PROJ" reset --quiet --keep "origin/$BRANCH"; then
+            log "  (the project's history was cleaned up - moved this copy onto it)"
+        else
+            git -C "$PROJ" stash pop >/dev/null 2>&1 || true
+            die "Your existing Amadeus copy has diverged and cannot be updated automatically." \
+                "Easiest fix: delete the folder $PROJ and re-run this installer (a fresh copy is created)."
+        fi
     fi
     git -C "$PROJ" stash pop >/dev/null 2>&1 || true
     log "  Updated to the latest version on the $BRANCH branch."

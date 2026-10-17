@@ -18,9 +18,10 @@ The project is still actively evolving. It is not intended to be a finished
 product; it is an ongoing attempt to explore what happens when an AI character
 is given personality, voice, visual presence, and continuity over time.
 
-**As of v2.0 (October 2026)**, Amadeus-L has long-term memory, voice-first
-native-Japanese dialogue, greeting systems, web search and weather modules,
-and installer scripts for Windows and Mac. See the [Changelog](docs/changelog.md).
+**As of v2.1 (October 2026)**, Amadeus-L has long-term memory, voice-first
+native-Japanese dialogue whose voice reads numbers, your name and English words
+the Japanese way, greeting systems, web search and weather modules, and
+installer scripts for Windows and Mac. See the [Changelog](docs/changelog.md).
 
 ![Amadeus Preview](docs/images/mainmenu.png)
 
@@ -62,7 +63,7 @@ Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.co
 ```
 
 Prefer to download the installer by hand? Both installer scripts are attached
-to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.0).
+to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.1).
 
 ## macOS (Apple Silicon and Intel)
 
@@ -79,7 +80,7 @@ to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
    `start_macos.command` in the Amadeus folder (by default `~/Amadeus`).
 
 Prefer to download the installer by hand? The Windows and macOS installer script is
-attached to the [v2.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.0).
+attached to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.1).
 
 ## Your first meeting
 
@@ -174,7 +175,7 @@ model with a server of your choice and point Amadeus at it.
 
 # Development Roadmap
 
-Status as of v2.0:
+Status as of v2.1:
 
 ```text
 Live2D static rendering       ✓
@@ -193,8 +194,10 @@ Voice retention               ✓
 First-meeting ceremony        ✓
 Long-term memory (v2.0)       ✓
 One-shot installers (Win/Mac) ✓
+Show her Japanese line        ✓
+Japanese-way voice (v2.1)     ✓ numbers, your name, English words
+About you (v2.1)              ✓ pronouns, what she calls you
 Display-language dropdown     planned (her voice stays Japanese)
-Show her Japanese line        planned
 Better animations/Live2D      planned
 Better web and harness tools  planned
 Agentic workflows             planned
@@ -208,7 +211,7 @@ The longer sections of this README live in the [docs/ folder](docs/).
 | Section | What's inside |
 |---------|---------------|
 | [Long-Term Memory (v2.0)](docs/long-term-memory.md) | How her memory works and where it lives |
-| [Latest features (v2.0)](docs/latest-features.md) | Everything she can do today |
+| [Latest features (v2.1)](docs/latest-features.md) | Everything she can do today |
 | [Architecture](docs/architecture.md) | The five components and how they talk to each other |
 | [Project Structure](docs/architecture.md#project-structure) | What lives in each folder |
 | [Technology](docs/architecture.md#technology) | The stack behind each component |

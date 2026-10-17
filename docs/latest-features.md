@@ -1,9 +1,9 @@
-# Latest features (v2.0)
+# Latest features (v2.1)
 
 Everything Amadeus can do today.
 
 
-The current version (v2.0) includes:
+The current version (v2.1) includes:
 
 - React + TypeScript browser interface
 - Python / Flask backend
@@ -11,6 +11,10 @@ The current version (v2.0) includes:
 - **Long-term memory** (CharacterMemory sidecar: facts, episodes, summaries)
 - **Voice-first dialogue**: she writes natural spoken Japanese natively; the
   on-screen text is its translation
+- **A Japanese voice for everything** (v2.1): numbers, your name and English
+  words are read the Japanese way; a personal pronunciation list for fixes
+- **About you** (v2.1): optional pronouns and "What she calls you" (fixed, or
+  "Let her decide" by trust)
 - **First-meeting ceremony**: she wakes up on her own line and is honest
   about what she can't do yet; the model is configured in Settings
 - **One-shot installers**: Windows (v4.11) and macOS (v1.2) — both

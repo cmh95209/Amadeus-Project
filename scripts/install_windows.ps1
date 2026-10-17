@@ -1,9 +1,16 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.11  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
+#   - Installs e2k, the small offline model her voice uses to say English
+#     words the Japanese way.
+#   - An existing install updates even though the project's published
+#     history was cleaned up once: a copy holding nothing of your own is
+#     moved onto the new history, and your saved settings stay as they are.
 #
 #  WHAT'S NEW IN v4.11 (October 2026):
 #   - The long package-download steps no longer run through a helper
@@ -201,6 +208,30 @@ function Test-Complete($dest, $markers){
 
 # Download a git repo, but skip it if already complete, and clean up any
 # half-finished folder from an interrupted previous attempt before retrying.
+# v2.1 (2026-10): the project's published history was rewritten once (to
+# take personal details out of old commits), so an existing install can no
+# longer fast-forward. Move it onto the new history ONLY when the copy holds
+# nothing of the user's own: every commit it has that the new branch lacks
+# was published by this project, and the two still share the original
+# project's history. The personal settings files (pattern $personalRx) keep
+# the user's version. Returns $true when moved. Run inside the project folder.
+function Move-ToRewrittenHistory($target, $personalRx){
+    & git merge-base HEAD $target 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $authors = & git log --format=%an "$target..HEAD" 2>$null
+    $own = $authors | Where-Object { $_ -notin @("cmh95209", "Amadeus Local Build") }
+    if ($own) { return $false }
+    $saved = @{}
+    foreach ($f in (& git diff --name-only HEAD 2>$null | Where-Object { $_ -match $personalRx })) {
+        $saved[$f] = [IO.File]::ReadAllBytes((Join-Path (Get-Location) $f))
+        & git checkout -- $f 2>$null | Out-Null
+    }
+    & git reset --keep $target 2>$null | Out-Null
+    $ok = ($LASTEXITCODE -eq 0)
+    foreach ($f in $saved.Keys) { [IO.File]::WriteAllBytes((Join-Path (Get-Location) $f), $saved[$f]) }
+    return $ok
+}
+
 function Ensure-Clone($url, $dest, $branch, $markers){
     $leaf = Split-Path $dest -Leaf
     if (Test-Complete $dest $markers) { Log ("  Already have " + $leaf + " - skipping download.") "Yellow"; return }
@@ -246,12 +277,12 @@ function Invoke-PipInEnv($name, $pipArgs){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.11) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.11  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.12  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -364,6 +395,7 @@ try {
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
+                    elseif (Move-ToRewrittenHistory "fork/$Branch" $personal) { Log "  Updated to the latest version (the project's history was cleaned up)." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
                 } elseif ($current -ne $Branch) {
                     Log ("  This folder is on branch '" + $current + "', so I did NOT touch it.") "Yellow"

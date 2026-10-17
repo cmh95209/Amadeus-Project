@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.1 — Her Voice Speaks Your World in Japanese, About You — October 2026
+
+**A Japanese voice for everything she says.** Her voice engine used to switch
+to an English accent (or a pause) on anything that was not plain Japanese.
+Before she speaks, her line is now rewritten for the voice only - the text you
+see is unchanged:
+- numbers, times, dates and units read naturally (23.5℃ → 23点5度,
+  14:30 → 14時30分, 60% → 60パーセント, 1,500円 → 1500円);
+- your name is said from a katakana reading you set under "Your name"
+  (a **Suggest** button fills it in);
+- English words are said in katakana (Google → グーグル, GPU → ジーピーユー,
+  GPT-4 → ジーピーティーフォー): a built-in list, acronym spelling, and the
+  offline [e2k](https://github.com/Patchethium/e2k) model for anything else.
+  Your own fixes go in `backend/data/pronunciations.txt`;
+- steadier delivery from take to take.
+
+**About you.** Optional pronouns (used by her memory, summaries and the
+translation) and **What she calls you**: さん / くん / ちゃん / no ending /
+先輩 / 様 / custom - or **Let her decide**, which starts polite and gets more
+familiar as trust grows. The English line keeps the ending (Name-kun).
+
+**Greetings.** A Regenerate button on her latest greeting; she knows which tab
+you came from; correct "last night / a few days ago" wording; "last seen"
+awareness; a greeting never lands after you already spoke.
+
+**Interface.** An optional "Show her Japanese line" toggle, and editing her
+reply now changes what she remembers; the status bar says what the app is
+really doing (model loading, voice offline).
+
+**Installers.** Windows v4.12 / macOS v1.3 add e2k, and an existing install
+moves onto the new version automatically when the installer is re-run.
+
 ## v2.0 — Long-Term Memory, Voice-First Dialogue, First Meeting, macOS — October 2026
 
 The big one.
