@@ -1,32 +1,69 @@
 {
-  "version": 1,
+  "version": 2,
   "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical.",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
+  "disk_headroom_gb": 2,
   "models": {
     "E4B": {
       "label": "Gemma 4 E4B (QAT)",
       "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
+      "revision": "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265",
       "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 4.22
+      "bytes": 4215695776,
+      "sha256": "df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3",
+      "drafter": {"file": "mtp-gemma-4-E4B-it.gguf", "bytes": 59678016, "sha256": "423074e537504b4f9ec5eafed5c639fac82c96631626efccacdd3c4039b20605"}
     },
     "12B": {
       "label": "Gemma 4 12B (QAT)",
       "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
-      "file": "gemma-4-12b-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 6.72
+      "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
+      "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "bytes": 6716356800,
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
+      "drafter": {"file": "mtp-gemma-4-12B-it.gguf", "bytes": 253708800, "sha256": "fcb35dea42c71333db904cee11baac525c9ef872818ee3753f6cb156f3c6f4f6"}
     },
     "26B-A4B": {
       "label": "Gemma 4 26B-A4B (QAT)",
       "repo": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      "revision": "7b92b5b28818151e8669af2e45e88d6086f490dd",
       "file": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 14.25
+      "bytes": 14249047104,
+      "sha256": "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891",
+      "drafter": {"file": "mtp-gemma-4-26B-A4B-it.gguf", "bytes": 251939328, "sha256": "7272d97595f0d4c74bd7b623492b7dbdaafd8b7c72f329a8270ba4eca68f768a"}
     },
     "31B": {
       "label": "Gemma 4 31B (QAT)",
       "repo": "unsloth/gemma-4-31B-it-qat-GGUF",
+      "revision": "43cc1aeb31adf47ec06a854507ce552cd9862e6f",
       "file": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 17.29
+      "bytes": 17287670048,
+      "sha256": "00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71",
+      "drafter": {"file": "mtp-gemma-4-31B-it.gguf", "bytes": 279955968, "sha256": "3a5e99fd8d0b23afb1fccd1ee0c9ebd1f571d00399c2dae2292d217feeec0f6b"}
+    }
+  },
+  "llama_cpp": {
+    "release": "b11400",
+    "builds": {
+      "cuda-13.4": {
+        "min_nvidia_driver": 580,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-13.4-x64.zip", "bytes": 153112447, "sha256": "872175bf23819d3a72a2bfc54aa21d750f0e020a586d1a6eed79cae585d1d23a"},
+          {"name": "cudart-llama-bin-win-cuda-13.4-x64.zip", "bytes": 423535356, "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"}
+        ]
+      },
+      "cuda-12.4": {
+        "min_nvidia_driver": 525,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-12.4-x64.zip", "bytes": 264160281, "sha256": "b5c185b6b0a87c875a468ff920e20bfcdb82c0a9a7b219cd52c937d461f35d53"},
+          {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}
+        ]
+      },
+      "vulkan": {
+        "files": [
+          {"name": "llama-b11400-bin-win-vulkan-x64.zip", "bytes": 33307867, "sha256": "77a5b9ad8f3ab34c9f600e60a04136574e5510ac7f93912e6600d616bbaf8ac1"}
+        ]
+      }
     }
   },
   "tiers": [

@@ -1,9 +1,18 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.13 (October 2026):
+#   - Her own built-in local model, no account needed. The very first
+#     question is how Amadeus should think: A) a local model set up
+#     automatically, or B) your own model / a cloud service (as before).
+#     For A the installer looks at your graphics card and memory, picks the
+#     Gemma 4 model that fits this PC, and downloads it (and llama.cpp, the
+#     program that runs it) at the end, resumable and checked against the
+#     official checksums. Models live in <install folder>\models.
 #
 #  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
 #   - Installs and updates the fork's main branch (it used to follow a
@@ -186,8 +195,15 @@ param(
     # local model it would get - installs nothing, creates no folder.
     # Add -Json for machine-readable output (used by the project's tests).
     [switch]$HardwareCheckOnly,
-    [switch]$Json
+    [switch]$Json,
+    # Test: go through every built-in-model screen and write its settings
+    # file, but download no model (the app then sees the model as missing).
+    [switch]$SkipLlmDownload,
+    # Test: ONLY the built-in-model screens + settings file (implies
+    # -SkipLlmDownload): no programs, environments or project download.
+    [switch]$LlmScreensOnly
 )
+$InstallerVersion = "v4.13"
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faster
@@ -312,34 +328,71 @@ function Invoke-PipInEnv($name, $pipArgs){
 # >>> TIER TABLE (copy of scripts/local_llm_tiers.json)
 $TierTableJson = @'
 {
-  "version": 1,
+  "version": 2,
   "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical.",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
+  "disk_headroom_gb": 2,
   "models": {
     "E4B": {
       "label": "Gemma 4 E4B (QAT)",
       "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
+      "revision": "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265",
       "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 4.22
+      "bytes": 4215695776,
+      "sha256": "df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3",
+      "drafter": {"file": "mtp-gemma-4-E4B-it.gguf", "bytes": 59678016, "sha256": "423074e537504b4f9ec5eafed5c639fac82c96631626efccacdd3c4039b20605"}
     },
     "12B": {
       "label": "Gemma 4 12B (QAT)",
       "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
-      "file": "gemma-4-12b-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 6.72
+      "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
+      "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "bytes": 6716356800,
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
+      "drafter": {"file": "mtp-gemma-4-12B-it.gguf", "bytes": 253708800, "sha256": "fcb35dea42c71333db904cee11baac525c9ef872818ee3753f6cb156f3c6f4f6"}
     },
     "26B-A4B": {
       "label": "Gemma 4 26B-A4B (QAT)",
       "repo": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      "revision": "7b92b5b28818151e8669af2e45e88d6086f490dd",
       "file": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 14.25
+      "bytes": 14249047104,
+      "sha256": "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891",
+      "drafter": {"file": "mtp-gemma-4-26B-A4B-it.gguf", "bytes": 251939328, "sha256": "7272d97595f0d4c74bd7b623492b7dbdaafd8b7c72f329a8270ba4eca68f768a"}
     },
     "31B": {
       "label": "Gemma 4 31B (QAT)",
       "repo": "unsloth/gemma-4-31B-it-qat-GGUF",
+      "revision": "43cc1aeb31adf47ec06a854507ce552cd9862e6f",
       "file": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
-      "size_gb": 17.29
+      "bytes": 17287670048,
+      "sha256": "00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71",
+      "drafter": {"file": "mtp-gemma-4-31B-it.gguf", "bytes": 279955968, "sha256": "3a5e99fd8d0b23afb1fccd1ee0c9ebd1f571d00399c2dae2292d217feeec0f6b"}
+    }
+  },
+  "llama_cpp": {
+    "release": "b11400",
+    "builds": {
+      "cuda-13.4": {
+        "min_nvidia_driver": 580,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-13.4-x64.zip", "bytes": 153112447, "sha256": "872175bf23819d3a72a2bfc54aa21d750f0e020a586d1a6eed79cae585d1d23a"},
+          {"name": "cudart-llama-bin-win-cuda-13.4-x64.zip", "bytes": 423535356, "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"}
+        ]
+      },
+      "cuda-12.4": {
+        "min_nvidia_driver": 525,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-12.4-x64.zip", "bytes": 264160281, "sha256": "b5c185b6b0a87c875a468ff920e20bfcdb82c0a9a7b219cd52c937d461f35d53"},
+          {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}
+        ]
+      },
+      "vulkan": {
+        "files": [
+          {"name": "llama-b11400-bin-win-vulkan-x64.zip", "bytes": 33307867, "sha256": "77a5b9ad8f3ab34c9f600e60a04136574e5510ac7f93912e6600d616bbaf8ac1"}
+        ]
+      }
     }
   },
   "tiers": [
@@ -438,7 +491,31 @@ function Get-FreeDiskGb($path){
 
 # The decision for this hardware - the same rules as scripts/llm_tiers.py
 # (choose); the project's tests run both on the same inputs.
-function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb){
+function Select-LlamaBuild($vendor, $driver){
+    # The newest CUDA build the NVIDIA driver can run; else Vulkan (AMD,
+    # Intel, an old or unreadable NVIDIA driver). Same as pick_build.
+    if ($vendor -eq "nvidia") {
+        $major = 0
+        $head = ([string]$driver).Trim().Split(".")[0]
+        if ($head -match '^\d+$') { $major = [int]$head }
+        $cuda = @()
+        foreach ($p in $TierTable.llama_cpp.builds.PSObject.Properties) {
+            if ($null -ne $p.Value.min_nvidia_driver) { $cuda += [pscustomobject]@{ name = $p.Name; need = [int]$p.Value.min_nvidia_driver } }
+        }
+        foreach ($b in ($cuda | Sort-Object need -Descending)) { if ($major -ge $b.need) { return $b.name } }
+    }
+    return "vulkan"
+}
+
+# Everything option A downloads: model + drafter + llama.cpp files (bytes).
+function Get-LlmDownloadBytes($modelKey, $build){
+    $m = $TierTable.models.$modelKey
+    $total = [double]$m.bytes + [double]$m.drafter.bytes
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) { $total += [double]$f.bytes }
+    return $total
+}
+
+function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = ""){
     if (-not $vendor -or $vramGb -lt $TierTable.dedicated_card_min_gb) {
         return [pscustomobject]@{ offered = $false; reason = "no_card" }
     }
@@ -453,7 +530,7 @@ function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb){
     return [pscustomobject]@{
         offered = $true; reason = ""; tier = $tier.id; model = $tier.model
         context = [int]$tier.context; kv_cache = $tier.kv_cache; voice_device = $voice
-        warning = [bool]$tier.warning; build = $(if ($vendor -eq "nvidia") { "cuda" } else { "vulkan" })
+        warning = [bool]$tier.warning; build = (Select-LlamaBuild $vendor $driver)
     }
 }
 
@@ -469,14 +546,17 @@ function Invoke-HardwareCheck($dir){
         else { $card = [pscustomobject]@{ vendor = "nvidia"; name = "(pretend NVIDIA card, " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = "" } }
     }
     if ($SimulateRamGB -ge 0) { $simulated = $true; $ram = $SimulateRamGB }
-    $vendor = $null; $vram = 0
-    if ($card) { $vendor = $card.vendor; $vram = [int]$card.vram_gb }
-    $choice = Select-LlmTier $vendor $vram $ram
-    $model = $null
-    if ($choice.offered) { $model = $TierTable.models.($choice.model) }
+    $vendor = $null; $vram = 0; $driver = ""
+    if ($card) { $vendor = $card.vendor; $vram = [int]$card.vram_gb; $driver = $card.driver }
+    $choice = Select-LlmTier $vendor $vram $ram $driver
+    $model = $null; $dlGb = 0
+    if ($choice.offered) {
+        $model = $TierTable.models.($choice.model)
+        $dlGb = [math]::Ceiling((Get-LlmDownloadBytes $choice.model $choice.build) / 1GB * 10) / 10
+    }
     return [pscustomobject]@{
         card = $card; ram_gb = $ram; disk_free_gb = (Get-FreeDiskGb $dir)
-        simulated = $simulated; choice = $choice; model = $model
+        simulated = $simulated; choice = $choice; model = $model; download_gb = $dlGb
     }
 }
 
@@ -488,7 +568,7 @@ function Format-HardwareCheck($hw){
     $lines += ("  Normal memory : " + $(if ($hw.ram_gb -ge 0) { [string]$hw.ram_gb + " GB" } else { "unknown" }))
     $lines += ("  Free disk     : " + $hw.disk_free_gb + " GB")
     if ($hw.choice.offered) {
-        $lines += ("  Local model   : " + $hw.model.label + " (" + $hw.model.size_gb + " GB download)")
+        $lines += ("  Local model   : " + $hw.model.label + " (" + $hw.download_gb + " GB download, with its helper program)")
         $lines += ("  Settings      : " + $hw.choice.context + " context, " + $hw.choice.kv_cache + " memory, voice on the " + $(if ($hw.choice.voice_device -eq "cpu") { "processor" } else { "graphics card" }) + ", " + $hw.choice.build + " build")
         if ($hw.choice.warning) { $lines += "  (Not recommended on this PC - under 8 GB of graphics memory.)" }
     } elseif ($hw.choice.reason -eq "no_card") {
@@ -500,6 +580,267 @@ function Format-HardwareCheck($hw){
     return $lines
 }
 
+# ============================================================================
+#  Built-in local model: the A/B question, the downloads, the settings file
+# ============================================================================
+# The model and its helper program live NEXT TO the project folder, not in
+# it: a broken project folder is deleted and re-downloaded (Ensure-Clone),
+# which must never take a 4-17 GB model with it.
+$ModelsDir     = Join-Path $InstallDir "models"
+$LlmChoiceFile = Join-Path $ModelsDir "local_llm_choice.json"
+$DownloadRetryDelaySeconds = 15
+
+# Ask until the answer is one of $valid (upper-cased). Gives up after many
+# empty/invalid answers so a closed input can never loop forever.
+function Read-Answer($prompt, $valid){
+    for ($i = 0; $i -lt 20; $i++) {
+        $a = Read-Host $prompt
+        if ($null -eq $a) { $a = "" }
+        $a = $a.Trim().ToUpper()
+        if ($valid -contains $a) { Log ("  (answer: " + $a + ")"); return $a }
+        Log ("  Please type one of: " + ($valid -join ", ")) "Yellow"
+    }
+    Die "No answer was given."
+}
+
+function Write-Utf8File($path, $text){
+    New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+    [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))
+}
+
+function New-CustomChoice { return [pscustomobject]@{ mode = "custom"; chosen = (Get-Date -Format s) } }
+
+# Option A on this PC: show what was found, then confirm (or fall back to B).
+function Confirm-LocalModel($hw){
+    Log ""
+    Format-HardwareCheck $hw | ForEach-Object { Log $_ }
+    Log ""
+    if (-not $hw.choice.offered) {
+        if ($hw.choice.reason -eq "no_card") {
+            Log "  A local model needs a separate graphics card. On this PC she would think far too slowly, so Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server)." "Yellow"
+        } else {
+            Log ("  On this PC her voice has to run on the processor, which needs at least " + $TierTable.voice_on_cpu_min_ram_gb + " GB of normal memory (this PC has " + $hw.ram_gb + " GB). So Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server).") "Yellow"
+        }
+        Read-Host "Press Enter to continue with option B" | Out-Null
+        return (New-CustomChoice)
+    }
+    if ($hw.choice.warning) {
+        Log "  WARNING:" "Yellow"
+        Log "  Using Amadeus with a local model is not recommended on PCs with less than 8 GB of graphics memory. Her responses will be slower and less intelligent, and features like web search might be buggy. For a better experience, choose option B and connect a cloud model (e.g. OpenRouter)." "Yellow"
+        if ((Read-Answer "Type A to use the local model anyway, or B to switch to option B" @("A","B")) -eq "B") { return (New-CustomChoice) }
+    }
+    $need = $hw.download_gb + $TierTable.disk_headroom_gb
+    if ($hw.disk_free_gb -ge 0 -and $hw.disk_free_gb -lt $need) {
+        Log ("  Not enough free disk space for the local model: it needs about " + $need + " GB, this drive has " + $hw.disk_free_gb + " GB free.") "Yellow"
+        if ((Read-Answer "Type B to continue with option B, or Q to stop here (free up space, then run the installer again)" @("B","Q")) -eq "Q") {
+            Log "Stopped - nothing was changed. Free up some space, then run the installer again." "Yellow"
+            Read-Host "Press Enter to close this window" | Out-Null
+            exit 0
+        }
+        return (New-CustomChoice)
+    }
+    $q = "Download " + $hw.model.label + " (" + $hw.download_gb + " GB) near the end of the install? Type Y (yes) or B (do it myself instead)"
+    if ((Read-Answer $q @("Y","B")) -eq "B") { return (New-CustomChoice) }
+    $c = $hw.choice
+    return [pscustomobject]@{
+        mode = "builtin"; model = $c.model; tier = $c.tier; build = $c.build
+        context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        simulated = [bool]$hw.simulated; chosen = (Get-Date -Format s)
+    }
+}
+
+# STEP 0: the very first question, before anything is downloaded. The
+# answer is saved next to the project, so a re-run only asks "keep it?".
+function Invoke-LlmChoice($hw){
+    Step 0 "How should Amadeus think?"
+    if (Test-Path $LlmChoiceFile) {
+        $prev = $null
+        try { $prev = Get-Content $LlmChoiceFile -Raw | ConvertFrom-Json } catch {}
+        if ($prev -and ($prev.mode -eq "custom" -or ($prev.mode -eq "builtin" -and $TierTable.models.($prev.model)))) {
+            if ($prev.mode -eq "builtin") { $desc = "A) her built-in local model - " + $TierTable.models.($prev.model).label }
+            else { $desc = "B) you connect a model yourself" }
+            Log ("  Last time you chose: " + $desc)
+            if ((Read-Answer "Keep that choice? Type Y (yes) or N (choose again)" @("Y","N")) -eq "Y") { return $prev }
+        }
+    }
+    Log "  How should Amadeus think?" "Cyan"
+    Log "    A) Install and set up a local model automatically (private, runs on this PC, no account needed)"
+    Log "    B) I'll do it myself (choose this if using a cloud model or your own local model)"
+    if ((Read-Answer "Type A or B" @("A","B")) -eq "A") { $choice = Confirm-LocalModel $hw } else { $choice = New-CustomChoice }
+    Write-Utf8File $LlmChoiceFile ($choice | ConvertTo-Json -Depth 4)
+    if ($choice.mode -eq "builtin") { Log ("  Chosen: " + $TierTable.models.($choice.model).label + " - it downloads near the end of the install.") "Green" }
+    else { Log "  Chosen: option B - you connect a model yourself in Settings after the install." "Green" }
+    return $choice
+}
+
+# SHA-256 via .NET directly (no PowerShell module needed - Get-FileHash lives
+# in a module that fails to load in some mixed PowerShell 5/7 setups).
+function Get-Sha256($path){
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower()
+    } finally { $stream.Dispose() }
+}
+
+# Download one file and prove it is the official one (size + SHA-256). Safe
+# to re-run: a finished, checked file is skipped (a small ".verified" note
+# next to it saves re-checking 17 GB every time); a half-finished ".part"
+# continues where it stopped; a damaged download is deleted. Uses Windows'
+# own curl.exe (progress bar + resume); without it, PowerShell's downloader
+# (no resume).
+function Get-VerifiedFile($url, $dest, [double]$bytes, $sha256, $label){
+    $marker = $dest + ".verified"
+    $stamp  = $sha256 + " " + [string][int64]$bytes
+    if ((Test-Path -LiteralPath $dest) -and (Test-Path -LiteralPath $marker) -and
+        ((Get-Content -LiteralPath $marker -Raw).Trim() -eq $stamp) -and ((Get-Item -LiteralPath $dest).Length -eq $bytes)) {
+        Log ("  Already have " + $label + " (checked) - skipping.") "Yellow"; return
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+    $part = $dest + ".part"
+    if (Test-Path -LiteralPath $dest) {
+        # Present but not yet checked (e.g. an interrupted check): check it now.
+        if ((Get-Item -LiteralPath $dest).Length -eq $bytes -and (Get-Sha256 $dest) -eq $sha256) {
+            Set-Content -LiteralPath $marker -Value $stamp -NoNewline -Encoding ascii
+            Log ("  Already have " + $label + " (checked) - skipping.") "Yellow"; return
+        }
+        Move-Item -LiteralPath $dest -Destination $part -Force
+    }
+    $gb = [math]::Round($bytes / 1GB, 2)
+    Log ("  Downloading " + $label + " (" + $gb + " GB)...")
+    Log ("  from: " + $url)
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    for ($try = 1; $try -le 4; $try++) {
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -gt $bytes) { Remove-Item -LiteralPath $part -Force }
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) { break }
+        if (Test-Path $curl) {
+            & $curl -L --fail --retry 5 --retry-delay 10 --connect-timeout 30 -C - --progress-bar -o $part $url
+        } else {
+            try { Invoke-WebRequest $url -OutFile $part -UseBasicParsing -TimeoutSec 86400 } catch { Log ("  " + $_.Exception.Message) "Yellow" }
+        }
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) { break }
+        if ($try -lt 4) { Log "  The download was interrupted - trying again shortly (it continues where it stopped)..." "Yellow"; Start-Sleep -Seconds $DownloadRetryDelaySeconds }
+    }
+    if (-not (Test-Path -LiteralPath $part) -or (Get-Item -LiteralPath $part).Length -ne $bytes) {
+        throw ("Could not download " + $label + " right now. Check your internet connection, then run the installer again - it continues where it stopped.")
+    }
+    Log "  Checking the downloaded file (about a minute for the big ones)..."
+    if ((Get-Sha256 $part) -ne $sha256) {
+        Remove-Item -LiteralPath $part -Force
+        throw ($label + " was downloaded but is damaged (its checksum does not match the official one), so it was deleted. Run the installer again to download it fresh.")
+    }
+    Move-Item -LiteralPath $part -Destination $dest -Force
+    Set-Content -LiteralPath $marker -Value $stamp -NoNewline -Encoding ascii
+    Log ("  " + $label + " downloaded and checked.") "Green"
+}
+
+# Unpack a zip into $dir (overwriting), with .NET's zip reader: much faster
+# than Expand-Archive on Windows PowerShell, and needs no module. Entries
+# that would land outside $dir are refused.
+function Expand-ZipFile($zip, $dir){
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [IO.Path]::GetFullPath($dir).TrimEnd('\') + '\'
+    $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        foreach ($e in $archive.Entries) {
+            $target = [IO.Path]::GetFullPath((Join-Path $root $e.FullName))
+            if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw ("Unsafe path in " + $zip + ": " + $e.FullName) }
+            if ($e.FullName.EndsWith('/') -or $e.FullName.EndsWith('\')) { New-Item -ItemType Directory -Force -Path $target | Out-Null; continue }
+            New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $target, $true)
+        }
+    } finally { $archive.Dispose() }
+}
+
+# Download + unpack one llama.cpp build into models\llama.cpp\<release>-<build>\
+# and prove its server program starts. Returns the path to llama-server.exe.
+function Install-LlamaBuild($build){
+    $rel  = $TierTable.llama_cpp.release
+    $dir  = Join-Path $ModelsDir ("llama.cpp\" + $rel + "-" + $build)
+    $done = Join-Path $dir "install_complete.txt"
+    if (Test-Path -LiteralPath $done) {
+        $exe = (Get-Content -LiteralPath $done -Raw).Trim()
+        if ($exe -and (Test-Path -LiteralPath $exe)) { Log ("  Already have llama.cpp " + $rel + " (" + $build + ") - skipping.") "Yellow"; return $exe }
+    }
+    $dl = Join-Path $ModelsDir "downloads"
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
+        Get-VerifiedFile ("https://github.com/ggml-org/llama.cpp/releases/download/" + $rel + "/" + $f.name) (Join-Path $dl $f.name) $f.bytes $f.sha256 ("llama.cpp " + $f.name)
+    }
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Log ("  Unpacking llama.cpp (" + $build + ")...")
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) { Expand-ZipFile (Join-Path $dl $f.name) $dir }
+    $found = Get-ChildItem -LiteralPath $dir -Recurse -Filter "llama-server.exe" | Select-Object -First 1
+    if (-not $found) { throw ("The llama.cpp download (" + $build + ") has no llama-server.exe.") }
+    # Smoke test: the program must start (catches a missing runtime file or
+    # a driver that cannot load the CUDA build).
+    $ver = & $found.FullName --version 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw ("llama.cpp (" + $build + ") would not start on this PC: " + $ver.Trim()) }
+    Set-Content -LiteralPath $done -Value $found.FullName -NoNewline -Encoding utf8
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
+        Remove-Item -LiteralPath (Join-Path $dl $f.name), (Join-Path $dl ($f.name + ".verified")) -Force -ErrorAction SilentlyContinue
+    }
+    Log ("  llama.cpp " + $rel + " (" + $build + ") ready.") "Green"
+    return $found.FullName
+}
+
+function Get-HfUrl($m, $file){ return ("https://huggingface.co/" + $m.repo + "/resolve/" + $m.revision + "/" + $file + "?download=true") }
+
+# The app's built-in-model settings: backend\data\local_llm.json. Written
+# even when a download failed (model_ok/server_ok false), so the app knows
+# the model is missing instead of silently falling back to something else.
+# Option B on an install that had A before: kept, but switched to "custom".
+function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $modelOk, $draftPath, $draftOk){
+    $cfg = Join-Path $proj "backend\data\local_llm.json"
+    if ($choice.mode -ne "builtin") {
+        if (Test-Path $cfg) {
+            try { $old = Get-Content $cfg -Raw | ConvertFrom-Json; $old.mode = "custom"; Write-Utf8File $cfg ($old | ConvertTo-Json -Depth 4) } catch {}
+        }
+        return
+    }
+    $m = $TierTable.models.($choice.model)
+    $data = [ordered]@{
+        mode = "builtin"; model = $choice.model; model_label = $m.label
+        model_file = $modelPath; model_ok = [bool]$modelOk
+        drafter_file = $draftPath; drafter_ok = [bool]$draftOk; use_drafter = $false
+        server_exe = $exe; server_ok = [bool]$serverOk
+        llama_release = $TierTable.llama_cpp.release; build = $choice.build
+        tier = $choice.tier; context = [int]$choice.context; kv_cache = $choice.kv_cache
+        voice_device = $choice.voice_device; gpu_layers = 999; port = 8091
+        simulated = [bool]$choice.simulated; written = (Get-Date -Format s); installer = $InstallerVersion
+    }
+    Write-Utf8File $cfg ($data | ConvertTo-Json -Depth 4)
+    Log ("  Built-in model settings saved: " + $cfg)
+}
+
+# The last install step for option A: helper program, model, drafter. A
+# failed download never stops the install - the summary says what to do.
+# Returns $true when everything she needs is in place.
+function Install-BuiltinLlm($proj, $choice){
+    $m = $TierTable.models.($choice.model)
+    $modelPath = Join-Path $ModelsDir $m.file
+    $draftPath = Join-Path $ModelsDir $m.drafter.file
+    $exe = ""; $serverOk = $false; $modelOk = $false; $draftOk = $false
+    if ($SkipLlmDownload) {
+        Log "  (TEST: -SkipLlmDownload - nothing is downloaded; the settings file is written as 'missing'.)" "Magenta"
+    } else {
+        try { $exe = Install-LlamaBuild $choice.build; $serverOk = $true }
+        catch {
+            Log ("  " + $_.Exception.Message) "Yellow"
+            if ($choice.build -ne "vulkan") {
+                Log "  Trying the general (Vulkan) version of llama.cpp instead..." "Yellow"
+                try { $exe = Install-LlamaBuild "vulkan"; $serverOk = $true; $choice.build = "vulkan" } catch { Log ("  " + $_.Exception.Message) "Red" }
+            }
+        }
+        try { Get-VerifiedFile (Get-HfUrl $m $m.file) $modelPath $m.bytes $m.sha256 $m.label; $modelOk = $true }
+        catch { Log ("  " + $_.Exception.Message) "Red" }
+        try { Get-VerifiedFile (Get-HfUrl $m $m.drafter.file) $draftPath $m.drafter.bytes $m.drafter.sha256 ($m.label + " speed-up file"); $draftOk = $true }
+        catch { Log ("  (optional) " + $_.Exception.Message) "Yellow" }
+    }
+    Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk $draftPath $draftOk
+    return ($serverOk -and $modelOk)
+}
+
 if ($HardwareCheckOnly) {
     $hwDir = if ($InstallDir) { $InstallDir } else { Join-Path $env:USERPROFILE "Amadeus" }
     $hw = Invoke-HardwareCheck $hwDir
@@ -509,20 +850,23 @@ if ($HardwareCheckOnly) {
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer " + $InstallerVersion + ") started " + (Get-Date))
+if ($LlmScreensOnly) { $SkipLlmDownload = $true }
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.12  (safe to re-run - it resumes where it stopped)" "Green"
+    Log ("  AMADEUS INSTALLER " + $InstallerVersion + "  (safe to re-run - it resumes where it stopped)") "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
-    if ($Source -or $Branch -ne "main" -or $EnvSuffix -or $SimulateVramGB -ge 0) {
+    if ($Source -or $Branch -ne "main" -or $EnvSuffix -or $SimulateVramGB -ge 0 -or $SimulateRamGB -ge 0 -or $SkipLlmDownload) {
         Log "TEST OPTIONS in use:" "Magenta"
         if ($Source)              { Log ("  code from this PC : " + $Source) "Magenta" }
         if ($Branch -ne "main")   { Log ("  branch            : " + $Branch) "Magenta" }
         if ($EnvSuffix)           { Log ("  environment suffix: " + $EnvSuffix) "Magenta" }
         if ($SimulateVramGB -ge 0){ Log ("  pretend graphics memory: " + $SimulateVramGB + " GB") "Magenta" }
+        if ($SimulateRamGB -ge 0) { Log ("  pretend normal memory: " + $SimulateRamGB + " GB") "Magenta" }
+        if ($SkipLlmDownload)     { Log "  no local-model downloads (screens + settings file only)" "Magenta" }
     }
     if ($Source -and -not ($ForkUrl -and (Test-Path (Join-Path $ForkUrl ".git")))) {
         Die ("-Source must be a git project folder on this PC (with a .git folder inside): " + $Source)
@@ -530,9 +874,17 @@ try {
     if ($EnvSuffix -and $EnvSuffix -notmatch '^-?[A-Za-z0-9_]+$') {
         Die ("-EnvSuffix may contain only letters, digits and _ (got: " + $EnvSuffix + ")")
     }
-    Log "Checking this PC (read-only):"
+    # The very first question, before anything is downloaded.
     $hw = Invoke-HardwareCheck $InstallDir
-    Format-HardwareCheck $hw | ForEach-Object { Log $_ }
+    $llmChoice = Invoke-LlmChoice $hw
+    if ($LlmScreensOnly) {
+        $proj = Join-Path $InstallDir "Amadeus-Project"
+        Install-BuiltinLlm $proj $llmChoice | Out-Null
+        Log "TEST: -LlmScreensOnly - stopping here (nothing else was installed)." "Magenta"
+        exit 0
+    }
+    Log ""
+    Log "Everything else installs now. It downloads several gigabytes, so give it time." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
 
     # ---------- STEP 1: winget ----------
@@ -940,9 +1292,35 @@ try {
     if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else { Log "  Frontend ready." "Green" }
     Pop-Location
 
+    # ---------- STEP 10: built-in local model (option A only) ----------
+    # Last on purpose: the biggest download, and a failure here must not
+    # block anything else (re-running the installer resumes it).
+    $llmReady = $false
+    if ($llmChoice.mode -ne "builtin") {
+        Write-LocalLlmConfig $proj $llmChoice "" $false "" $false "" $false   # switches an earlier option-A install off
+    } else {
+        Step 10 ("Setting up her built-in local model - " + $TierTable.models.($llmChoice.model).label + " (big download, be patient)")
+        $llmReady = Install-BuiltinLlm $proj $llmChoice
+    }
+
     # ---------- DONE ----------
-    Step 10 "ALL DONE!"
+    Step 11 "ALL DONE!"
     Log "" "Green"
+    if ($llmChoice.mode -eq "builtin") {
+        if ($llmReady) {
+            Log ("Everything is installed. Amadeus thinks with her built-in local model (" + $TierTable.models.($llmChoice.model).label + ") - nothing to connect.") "Green"
+        } else {
+            Log "Everything is installed EXCEPT her built-in local model (see the messages above)." "Yellow"
+            Log "Run this installer again when you can - it continues the download where it stopped." "Yellow"
+        }
+        Log "To START Amadeus, double-click this file:" "Green"
+        Log ("       " + (Join-Path $proj "start_windows.bat"))
+        Log "(You can switch to your own model or a cloud service any time in Settings -> Connection.)"
+        Log ""
+        Log ("(Install log saved to: " + $LogPath + ")")
+        Read-Host "Press Enter to close this window" | Out-Null
+        exit 0
+    }
     Log "Everything is installed. Amadeus needs a model to think with:" "Green"
     Log "  - a cloud model service (e.g. OpenRouter or OpenAI), or"
     Log "  - a local model server on this PC (e.g. KoboldCpp, Unsloth"

@@ -25,7 +25,35 @@ def round_gb(value: float) -> int:
     return int(math.floor(value + 0.5))
 
 
-def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int) -> dict:
+def driver_major(driver: str) -> int:
+    """'610.88' -> 610; anything unreadable -> 0."""
+    head = (driver or "").strip().split(".")[0]
+    return int(head) if head.isdigit() else 0
+
+
+def pick_build(table: dict, vendor: str | None, driver: str = "") -> str:
+    """Which llama.cpp build: the newest CUDA build the NVIDIA driver can
+    run, else Vulkan (AMD / Intel / old or unreadable NVIDIA driver)."""
+    if vendor == "nvidia":
+        major = driver_major(driver)
+        cuda = [(b["min_nvidia_driver"], name)
+                for name, b in table["llama_cpp"]["builds"].items()
+                if "min_nvidia_driver" in b]
+        for need, name in sorted(cuda, reverse=True):
+            if major >= need:
+                return name
+    return "vulkan"
+
+
+def download_bytes(table: dict, model_key: str, build: str) -> int:
+    """Everything option A downloads: model + drafter + llama.cpp files."""
+    model = table["models"][model_key]
+    files = table["llama_cpp"]["builds"][build]["files"]
+    return model["bytes"] + model["drafter"]["bytes"] + sum(f["bytes"] for f in files)
+
+
+def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
+           driver: str = "") -> dict:
     """The installer's decision for this hardware.
 
     vendor: "nvidia" (driver tool working) / "amd" / "intel" /
@@ -33,6 +61,7 @@ def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int) -> dict:
     separate graphics card).
     ram_gb: normal memory in whole GB, or a negative number when unknown
     (then the memory rule is not applied).
+    driver: the NVIDIA driver version nvidia-smi reported ("610.88").
     Returns {"offered": bool, "reason": str, and when offered: tier, model,
     context, kv_cache, voice_device, warning, build}.
     """
@@ -56,5 +85,5 @@ def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int) -> dict:
         "kv_cache": tier["kv_cache"],
         "voice_device": voice,
         "warning": bool(tier["warning"]),
-        "build": "cuda" if vendor == "nvidia" else "vulkan",
+        "build": pick_build(table, vendor, driver),
     }

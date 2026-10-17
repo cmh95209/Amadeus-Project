@@ -84,7 +84,11 @@ class TableDecisionTests(unittest.TestCase):
                 self.assertTrue(model["repo"].startswith("unsloth/gemma-4-"))
                 self.assertTrue(model["repo"].endswith("-it-qat-GGUF"))
                 self.assertTrue(model["file"].endswith("-it-qat-UD-Q4_K_XL.gguf"))
-                self.assertGreater(model["size_gb"], 0)
+                self.assertGreater(model["bytes"], 0)
+                self.assertRegex(model["sha256"], r"^[0-9a-f]{64}$")
+                self.assertRegex(model["revision"], r"^[0-9a-f]{40}$")
+                self.assertRegex(model["drafter"]["sha256"], r"^[0-9a-f]{64}$")
+                self.assertTrue(model["drafter"]["file"].startswith("mtp-gemma-4-"))
 
     def test_memory_rule(self):
         self.assertEqual(TABLE["voice_on_cpu_min_ram_gb"], 16)
@@ -105,20 +109,20 @@ class RoundingTests(unittest.TestCase):
 GRID = [
     (None, 0, 32, (False, "no_card")),
     ("nvidia", 1, 32, (False, "no_card")),
-    ("nvidia", 6, 32, (True, "E4B", "cpu", "cuda", True)),
+    ("nvidia", 6, 32, (True, "E4B", "cpu", "cuda-13.4", True)),
     ("nvidia", 6, 8, (False, "low_ram")),
-    ("nvidia", 8, 16, (True, "12B", "cpu", "cuda", False)),
+    ("nvidia", 8, 16, (True, "12B", "cpu", "cuda-13.4", False)),
     ("nvidia", 8, 8, (False, "low_ram")),
-    ("nvidia", 12, 32, (True, "12B", "cpu", "cuda", False)),
-    ("nvidia", 16, 8, (True, "12B", "cuda", "cuda", False)),
-    ("nvidia", 24, 32, (True, "26B-A4B", "cuda", "cuda", False)),
-    ("nvidia", 32, 32, (True, "31B", "cuda", "cuda", False)),
-    ("nvidia", 48, 64, (True, "31B", "cuda", "cuda", False)),
+    ("nvidia", 12, 32, (True, "12B", "cpu", "cuda-13.4", False)),
+    ("nvidia", 16, 8, (True, "12B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 24, 32, (True, "26B-A4B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 32, 32, (True, "31B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 48, 64, (True, "31B", "cuda", "cuda-13.4", False)),
     ("amd", 16, 8, (False, "low_ram")),
     ("amd", 24, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
     ("intel", 12, 16, (True, "12B", "cpu", "vulkan", False)),
     ("nvidia-unverified", 24, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
-    ("nvidia", 8, -1, (True, "12B", "cpu", "cuda", False)),   # memory unknown
+    ("nvidia", 8, -1, (True, "12B", "cpu", "cuda-13.4", False)),   # memory unknown
 ]
 
 
@@ -132,11 +136,40 @@ class PythonRuleTests(unittest.TestCase):
     def test_grid(self):
         for vendor, vram, ram, expected in GRID:
             with self.subTest(vendor=vendor, vram=vram, ram=ram):
-                self.assertEqual(_summary(tiers.choose(TABLE, vendor, vram, ram)), expected)
+                self.assertEqual(_summary(tiers.choose(TABLE, vendor, vram, ram, "610.88")), expected)
 
     def test_offered_choice_carries_tier_settings(self):
-        c = tiers.choose(TABLE, "nvidia", 32, 32)
+        c = tiers.choose(TABLE, "nvidia", 32, 32, "610.88")
         self.assertEqual((c["tier"], c["context"], c["kv_cache"]), ("32-plus", 32768, "f16"))
+
+
+class BuildTests(unittest.TestCase):
+    def test_build_follows_the_nvidia_driver(self):
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88"), "cuda-13.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "580.10"), "cuda-13.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "576.02"), "cuda-12.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "516.94"), "vulkan")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", ""), "vulkan")
+        for vendor in ("amd", "intel", "nvidia-unverified"):
+            self.assertEqual(tiers.pick_build(TABLE, vendor, "610.88"), "vulkan")
+
+    def test_builds_are_pinned_and_checked(self):
+        lc = TABLE["llama_cpp"]
+        self.assertRegex(lc["release"], r"^b\d+$")
+        for name, build in lc["builds"].items():
+            with self.subTest(build=name):
+                self.assertTrue(any(f["name"].startswith("llama-" + lc["release"] + "-bin-win-")
+                                    for f in build["files"]))
+                for f in build["files"]:
+                    self.assertTrue(f["name"].endswith("-x64.zip"))
+                    self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")
+                    self.assertGreater(f["bytes"], 0)
+
+    def test_download_size_counts_everything(self):
+        m = TABLE["models"]["31B"]
+        files = TABLE["llama_cpp"]["builds"]["cuda-13.4"]["files"]
+        self.assertEqual(tiers.download_bytes(TABLE, "31B", "cuda-13.4"),
+                         m["bytes"] + m["drafter"]["bytes"] + sum(f["bytes"] for f in files))
 
 
 _POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
@@ -162,7 +195,8 @@ class PowerShellAgreesTests(unittest.TestCase):
             with self.subTest(vram=vram, ram=ram):
                 hw = self.run_check(vram, ram)
                 vendor = hw["card"]["vendor"] if hw["card"] else None
-                expected = tiers.choose(TABLE, vendor, vram, ram)
+                driver = hw["card"]["driver"] if hw["card"] else ""
+                expected = tiers.choose(TABLE, vendor, vram, ram, driver)
                 self.assertEqual(_summary(hw["choice"]), _summary(expected))
                 if expected["offered"]:
                     self.assertEqual(hw["choice"]["tier"], expected["tier"])
