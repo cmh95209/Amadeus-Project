@@ -106,6 +106,19 @@ def load_voice_block() -> str:
     return DEFAULT_VOICE_BLOCK
 
 
+# Her voice reads Latin letters with an English model (voice layer 3,
+# 2026-10-17): asking for katakana in the Japanese line prevents most of it;
+# speech_text converts whatever slips through. The English line is written
+# separately and keeps the original spelling.
+FOREIGN_WORDS_RULE = (
+    "FOREIGN WORDS: in assistant_reply_JPS write foreign words, names and "
+    "brands in katakana the way a Japanese speaker says them (Google -> "
+    "グーグル, Python -> パイソン, Netflix -> ネットフリックス). Keep Latin "
+    "letters only for acronyms said letter by letter (AI, GPU). The English "
+    "line keeps the original spelling."
+)
+
+
 # What she calls the user when the Settings say "let her decide"
 # (2026-10-16, user-approved table): the forms each closeness tier allows,
 # by the user's pronouns - he/him (m), she/her (f), anything else or unset
@@ -170,6 +183,7 @@ def build_voice_context(trust_value) -> dict:
     head = ("VOICE / 声 (this block governs assistant_reply_JPS only): ")
     head += "Current closeness tier: " + tier + " trust " + str(int(trust_value)) + " out of 100."
     head += chr(10) + "Use the register of that tier, and follow the anti-caricature tsundere rules."
+    head += chr(10) + FOREIGN_WORDS_RULE
     try:
         rule = address_rule(tier)
     except Exception as exc:  # a settings hiccup must never block a reply

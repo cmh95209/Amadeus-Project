@@ -412,7 +412,10 @@ try {
     # The 2026-10-07 fresh-VM run proved a fresh PC was missing this: she
     # answered searches from her own knowledge and honestly said she could
     # not verify them online.
-    Invoke-PipInEnv "amadeus" @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs")
+    # e2k: a small offline English->katakana model (public-domain code; its
+    # model is trained on CC-BY-SA dictionaries) so her voice says English
+    # words the Japanese way instead of switching to an English accent.
+    Invoke-PipInEnv "amadeus" @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k")
     if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
     # Smoke test: the whole backend must import cleanly in this environment.
     $backend = Join-Path $proj "backend"
@@ -423,8 +426,8 @@ try {
     # Direct Python where the toolbox layout is standard (see Env-Python
     # above); the helper route stays as the fallback.
     $amPy = Env-Python "amadeus"
-    if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; print('SMOKE_OK')" 2>&1 | Out-String }
-    else { $smoke = & $conda run -n amadeus python -c "import api; import ddgs; print('SMOKE_OK')" 2>&1 | Out-String }
+    if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
+    else { $smoke = & $conda run -n amadeus python -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }

@@ -7,7 +7,7 @@ character models, artwork, voice recordings, and model weights — are not
 covered by this MIT license and remain subject to their respective licenses
 and permissions.
 
-Two external components deserve a special mention:
+Three external components deserve a special mention:
 
 - **GPT-SoVITS** ([RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS),
   by lj1995 and contributors) — the voice engine. MIT-licensed; it is cloned
@@ -18,3 +18,8 @@ Two external components deserve a special mention:
   (127.0.0.1:9870), which keeps the GPL engine cleanly separated from the
   MIT-licensed application. See `memory_sidecar/LICENSE-NOTE.md` for the full
   notes.
+- **e2k** ([Patchethium/e2k](https://github.com/Patchethium/e2k)) — the
+  offline English→katakana model her voice uses for English words. The code
+  is public domain (Unlicense); its model is trained on Wiktionary and
+  JMdict/EDICT data (CC-BY-SA). It is installed from PyPI at install time and
+  is not part of this repository.

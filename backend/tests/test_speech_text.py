@@ -11,8 +11,12 @@ no network:
   2. the engine-specific fixes (no commas, no decimal points, 零時);
   3. text that must stay untouched (no digits, numbers glued to English);
   4. layer 2: the saved name is spoken from its kana reading;
-  5. tts._request_payload sends the rewritten text, and a rewriting error
+  5. layer 3: English words -> katakana (pronunciation lists, acronyms, e2k);
+  6. tts._request_payload sends the rewritten text, and a rewriting error
      falls back to the raw text instead of silencing her.
+The module never touches the live data folder (the personal pronunciation
+list points at a temp file) and stands in for e2k, so results do not depend
+on whether it is installed; one test uses the real e2k when it is.
 """
 import sys
 import tempfile
@@ -25,6 +29,23 @@ sys.path.insert(0, str(ROOT))
 import speech_text  # noqa: E402
 import tts  # noqa: E402
 from speech_text import to_spoken  # noqa: E402
+
+_REAL_E2K = speech_text._e2k_reading
+_patches = []
+
+
+def setUpModule():
+    tmp = tempfile.mkdtemp()
+    _patches.append(mock.patch.object(speech_text, "USER_LIST",
+                                      str(Path(tmp) / "pronunciations.txt")))
+    _patches.append(mock.patch.object(speech_text, "_e2k_reading", lambda word: ""))
+    for p in _patches:
+        p.start()
+
+
+def tearDownModule():
+    for p in reversed(_patches):
+        p.stop()
 
 
 class ListeningTestSentencesTests(unittest.TestCase):
@@ -86,10 +107,71 @@ class UntouchedTextTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(to_spoken(text), text)
 
-    def test_numbers_glued_to_english_words_stay(self):
-        for text in ("GPT-4", "iPhone15", "COVID-19"):
-            with self.subTest(text=text):
-                self.assertEqual(to_spoken(text), text)
+    def test_numbers_glued_to_english_words_go_with_the_word(self):
+        # Layer 3 converts the word, then the number is read with it.
+        cases = {"GPT-4": "ジーピーティーフォー", "PS5": "ピーエスファイブ",
+                 "iPhone15": "アイフォーン15", "COVID-19": "コビッド19"}
+        for before, after in cases.items():
+            with self.subTest(text=before):
+                self.assertEqual(to_spoken(before), after)
+
+
+class EnglishWordTests(unittest.TestCase):
+    """Layer 3: English words in her line are spoken in katakana."""
+
+    def test_built_in_list(self):
+        self.assertEqual(to_spoken("Googleで調べたら、NASAの発表があったわ。"),
+                         "グーグルで調べたら、ナサの発表があったわ。")
+        self.assertEqual(to_spoken("GOOGLEとSteins;Gate"), "グーグルとシュタインズ・ゲート")
+        # Whole words only: a longer word is not a list entry.
+        self.assertEqual(to_spoken("Googlerの話"), "Googlerの話")
+
+    def test_user_list_wins_and_template_is_created(self):
+        path = Path(speech_text.USER_LIST)
+        if path.exists():
+            path.unlink()
+        to_spoken("こんにちは、Googleさん。")
+        self.assertTrue(path.exists())
+        self.assertIn("word = カタカナ", path.read_text(encoding="utf-8"))
+        with path.open("a", encoding="utf-8") as f:
+            f.write("Google = ググル\nnotkana = abc\n")
+        try:
+            self.assertEqual(to_spoken("Googleの話"), "ググルの話")
+            self.assertEqual(to_spoken("notkanaの話"), "notkanaの話")  # bad entry ignored
+        finally:
+            path.unlink()
+
+    def test_acronyms_are_spelled(self):
+        cases = {"GPUが熱い": "ジーピーユーが熱い", "Aランクよ": "エーランクよ",
+                 "AIの話": "エーアイの話", "GPT-40": "ジーピーティー40", "OKよ": "オーケーよ"}
+        for before, after in cases.items():
+            with self.subTest(text=before):
+                self.assertEqual(to_spoken(before), after)
+
+    def test_e2k_for_other_words(self):
+        fake = {"steam": "スチーム", "bogus": "not kana"}.get
+        with mock.patch.object(speech_text, "_e2k_reading",
+                               lambda w: (lambda r: r if r and speech_text.is_kana(r) else "")(fake(w.lower()))):
+            self.assertEqual(to_spoken("Steamで買った"), "スチームで買った")
+            self.assertEqual(to_spoken("Bogusの話"), "Bogusの話")
+
+    def test_without_e2k_words_keep_their_spelling(self):
+        self.assertEqual(to_spoken("Steamで買った"), "Steamで買った")
+
+    def test_long_english_phrase_is_left_alone(self):
+        self.assertEqual(to_spoken("それはI think it's fineって意味ね。"),
+                         "それはI think it's fineって意味ね。")
+
+    def test_units_and_pm25_stay_with_the_number_layer(self):
+        self.assertEqual(to_spoken("16GBで、気温は23°C、PM2.5は低い。"),
+                         "16ギガバイトで、気温は23度、" + speech_text.PM25_SPOKEN + "は低い。")
+        self.assertEqual(to_spoken("10 km/hで5m/s"), "時速10キロで秒速5メートル")
+
+    @unittest.skipUnless(__import__("importlib").util.find_spec("e2k"), "e2k not installed")
+    def test_real_e2k(self):
+        reading = _REAL_E2K("steam")
+        self.assertTrue(speech_text.is_kana(reading), reading)
+        self.assertEqual(_REAL_E2K("steam"), reading)          # cached, same answer
 
 
 class NameReadingTests(unittest.TestCase):

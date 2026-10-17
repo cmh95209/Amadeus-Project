@@ -133,6 +133,13 @@ class AddressRuleTests(_FreshAppTests):
         self.assertIn("ADDRESSING THE USER", named)
         self.assertTrue(named.endswith("BLOCK"))
 
+    def test_voice_block_asks_for_katakana_foreign_words(self):
+        # Voice layer 3: prevention in the prompt (speech_text is the net).
+        with patch.object(self.ja_voice, "load_voice_block", return_value="BLOCK"):
+            content = self.ja_voice.build_voice_context(50)["content"]
+        self.assertIn("FOREIGN WORDS:", content)
+        self.assertIn("Python -> パイソン", content)
+
     def test_rule_failure_never_breaks_the_block(self):
         with patch.object(self.ja_voice, "load_voice_block", return_value="BLOCK"), \
              patch.object(self.ja_voice, "address_rule", side_effect=RuntimeError("x")):

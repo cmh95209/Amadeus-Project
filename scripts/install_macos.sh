@@ -523,14 +523,17 @@ ensure_env "amadeus-cm" "3.13"
 pip_in_env "amadeus" install --quiet --upgrade pip >/dev/null 2>&1 || true
 # ddgs: the DuckDuckGo search library behind her web search (weather is
 # separate - it uses a keyless Open-Meteo feed and needs no library).
-pip_in_env "amadeus" install Flask flask-cors requests tqdm langchain langchain-openai pydantic ddgs \
+# e2k: a small offline English->katakana model (public-domain code; its model
+# is trained on CC-BY-SA dictionaries) so her voice says English words the
+# Japanese way instead of switching to an English accent.
+pip_in_env "amadeus" install Flask flask-cors requests tqdm langchain langchain-openai pydantic ddgs e2k \
     || die "Could not install the app's packages." "See the install log for details: $INSTALL_LOG"
 
 # Smoke test: the whole backend must import cleanly in this toolbox.
 # ddgs is imported lazily by the backend (web search), so also check it
 # explicitly: a machine that lost the search library must never hide
 # behind a passing smoke test.
-smoke="$(cd "$PROJ/backend" && run_in_env "amadeus" "import api; import ddgs; print('SMOKE_OK')" 2>&1 | tail -1)"
+smoke="$(cd "$PROJ/backend" && run_in_env "amadeus" "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | tail -1)"
 if [ "${smoke}" = "SMOKE_OK" ]; then
     log "  App toolbox ready (startup smoke test passed)."
 else

@@ -2,7 +2,8 @@
 """Spoken-form rewriting for the voice (GPT-SoVITS).
 
 Layer 1 = numbers (below). Layer 2 = the user's name: its saved kana reading
-replaces the Latin spelling (see to_spoken / rule_reading).
+replaces the Latin spelling (see to_spoken / rule_reading). Layer 3 = other
+English words -> katakana (pronunciation lists, acronyms, e2k).
 
 
 GPT-SoVITS splits each line by language before speaking and reads Japanese
@@ -20,10 +21,12 @@ but long kana runs get chopped into odd phrases and come out slow.
 
 Only the text sent to the voice changes; the stored and displayed Japanese
 line is untouched. Pure rules, no model call. Numbers glued onto Latin
-letters ("GPT-4", "iPhone15") are left alone - that word is spoken in English
-anyway (a later layer handles English words).
+letters ("GPT-4", "iPhone15") are left to layer 3, which converts the word
+first.
 """
+import os
 import re
+import threading
 
 # The one spelling chosen by ear for this common air-quality term.
 PM25_SPOKEN = "ＰＭ2点5"   # full-width PM: Japanese-style pitch
@@ -172,17 +175,166 @@ def _swap_name(text: str, name: str, reading: str) -> str:
     return text.replace(name, reading)
 
 
+# --- layer 3: English words (2026-10-17) --------------------------------------
+# Order: the user's pronunciation list, then the built-in one (exact, whole
+# words, case-insensitive) -> ALL-CAPS acronyms spelled the Japanese way
+# (GPU -> ジーピーユー) -> e2k (offline English->katakana model) for any
+# other word. A run of 3+ English words is left alone: chat cleaning drops
+# such phrases from the voice line, and a whole sentence in katakana sounds
+# wrong. Latin units glued to a number ("16GB", "5 km") are left for the
+# number layer. Without e2k installed, unknown words keep today's reading.
+DEFAULT_LIST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "pronunciations_default.txt")
+USER_LIST = os.path.join("data", "pronunciations.txt")   # personal, never in git
+_USER_LIST_TEMPLATE = """\
+# How she says particular words (her voice only - the text is unchanged).
+# One per line:  word = カタカナ      Lines starting with # are ignored.
+# Matching ignores upper/lower case. Your entries win over the built-in list
+# (backend/pronunciations_default.txt). Changes apply to her next line.
+#
+# Steins;Gate = シュタインズ・ゲート
+"""
+_EN_NUMBERS = ["ゼロ", "ワン", "ツー", "スリー", "フォー", "ファイブ", "シックス",
+               "セブン", "エイト", "ナイン", "テン"]
+_UNIT_WORDS = {u for u in _UNITS if re.fullmatch(r"[A-Za-z/]+", u)}
+_PHRASE = re.compile(r"[A-Za-z][A-Za-z']*(?:[ \t]+[A-Za-z][A-Za-z']*){2,}")
+_WORD = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z']*)(-?)(\d{1,3})?(?![A-Za-z0-9])")
+_list_cache: dict = {}
+_e2k_state = {"tried": False, "c2k": None}
+_e2k_cache: dict = {}
+_e2k_lock = threading.Lock()
+
+
+def _read_list(path: str) -> dict:
+    """{word (casefolded): kana} from a 'word = カタカナ' file; cached by
+    modification time so an edit applies to the next line."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {}
+    cached = _list_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    entries = {}
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                word, reading = (part.strip() for part in line.split("=", 1))
+                if word and is_kana(reading):
+                    entries[word.casefold()] = reading
+    except OSError:
+        return {}
+    _list_cache[path] = (mtime, entries)
+    return entries
+
+
+def _ensure_user_list() -> None:
+    """Create the personal list with instructions the first time."""
+    if os.path.exists(USER_LIST):
+        return
+    try:
+        os.makedirs(os.path.dirname(USER_LIST), exist_ok=True)
+        with open(USER_LIST, "w", encoding="utf-8") as f:
+            f.write(_USER_LIST_TEMPLATE)
+    except OSError:
+        pass
+
+
+def _pronunciations() -> dict:
+    _ensure_user_list()
+    merged = dict(_read_list(DEFAULT_LIST))
+    merged.update(_read_list(USER_LIST))       # the user's entries win
+    return merged
+
+
+def _apply_list(text: str, entries: dict) -> str:
+    if not entries:
+        return text
+    alternatives = "|".join(re.escape(w) for w in sorted(entries, key=len, reverse=True))
+    # Whole words, but a number may follow straight on (iPhone15).
+    pattern = re.compile(r"(?<![A-Za-z])(?:" + alternatives + r")(?![A-Za-z])",
+                         re.IGNORECASE)
+    return pattern.sub(lambda m: entries[m.group(0).casefold()], text)
+
+
+def _e2k_reading(word: str) -> str:
+    """Katakana for one English word from e2k, or '' (not installed, or an
+    answer that is not kana). Loaded once, on first use (~0.3 s)."""
+    key = word.lower()
+    if key in _e2k_cache:
+        return _e2k_cache[key]
+    with _e2k_lock:
+        if not _e2k_state["tried"]:
+            _e2k_state["tried"] = True
+            try:
+                from e2k import C2K
+                _e2k_state["c2k"] = C2K()
+            except Exception as exc:
+                print(f"[AmadeusSpeak] e2k unavailable, English words keep their reading: {exc!r}")
+        c2k = _e2k_state["c2k"]
+    reading = ""
+    if c2k is not None:
+        try:
+            reading = c2k(key)
+        except Exception:
+            reading = ""
+    reading = reading if is_kana(reading) else ""
+    _e2k_cache[key] = reading
+    return reading
+
+
+def _word_reading(word: str) -> str:
+    if word.isupper() and 1 <= len(word) <= 5:
+        return spell_letters(word)            # AI, GPU, OK, A (e.g. Aランク)
+    if len(word) == 1:
+        return ""
+    return _e2k_reading(word)
+
+
+def _english_to_kana(text: str) -> str:
+    if not re.search(r"[A-Za-z]", text):
+        return text
+    text = _apply_list(text, _pronunciations())
+    protected = [m.span() for m in _PHRASE.finditer(text)]
+
+    def _repl(m):
+        start = m.start()
+        if any(a <= start < b for a, b in protected):
+            return m.group(0)
+        word, hyphen, digits = m.group(1), m.group(2), m.group(3)
+        before = text[:start]
+        if (word in _UNIT_WORDS and re.search(r"\d\s?$", before)) \
+                or before.endswith("°"):
+            return m.group(0)                 # 16GB, 5 km, 23°C: the number layer's job
+        reading = _word_reading(word)
+        if not reading:
+            return m.group(0)
+        if digits is None:
+            return reading + hyphen
+        if word.isupper() and int(digits) <= 10:
+            return reading + _EN_NUMBERS[int(digits)]    # GPT-4 -> ...フォー
+        return reading + digits                # iPhone15 -> アイフォーン15
+    text = _WORD.sub(_repl, text)
+    # A dash between a converted word and its number is not a minus sign
+    # (COVID-19 -> コビッド19), so the number layer must not see it.
+    return re.sub(r"(?<=[ァ-ヺー])-(?=\d)", "", text)
+
+
 def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
     """Rewrite text into the form the voice engine reads naturally:
-    the user's name -> its saved reading, then numbers (with units, times,
-    dates). Text with nothing to rewrite comes back unchanged."""
+    the user's name -> its saved reading, English words -> katakana, then
+    numbers (with units, times, dates). Text with nothing to rewrite comes
+    back unchanged."""
     if not text:
         return text
     swapped = _swap_name(text, name, name_reading)
-    t = _normalize(swapped)
+    normalized = _normalize(swapped)
+    t = _english_to_kana(normalized.replace("PM2.5", PM25_SPOKEN))
     if not re.search(r"\d", t):
-        return swapped
-    t = t.replace("PM2.5", PM25_SPOKEN)
+        return swapped if t == normalized else t
     t = _sub(_ISO_DATE, _iso_date, t)
     t = _sub(_PHONE, _phone, t)
     t = _sub(_TIME, _time, t)

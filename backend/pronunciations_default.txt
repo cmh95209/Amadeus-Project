@@ -1,0 +1,53 @@
+# Built-in pronunciations for her voice (layer 3, speech_text.py).
+# One per line:  word = カタカナ      Lines starting with # are ignored.
+# Matching ignores upper/lower case and only hits whole words.
+# A user's own list (backend/data/pronunciations.txt) wins over this one.
+# Anything not listed: ALL-CAPS acronyms are spelled (GPU -> ジーピーユー),
+# other words go through e2k. Add a word here when e2k gets a common one wrong.
+
+# --- the story ---
+Amadeus = アマデウス
+Kurisu = クリス
+Makise = マキセ
+Okabe = オカベ
+Steins;Gate = シュタインズ・ゲート
+SERN = セルン
+CERN = セルン
+
+# --- acronyms said as words (not letter by letter) ---
+NASA = ナサ
+NATO = ナトー
+UNESCO = ユネスコ
+JAXA = ジャクサ
+COVID = コビッド
+OK = オーケー
+
+# --- tech and web (e2k gets these wrong or awkward) ---
+Python = パイソン
+iPhone = アイフォーン
+iPad = アイパッド
+OpenAI = オープンエーアイ
+ChatGPT = チャットジーピーティー
+Minecraft = マインクラフト
+Spotify = スポティファイ
+YouTube = ユーチューブ
+Google = グーグル
+Netflix = ネットフリックス
+Discord = ディスコード
+Twitter = ツイッター
+Instagram = インスタグラム
+TikTok = ティックトック
+GitHub = ギットハブ
+Windows = ウィンドウズ
+Microsoft = マイクロソフト
+Apple = アップル
+Amazon = アマゾン
+Android = アンドロイド
+Linux = リナックス
+Wi-Fi = ワイファイ
+WiFi = ワイファイ
+email = メール
+e-mail = メール
+JavaScript = ジャバスクリプト
+Claude = クロード
+Gemini = ジェミニ
