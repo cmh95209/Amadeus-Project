@@ -36,6 +36,28 @@ AMADEUS_PORTS = {
 # its install fails, the app simply runs without long-term memory (soft-fail).
 CM_DIR = PROJECT_ROOT / "memory_sidecar"
 
+# An install made with the installer's -EnvSuffix option uses its own conda
+# environments (e.g. "GPTSoVits-test"); the installer records the suffix
+# here (start_windows.bat reads the same file for the app environment).
+ENV_SUFFIX_FILE = RUNTIME_DIR / "env_suffix.txt"
+
+
+def env_suffix() -> str:
+    """The recorded environment suffix ("-test"), or "" for a normal install.
+    A malformed file is ignored rather than turned into a bad env name."""
+    try:
+        text = ENV_SUFFIX_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    ok = text.startswith("-") and len(text) > 1 and \
+        all(c.isalnum() or c in "_-" for c in text[1:])
+    return text if ok else ""
+
+
+def env_name(base: str) -> str:
+    """The conda environment name this install uses for `base`."""
+    return base + env_suffix()
+
 
 def _cm_python() -> Path:
     rel = Path("venv") / "Scripts" / "python.exe" if os.name == "nt" \
@@ -78,10 +100,11 @@ def _cm_base_python() -> Path | None:
     if not conda:
         return None
     home = Path(conda).resolve().parent.parent
+    name = env_name("amadeus-cm")
     if os.name == "nt":
-        candidate = home / "envs" / "amadeus-cm" / "python.exe"
+        candidate = home / "envs" / name / "python.exe"
     else:
-        candidate = home / "envs" / "amadeus-cm" / "bin" / "python"
+        candidate = home / "envs" / name / "bin" / "python"
     return candidate if candidate.exists() else None
 
 
@@ -437,6 +460,8 @@ def preflight(conda: str, npm: str) -> None:
     print(f"  Conda   : {conda}")
     print(f"  npm     : {npm}")
     print(f"  Python  : {sys.executable}")
+    if env_suffix():
+        print(f"  Envs    : this install's own (suffix '{env_suffix()}')")
 
 
 # Browsers that accept Chromium's autoplay flag (matched on the executable's
@@ -590,6 +615,19 @@ def _open_browser(url: str) -> None:
             return
     webbrowser.open(url)
 
+def gptsovits_command(conda: str) -> list[str]:
+    """The voice engine runs in its own conda environment."""
+    return [
+        conda,
+        "run",
+        "-n",
+        env_name("GPTSoVITS"),
+        "--no-capture-output",
+        "python",
+        str(BACKEND_DIR / "start_gptsovits.py"),
+    ]
+
+
 def run(no_browser: bool = False) -> None:
     conda = find_conda()
     npm = find_npm()
@@ -609,19 +647,7 @@ def run(no_browser: bool = False) -> None:
     ensure_frontend_dependencies(npm)
 
     print("\n[Launcher] Starting GPT-SoVITS...")
-    gpt = start_process(
-        "gptsovits",
-        [
-            conda,
-            "run",
-            "-n",
-            "GPTSoVITS",
-            "--no-capture-output",
-            "python",
-            str(BACKEND_DIR / "start_gptsovits.py"),
-        ],
-        PROJECT_ROOT,
-    )
+    gpt = start_process("gptsovits", gptsovits_command(conda), PROJECT_ROOT)
     wait_for_port("GPT-SoVITS", GPT_PORT, gpt, timeout=180)
 
     # CharacterMemory sidecar: the slowest starter (CPU embedder + lore

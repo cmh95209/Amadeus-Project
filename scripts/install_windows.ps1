@@ -164,7 +164,22 @@ param(
     # Optional: where to install. Example:
     #   .\install_windows.ps1 -InstallDir "C:\Some\Place"
     # Without it, the default (your user profile's "Amadeus" folder) is used.
-    [string]$InstallDir = ""
+    [string]$InstallDir = "",
+    # ---- Test options (for the project's own test installs; testers never
+    #      need them). They change only WHERE the code comes from and the
+    #      NAMES of the Python environments - every step below runs the same.
+    # Clone from a git repo on this PC instead of GitHub (no push needed).
+    [string]$Source = "",
+    # Which branch to install (default: the released one).
+    [string]$Branch = "main",
+    # Give this install its own Python environments (e.g. "test" ->
+    # amadeus-test, amadeus-cm-test, GPTSoVits-test), so a test install never
+    # touches the environments of another install on the same PC. Remembered
+    # in the install folder: a re-run without it keeps the same suffix.
+    [string]$EnvSuffix = "",
+    # Pretend the graphics card has this much memory (GB), to walk through
+    # every local-model tier on one PC. -1 = use the real card.
+    [int]$SimulateVramGB = -1
 )
 
 $ErrorActionPreference = "Continue"
@@ -183,8 +198,10 @@ $LogPath    = Join-Path $InstallDir "install_log.txt"
 # older installers sit on the old feature branch; they are moved to main
 # (Step 3) when they hold nothing of the user's own.
 $ForkUrl       = "https://github.com/cmh95209/Amadeus-Project.git"
-$Branch        = "main"
 $LegacyBranch  = "feature/character-memory-spike"
+# -Source: a local repo stands in for GitHub everywhere (first clone AND the
+# update check on a re-run), so a re-run picks up new local commits.
+if ($Source) { $ForkUrl = (Resolve-Path -LiteralPath $Source -ErrorAction SilentlyContinue).Path }
 
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
@@ -288,6 +305,19 @@ try {
     Log "  AMADEUS INSTALLER v4.12  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
+    if ($Source -or $Branch -ne "main" -or $EnvSuffix -or $SimulateVramGB -ge 0) {
+        Log "TEST OPTIONS in use:" "Magenta"
+        if ($Source)              { Log ("  code from this PC : " + $Source) "Magenta" }
+        if ($Branch -ne "main")   { Log ("  branch            : " + $Branch) "Magenta" }
+        if ($EnvSuffix)           { Log ("  environment suffix: " + $EnvSuffix) "Magenta" }
+        if ($SimulateVramGB -ge 0){ Log ("  pretend graphics memory: " + $SimulateVramGB + " GB") "Magenta" }
+    }
+    if ($Source -and -not ($ForkUrl -and (Test-Path (Join-Path $ForkUrl ".git")))) {
+        Die ("-Source must be a git project folder on this PC (with a .git folder inside): " + $Source)
+    }
+    if ($EnvSuffix -and $EnvSuffix -notmatch '^-?[A-Za-z0-9_]+$') {
+        Die ("-EnvSuffix may contain only letters, digits and _ (got: " + $EnvSuffix + ")")
+    }
     Read-Host "Press Enter to begin" | Out-Null
 
     # ---------- STEP 1: winget ----------
@@ -425,6 +455,33 @@ try {
         Ensure-Clone $ForkUrl $proj $Branch @("backend\main.py","start_windows.bat")
     }
 
+    # Which Python environments this install uses. Normally the plain names;
+    # with -EnvSuffix its own set. The suffix is remembered inside the
+    # project folder (start_windows.bat, check_amadeus.bat and the launcher
+    # read the same file), and a re-run without -EnvSuffix keeps it - so a
+    # forgotten option can never install into another install's environments.
+    $suffixFile = Join-Path $proj ".runtime\env_suffix.txt"
+    $savedSuffix = ""
+    if (Test-Path $suffixFile) { $savedSuffix = (Get-Content $suffixFile -Raw).Trim() }
+    if ($EnvSuffix) {
+        $wanted = "-" + $EnvSuffix.TrimStart("-")
+        if ($savedSuffix -and $savedSuffix -ne $wanted) {
+            Die ("This folder already uses the environments ending in '" + $savedSuffix + "'. Run again with -EnvSuffix " + $savedSuffix.TrimStart("-") + " (or install into a new folder).")
+        }
+        $sfx = $wanted
+    } else {
+        $sfx = $savedSuffix
+        if ($sfx) { Log ("  This install uses its own Python environments (ending in '" + $sfx + "') - keeping them.") "Yellow" }
+    }
+    if ($sfx -and -not $savedSuffix) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $suffixFile -Parent) | Out-Null
+        Set-Content -Path $suffixFile -Value $sfx -NoNewline -Encoding ascii
+    }
+    $EnvApp   = "amadeus" + $sfx
+    $EnvCm    = "amadeus-cm" + $sfx
+    $EnvVoice = "GPTSoVits" + $sfx
+    Log ("  Python environments: " + $EnvApp + ", " + $EnvCm + ", " + $EnvVoice)
+
     # ---------- STEP 4: voice engine ----------
     Step 4 "Downloading the voice engine (GPT-SoVITS)"
     $gpt = Join-Path $proj "GPT-SoVITS"
@@ -447,12 +504,12 @@ try {
 
     # ---------- STEP 5: backend env ----------
     Step 5 "Setting up the Amadeus Python environments"
-    Ensure-Env "amadeus"
+    Ensure-Env $EnvApp
     # The memory sidecar's package list needs a newer Python (3.12+) than the
     # app environment (3.10), so it gets its own environment. The launcher
     # finds it on first start and builds the sidecar from it.
-    Ensure-Env "amadeus-cm" "3.13"
-    Invoke-PipInEnv "amadeus" @("--upgrade", "pip") | Out-Null
+    Ensure-Env $EnvCm "3.13"
+    Invoke-PipInEnv $EnvApp @("--upgrade", "pip") | Out-Null
     # ddgs: the DuckDuckGo search library behind her web search (weather is
     # separate - it uses a keyless Open-Meteo feed and needs no library).
     # The 2026-10-07 fresh-VM run proved a fresh PC was missing this: she
@@ -461,7 +518,7 @@ try {
     # e2k: a small offline English->katakana model (public-domain code; its
     # model is trained on CC-BY-SA dictionaries) so her voice says English
     # words the Japanese way instead of switching to an English accent.
-    Invoke-PipInEnv "amadeus" @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k")
+    Invoke-PipInEnv $EnvApp @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k")
     if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
     # Smoke test: the whole backend must import cleanly in this environment.
     $backend = Join-Path $proj "backend"
@@ -471,16 +528,16 @@ try {
     # behind a passing smoke test.
     # Direct Python where the toolbox layout is standard (see Env-Python
     # above); the helper route stays as the fallback.
-    $amPy = Env-Python "amadeus"
+    $amPy = Env-Python $EnvApp
     if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
-    else { $smoke = & $conda run -n amadeus python -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
+    else { $smoke = & $conda run -n $EnvApp python -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
 
     # ---------- STEP 6: voice env (PyTorch first, then the rest) ----------
     Step 6 "Setting up the voice engine environment (big download, be patient)"
-    Ensure-Env "GPTSoVits"
+    Ensure-Env $EnvVoice
     Push-Location $gpt
     $pipLog = Join-Path $InstallDir "voice_pip.log"
 
@@ -495,9 +552,9 @@ try {
     # re-run on such a machine moves on in seconds. (On a fresh PC the
     # answer is 'none' and the normal download happens.)
     $torchProbe = "try:`n    import torch`n    print('T|' + torch.__version__ + '|' + str(torch.version.cuda or 'cpu') + '|' + str(torch.cuda.is_available()))`nexcept Exception:`n    print('NONE')`n"
-    $gptPy = Env-Python "GPTSoVits"
+    $gptPy = Env-Python $EnvVoice
     if ($gptPy) { $torchInfo = (& $gptPy -c $torchProbe 2>&1 | Out-String).Trim() }
-    else { $torchInfo = (& $conda run -n GPTSoVits python -c $torchProbe 2>&1 | Out-String).Trim() }
+    else { $torchInfo = (& $conda run -n $EnvVoice python -c $torchProbe 2>&1 | Out-String).Trim() }
     $torchReady = $false
     if ($torchInfo -match '^T\|') {
         $tp = $torchInfo.Split('|')   # T | version | cuda build tag | can-see-GPU
@@ -506,13 +563,13 @@ try {
     if ($torchReady) {
         Log ("  PyTorch " + $tp[1] + " is already in place and ready for this machine - skipping the download.") "Green"
     } else {
-        Invoke-PipInEnv "GPTSoVits" @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null   # clear any stale copy
+        Invoke-PipInEnv $EnvVoice @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null   # clear any stale copy
         if ($hasGpu) {
             Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (required for RTX 50-series / Blackwell)." "Green"
-            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") 2>&1 | Tee-Object -FilePath $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") 2>&1 | Tee-Object -FilePath $pipLog
         } else {
             Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow"
-            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog
         }
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
@@ -522,8 +579,8 @@ try {
     }
 
     # --- 6b. Install the remaining voice packages (any error is now captured).
-    Invoke-PipInEnv "GPTSoVits" @("install", "-r", "extra-req.txt", "--no-deps") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
-    Invoke-PipInEnv "GPTSoVits" @("install", "-r", "requirements.txt") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+    Invoke-PipInEnv $EnvVoice @("install", "-r", "extra-req.txt", "--no-deps") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+    Invoke-PipInEnv $EnvVoice @("install", "-r", "requirements.txt") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
     if ($LASTEXITCODE -ne 0) {
         # Last resort: install everything except the Japanese text helper
         # (pyopenjtalk). The patched voice code treats it as optional, so
@@ -532,7 +589,7 @@ try {
         $reqCore = Join-Path $gpt "requirements-core.txt"
         Get-Content $reqAll | Where-Object { $_ -notmatch "pyopenjtalk" } | Set-Content -Path $reqCore -Encoding ascii
         Log "  Retrying the voice packages without the optional Japanese text helper..." "Yellow"
-        Invoke-PipInEnv "GPTSoVits" @("install", "-r", $reqCore) 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+        Invoke-PipInEnv $EnvVoice @("install", "-r", $reqCore) 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Log "  Voice packages installed (Japanese text helper skipped - voice still works)." "Yellow"
         } else {
@@ -548,7 +605,7 @@ try {
     # Direct Python where the toolbox layout is standard (step 6 already
     # located it in $gptPy); the helper route stays as the fallback.
     if ($gptPy) { $gpuCheck = & $gptPy -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
-    else { $gpuCheck = & $conda run -n GPTSoVits python -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
+    else { $gpuCheck = & $conda run -n $EnvVoice python -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
     if ($hasGpu) {
         if ($gpuCheck -match "GPU_OK") { Log "  PyTorch can see your GPU - voice synthesis will run on it." "Green" }
         else { Log "  NOTE: PyTorch is installed but could not see the GPU yet. Update your NVIDIA driver, then re-run this installer once." "Yellow" }
@@ -646,12 +703,12 @@ try {
     # The 120 s socket timeout in $nltkCode keeps a stalled download from
     # hanging forever (it then falls back to the yellow note + on-first-use
     # fetch, as before).
-    $nltkPy = Join-Path $condaHome "envs\GPTSoVits\python.exe"
+    $nltkPy = Join-Path $condaHome ("envs\" + $EnvVoice + "\python.exe")
     if (Test-Path $nltkPy) {
         $nltkOut = & $nltkPy -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
     } else {
         # Fallback for exotic layouts where the env's python is elsewhere.
-        $nltkOut = & $conda run -n GPTSoVits python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
+        $nltkOut = & $conda run -n $EnvVoice python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
     }
     if ($nltkOut -match "NLTK_DATA_OK") {
         Log "  Voice text data for Western-script words is in place." "Green"
