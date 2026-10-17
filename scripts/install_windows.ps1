@@ -13,6 +13,12 @@
 #     Gemma 4 model that fits this PC, and downloads it (and llama.cpp, the
 #     program that runs it) at the end, resumable and checked against the
 #     official checksums. Models live in <install folder>\models.
+#   - A calm screen: one progress box per step (the current package and its
+#     download percentage) instead of hundreds of scrolling lines.
+#   - install_log.txt now records EVERYTHING the helper programs print (pip,
+#     conda, git, winget, npm), with their result codes - one file to send
+#     if something goes wrong. It is saved as UTF-8.
+#   - At the end it offers to start Amadeus right away.
 #
 #  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
 #   - Installs and updates the fork's main branch (it used to follow a
@@ -226,11 +232,157 @@ $LegacyBranch  = "feature/character-memory-spike"
 # update check on a re-run), so a re-run picks up new local commits.
 if ($Source) { $ForkUrl = (Resolve-Path -LiteralPath $Source -ErrorAction SilentlyContinue).Path }
 
+# The install log is UTF-8 (Windows' old default encoding turned Japanese text
+# and pip's symbols into "?"). Log = screen + log; Write-LogOnly = log only
+# (the full output of every outside program lands there - see Invoke-Tool).
+$Utf8NoBom = New-Object Text.UTF8Encoding $false
+function Write-LogLines($lines, $file = $LogPath){
+    if (-not $lines -or -not $file) { return }
+    try { [IO.File]::AppendAllText($file, (($lines -join "`r`n") + "`r`n"), $Utf8NoBom) } catch {}
+}
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
-    try { Add-Content -Path $LogPath -Value ("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg) } catch {}
+    Write-LogLines @(("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg))
 }
-function Step($n,$title){ Log ""; Log ("==== STEP $n : $title ====") "Cyan" }
+function Write-LogOnly($msg){ Write-LogLines @(("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg)) }
+
+# The whole install in one bar (progress box at the top of the window);
+# Invoke-Tool shows the current program's progress under it.
+$TotalSteps = 11
+function Step($n,$title){
+    Log ""; Log ("==== STEP $n of $TotalSteps : $title ====") "Cyan"
+    $ProgressPreference = "Continue"
+    Write-Progress -Id 1 -Activity "Installing Amadeus" -Status ("Step $n of $TotalSteps : $title") `
+        -PercentComplete ([int]([math]::Min(100, [math]::Max(0, $n) * 100 / $TotalSteps)))
+}
+
+# Windows command-line quoting for one argument list (the rules every
+# Microsoft C program uses to split its command line back into arguments).
+function Join-ProcessArgs([string[]]$list){
+    $parts = foreach ($a in $list) {
+        $a = [string]$a
+        if ($a -ne "" -and $a -notmatch '[\s"]') { $a; continue }
+        $sb = New-Object Text.StringBuilder
+        [void]$sb.Append('"'); $bs = 0
+        foreach ($ch in $a.ToCharArray()) {
+            if ($ch -eq [char]'\') { $bs++; continue }
+            if ($ch -eq [char]'"') { [void]$sb.Append(('\' * ($bs * 2 + 1)) + '"'); $bs = 0; continue }
+            if ($bs) { [void]$sb.Append('\' * $bs); $bs = 0 }
+            [void]$sb.Append($ch)
+        }
+        [void]$sb.Append(('\' * ($bs * 2)) + '"')
+        $sb.ToString()
+    }
+    return ($parts -join ' ')
+}
+
+# Run one outside program (pip, conda, git, winget, npm) the quiet way:
+#  * EVERY line it prints goes into install_log.txt (and $ExtraLog), under a
+#    ">>> label" heading, with its result code - so a tester's log always
+#    shows WHY something failed, not only that it did;
+#  * the screen gets one progress line instead of hundreds: pip's current
+#    package + download percentage (its "raw" progress mode), git's own
+#    percentages, else the label and the time so far;
+#  * $LASTEXITCODE is the program's result code, as with a direct call, and
+#    $script:LastToolTail holds its last 15 lines for error messages.
+# Lines are read as they come (a carriage return counts as a line end, so
+# git's in-place progress updates arrive live).
+$script:LastToolTail = @()
+$script:LastToolInstalled = 0
+function Invoke-Tool {
+    param([string]$Label, [string]$Exe, [string[]]$Arguments = @(), [string]$ExtraLog = "")
+    $ProgressPreference = "Continue"
+    $started = Get-Date
+    $tail = New-Object Collections.Generic.Queue[string]
+    $buffer = New-Object Collections.Generic.List[string]
+    $buffer.Add(("{0}  >>> {1}: {2} {3}" -f (Get-Date -Format 'HH:mm:ss'), $Label, $Exe, (Join-ProcessArgs $Arguments)))
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = Join-ProcessArgs $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
+    $psi.WorkingDirectory = (Get-Location).ProviderPath   # honours Push-Location
+    try { $proc = [Diagnostics.Process]::Start($psi) }
+    catch {
+        $buffer.Add("      | could not start: " + $_.Exception.Message)
+        Write-LogLines $buffer; Write-LogLines $buffer $ExtraLog
+        $script:LastToolTail = @("could not start " + $Exe + ": " + $_.Exception.Message)
+        $global:LASTEXITCODE = 9009
+        return
+    }
+    $count = 0; $current = ""; $pct = -1; $installed = 0; $lastDraw = [datetime]::MinValue
+    $handle = {
+        param($line)
+        $t = $line.TrimEnd()
+        if ($t -eq "") { return }
+        if ($t -match '^Progress (\d+) of (\d+)$') {          # pip --progress-bar raw
+            if ([double]$Matches[2] -gt 0) { $pct = [int](100 * [double]$Matches[1] / [double]$Matches[2]) }
+            return                                            # not worth a log line
+        }
+        if ($t -match '^\s*(?<what>[A-Za-z][A-Za-z ]{2,30}):\s+(?<p>\d{1,3})%') {   # git / git-lfs
+            $pct = [int]$Matches.p; $current = $Matches.what.Trim()
+            if ($pct -lt 100) { return }                      # log each phase once, when done
+        }
+        elseif ($t -match '^Collecting (\S+)') { $count++; $current = $Matches[1]; $pct = -1 }
+        elseif ($t -match '^\s*Downloading (\S+) \((.+)\)') { $current = "downloading " + $Matches[1] + " (" + $Matches[2] + ")"; $pct = 0 }
+        elseif ($t -match '^Installing collected packages: (.+)$') { $current = "installing " + (($Matches[1] -split ',').Count) + " packages"; $pct = -1 }
+        elseif ($t -match '^Successfully installed (.+)$') { $installed = (($Matches[1].Trim()) -split '\s+').Count }
+        $buffer.Add("      | " + $t)
+        $tail.Enqueue($t); while ($tail.Count -gt 15) { [void]$tail.Dequeue() }
+    }
+    $outTask = $proc.StandardOutput.ReadLineAsync(); $outDone = $false
+    $errTask = $proc.StandardError.ReadLineAsync(); $errDone = $false
+    while (-not ($outDone -and $errDone)) {
+        $pending = @()
+        if (-not $outDone) { $pending += $outTask }
+        if (-not $errDone) { $pending += $errTask }
+        [void][Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]]$pending, 250)
+        if (-not $outDone -and $outTask.IsCompleted) {
+            $l = $outTask.Result
+            if ($null -eq $l) { $outDone = $true } else { . $handle $l; $outTask = $proc.StandardOutput.ReadLineAsync() }
+        }
+        if (-not $errDone -and $errTask.IsCompleted) {
+            $l = $errTask.Result
+            if ($null -eq $l) { $errDone = $true } else { . $handle $l; $errTask = $proc.StandardError.ReadLineAsync() }
+        }
+        $now = Get-Date
+        if (($now - $lastDraw).TotalMilliseconds -ge 250) {
+            $lastDraw = $now
+            $secs = [int]($now - $started).TotalSeconds
+            $elapsed = if ($secs -ge 60) { "{0} min {1} s" -f [int][math]::Floor($secs / 60), ($secs % 60) } else { "$secs s" }
+            if ($count -gt 0) { $status = "Package " + $count + ": " + $current }
+            elseif ($current) { $status = $current }
+            else { $status = "working..." }
+            $status = $status + "   (" + $elapsed + ")"
+            if ($pct -ge 0) { Write-Progress -Id 2 -ParentId 1 -Activity $Label -Status $status -PercentComplete ([math]::Min(100, $pct)) }
+            else { Write-Progress -Id 2 -ParentId 1 -Activity $Label -Status $status }
+        }
+        if ($buffer.Count -ge 50) { Write-LogLines $buffer; Write-LogLines $buffer $ExtraLog; $buffer.Clear() }
+    }
+    $proc.WaitForExit()
+    $code = $proc.ExitCode
+    Write-Progress -Id 2 -ParentId 1 -Activity $Label -Completed
+    $buffer.Add(("{0}  <<< {1}: exit {2} ({3} s)" -f (Get-Date -Format 'HH:mm:ss'), $Label, $code, [int]((Get-Date) - $started).TotalSeconds))
+    Write-LogLines $buffer; Write-LogLines $buffer $ExtraLog
+    $script:LastToolTail = $tail.ToArray()
+    $script:LastToolInstalled = $installed
+    $global:LASTEXITCODE = $code
+}
+
+# The last lines a failed program printed, for an error message.
+function Get-ToolTail { return ($script:LastToolTail -join "`n") }
+
+# Full path of a program on PATH (Invoke-Tool starts programs directly).
+function Resolve-Exe($name){
+    $c = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Source }
+    return $name
+}
 function Die($msg){
     Log "" "Red"; Log ("INSTALL STOPPED: " + $msg) "Red"
     Log ("Please open and send this file to your helper:  " + $LogPath) "Yellow"
@@ -283,8 +435,10 @@ function Ensure-Clone($url, $dest, $branch, $markers){
         Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
         if (Test-Path $dest) { throw ("Could not remove the old " + $leaf + " folder. Close any program using it and run the installer again.") }
     }
-    if ($branch) { & git clone -b $branch $url $dest } else { & git clone $url $dest }
-    if ($LASTEXITCODE -ne 0) { throw ("Could not download " + $leaf + ". Check your internet connection, then run the installer again.") }
+    $gitArgs = @("clone", "--progress")
+    if ($branch) { $gitArgs += @("-b", $branch) }
+    Invoke-Tool ("Downloading " + $leaf) (Resolve-Exe "git") ($gitArgs + @($url, $dest))
+    if ($LASTEXITCODE -ne 0) { throw ("Could not download " + $leaf + ". Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
     if (-not (Test-Complete $dest $markers)) { throw ("Downloaded " + $leaf + " but it looks incomplete. Run the installer again to retry.") }
     Log ("  Downloaded " + $leaf + ".") "Green"
 }
@@ -293,8 +447,9 @@ function Ensure-Clone($url, $dest, $branch, $markers){
 function Ensure-Env($name, $py="3.10"){
     $names = & $conda env list | ForEach-Object { ($_ -split '\s+')[0] }
     if ($names -contains $name) { Log ("  Python environment '" + $name + "' already exists.") "Yellow"; return }
-    & $conda create -n $name python=$py -y | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw ("Could not create the '" + $name + "' Python environment.") }
+    Invoke-Tool ("Creating the Python environment '" + $name + "'") $conda @("create", "-n", $name, ("python=" + $py), "-y")
+    if ($LASTEXITCODE -ne 0) { throw ("Could not create the '" + $name + "' Python environment.`n" + (Get-ToolTail)) }
+    Log ("  Python environment '" + $name + "' created.") "Green"
 }
 
 # Locate a toolbox's own Python program (the program that actually runs the
@@ -313,10 +468,23 @@ function Env-Python($name){
 # Run pip inside one of the toolboxes. Prefers the toolbox's own Python
 # (no middleman); uses the helper route only as a fallback. $pipArgs is
 # everything pip should receive, e.g. @("install", "Flask") or
-# @("uninstall", "-y", "torch").
-function Invoke-PipInEnv($name, $pipArgs){
+# @("uninstall", "-y", "torch"). Runs through Invoke-Tool (full output in the
+# log + $extraLog, one progress line on screen). Install/download commands get
+# pip's "raw" progress mode (download percentages the progress line can
+# show); a pip too old to know it is simply asked again without it.
+function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
+    $pipArgs = @($pipArgs)
+    $withRaw = $pipArgs
+    if ($pipArgs.Count -gt 0 -and $pipArgs[0] -in @("install", "download")) {
+        $withRaw = @($pipArgs[0], "--progress-bar", "raw") + @($pipArgs | Select-Object -Skip 1)
+    }
     $py = Env-Python $name
-    if ($py) { & $py -m pip $pipArgs } else { & $conda run -n $name pip $pipArgs }
+    if ($py) { $exe = $py; $pre = @("-m", "pip") } else { $exe = $conda; $pre = @("run", "-n", $name, "pip") }
+    Invoke-Tool $label $exe ($pre + $withRaw) $extraLog
+    if ($LASTEXITCODE -ne 0 -and $withRaw.Count -ne $pipArgs.Count -and
+        (Get-ToolTail) -match "no such option|invalid choice|unrecognized arguments") {
+        Invoke-Tool ($label + " (again, plain progress)") $exe ($pre + $pipArgs) $extraLog
+    }
 }
 
 # ============================================================================
@@ -715,6 +883,8 @@ function Get-VerifiedFile($url, $dest, [double]$bytes, $sha256, $label){
         if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) { break }
         if (Test-Path $curl) {
             & $curl -L --fail --retry 5 --retry-delay 10 --connect-timeout 30 -C - --progress-bar -o $part $url
+            $have = if (Test-Path -LiteralPath $part) { (Get-Item -LiteralPath $part).Length } else { 0 }
+            Write-LogOnly ("  download attempt " + $try + " (" + $label + "): curl exit " + $LASTEXITCODE + ", " + $have + " of " + [int64]$bytes + " bytes")
         } else {
             try { Invoke-WebRequest $url -OutFile $part -UseBasicParsing -TimeoutSec 86400 } catch { Log ("  " + $_.Exception.Message) "Yellow" }
         }
@@ -725,7 +895,9 @@ function Get-VerifiedFile($url, $dest, [double]$bytes, $sha256, $label){
         throw ("Could not download " + $label + " right now. Check your internet connection, then run the installer again - it continues where it stopped.")
     }
     Log "  Checking the downloaded file (about a minute for the big ones)..."
-    if ((Get-Sha256 $part) -ne $sha256) {
+    $got = Get-Sha256 $part
+    Write-LogOnly ("  checksum " + $label + ": " + $got + $(if ($got -eq $sha256) { " (matches)" } else { " (EXPECTED " + $sha256 + ")" }))
+    if ($got -ne $sha256) {
         Remove-Item -LiteralPath $part -Force
         throw ($label + " was downloaded but is damaged (its checksum does not match the official one), so it was deleted. Run the installer again to download it fresh.")
     }
@@ -775,6 +947,7 @@ function Install-LlamaBuild($build){
     # Smoke test: the program must start (catches a missing runtime file or
     # a driver that cannot load the CUDA build).
     $ver = & $found.FullName --version 2>&1 | Out-String
+    Write-LogOnly ("  llama-server --version (exit " + $LASTEXITCODE + "): " + $ver.Trim())
     if ($LASTEXITCODE -ne 0) { throw ("llama.cpp (" + $build + ") would not start on this PC: " + $ver.Trim()) }
     Set-Content -LiteralPath $done -Value $found.FullName -NoNewline -Encoding utf8
     foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
@@ -841,6 +1014,29 @@ function Install-BuiltinLlm($proj, $choice){
     return ($serverOk -and $modelOk)
 }
 
+# The last question: start Amadeus right away? The installer runs as
+# administrator, and a program it starts directly would run as administrator
+# too (and so would the browser she opens). Windows Explorer starts her
+# instead - as the normal user, exactly like a double-click on the file.
+function Offer-StartAmadeus($proj){
+    $ProgressPreference = "Continue"
+    Write-Progress -Id 1 -Activity "Installing Amadeus" -Completed
+    $bat = Join-Path $proj "start_windows.bat"
+    if (-not (Test-Path $bat)) { Read-Host "Press Enter to close this window" | Out-Null; return }
+    Log ""
+    if ((Read-Answer "Start Amadeus now? Type Y (yes) or N (no, I'll start it later)" @("Y","N")) -eq "Y") {
+        try {
+            Start-Process -FilePath (Join-Path $env:SystemRoot "explorer.exe") -ArgumentList ('"' + $bat + '"')
+            Log "  Amadeus is starting in her own window (the first start takes a little longer). You can close this one." "Green"
+        } catch {
+            Log ("  Could not start her from here (" + $_.Exception.Message + "). Double-click start_windows.bat instead.") "Yellow"
+        }
+    } else {
+        Log ("  To start her later, double-click: " + $bat)
+    }
+    Read-Host "Press Enter to close this window" | Out-Null
+}
+
 if ($HardwareCheckOnly) {
     $hwDir = if ($InstallDir) { $InstallDir } else { Join-Path $env:USERPROFILE "Amadeus" }
     $hw = Invoke-HardwareCheck $hwDir
@@ -850,7 +1046,8 @@ if ($HardwareCheckOnly) {
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer " + $InstallerVersion + ") started " + (Get-Date))
+# UTF-8 with a byte-order mark, so even old Notepad shows Japanese text right.
+[IO.File]::WriteAllText($LogPath, ("Amadeus install (installer " + $InstallerVersion + ") started " + (Get-Date) + "`r`n"), (New-Object Text.UTF8Encoding $true))
 if ($LlmScreensOnly) { $SkipLlmDownload = $true }
 
 try {
@@ -899,7 +1096,7 @@ try {
 
     function Install-Pkg($name, $id){
         Log ("  Installing " + $name + " ... (can take a few minutes)")
-        winget install -e --id $id --silent --accept-source-agreements --accept-package-agreements | Out-Null
+        Invoke-Tool ("Installing " + $name) (Resolve-Exe "winget") @("install", "-e", "--id", $id, "--silent", "--accept-source-agreements", "--accept-package-agreements")
         if ($LASTEXITCODE -eq 0) { Log ("  Installed " + $name + ".") "Green" }
         else { Log ("  WARNING: " + $name + " install returned code " + $LASTEXITCODE + ". We will double-check below.") "Yellow" }
     }
@@ -965,8 +1162,8 @@ try {
     if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log "  FFmpeg already present." "Green" }
     else { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
 
-    winget install -e --id Git.LFS --silent --accept-source-agreements --accept-package-agreements | Out-Null
-    & git lfs install 2>$null
+    Invoke-Tool "Installing Git LFS" (Resolve-Exe "winget") @("install", "-e", "--id", "Git.LFS", "--silent", "--accept-source-agreements", "--accept-package-agreements")
+    Invoke-Tool "Setting up Git LFS" (Resolve-Exe "git") @("lfs", "install")
     Log "  Git + LFS ready." "Green"
 
     # ---------- STEP 3: Amadeus project ----------
@@ -1076,7 +1273,7 @@ try {
     # app environment (3.10), so it gets its own environment. The launcher
     # finds it on first start and builds the sidecar from it.
     Ensure-Env $EnvCm "3.13"
-    Invoke-PipInEnv $EnvApp @("--upgrade", "pip") | Out-Null
+    Invoke-PipInEnv $EnvApp @("install", "--upgrade", "pip") "Updating pip (app)"
     # ddgs: the DuckDuckGo search library behind her web search (weather is
     # separate - it uses a keyless Open-Meteo feed and needs no library).
     # The 2026-10-07 fresh-VM run proved a fresh PC was missing this: she
@@ -1085,8 +1282,9 @@ try {
     # e2k: a small offline English->katakana model (public-domain code; its
     # model is trained on CC-BY-SA dictionaries) so her voice says English
     # words the Japanese way instead of switching to an English accent.
-    Invoke-PipInEnv $EnvApp @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k")
-    if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
+    Invoke-PipInEnv $EnvApp @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k") "Installing the app packages"
+    if ($LASTEXITCODE -ne 0) { throw ("Could not install the backend packages. Send me the log. The last lines were:`n" + (Get-ToolTail)) }
+    Log ("  App packages installed" + $(if ($script:LastToolInstalled) { " (" + $script:LastToolInstalled + " new)" } else { "" }) + ".") "Green"
     # Smoke test: the whole backend must import cleanly in this environment.
     $backend = Join-Path $proj "backend"
     Push-Location $backend
@@ -1098,6 +1296,7 @@ try {
     $amPy = Env-Python $EnvApp
     if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
     else { $smoke = & $conda run -n $EnvApp python -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
+    Write-LogOnly ("  backend smoke test output: " + $smoke.Trim())
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
@@ -1107,6 +1306,11 @@ try {
     Ensure-Env $EnvVoice
     Push-Location $gpt
     $pipLog = Join-Path $InstallDir "voice_pip.log"
+    # A fresh voice_pip.log per run (the voice engine's pip output; the same
+    # lines also go into install_log.txt).
+    try { [IO.File]::WriteAllText($pipLog, ("Voice engine packages, installer " + $InstallerVersion + ", " + (Get-Date) + "`r`n"), $Utf8NoBom) } catch {}
+    # Up-to-date pip first: its "raw" progress mode drives the progress line.
+    Invoke-PipInEnv $EnvVoice @("install", "--upgrade", "pip") "Updating pip (voice engine)" $pipLog
 
     # --- 6a. Install PyTorch FIRST, with the build that matches your hardware.
     #         Doing it before requirements.txt means the big download happens once
@@ -1122,6 +1326,7 @@ try {
     $gptPy = Env-Python $EnvVoice
     if ($gptPy) { $torchInfo = (& $gptPy -c $torchProbe 2>&1 | Out-String).Trim() }
     else { $torchInfo = (& $conda run -n $EnvVoice python -c $torchProbe 2>&1 | Out-String).Trim() }
+    Write-LogOnly ("  PyTorch check: " + $torchInfo + " (NVIDIA card seen: " + $hasGpu + ")")
     $torchReady = $false
     if ($torchInfo -match '^T\|') {
         $tp = $torchInfo.Split('|')   # T | version | cuda build tag | can-see-GPU
@@ -1130,13 +1335,13 @@ try {
     if ($torchReady) {
         Log ("  PyTorch " + $tp[1] + " is already in place and ready for this machine - skipping the download.") "Green"
     } else {
-        Invoke-PipInEnv $EnvVoice @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null   # clear any stale copy
+        Invoke-PipInEnv $EnvVoice @("uninstall", "-y", "torch", "torchvision", "torchaudio") "Removing an old PyTorch" $pipLog   # clear any stale copy
         if ($hasGpu) {
             Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (required for RTX 50-series / Blackwell)." "Green"
-            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") 2>&1 | Tee-Object -FilePath $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") "Installing PyTorch (graphics-card version, about 2.5 GB)" $pipLog
         } else {
             Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow"
-            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") "Installing PyTorch (processor version)" $pipLog
         }
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
@@ -1146,8 +1351,8 @@ try {
     }
 
     # --- 6b. Install the remaining voice packages (any error is now captured).
-    Invoke-PipInEnv $EnvVoice @("install", "-r", "extra-req.txt", "--no-deps") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
-    Invoke-PipInEnv $EnvVoice @("install", "-r", "requirements.txt") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+    Invoke-PipInEnv $EnvVoice @("install", "-r", "extra-req.txt", "--no-deps") "Installing the voice engine extras" $pipLog
+    Invoke-PipInEnv $EnvVoice @("install", "-r", "requirements.txt") "Installing the voice engine packages" $pipLog
     if ($LASTEXITCODE -ne 0) {
         # Last resort: install everything except the Japanese text helper
         # (pyopenjtalk). The patched voice code treats it as optional, so
@@ -1156,7 +1361,7 @@ try {
         $reqCore = Join-Path $gpt "requirements-core.txt"
         Get-Content $reqAll | Where-Object { $_ -notmatch "pyopenjtalk" } | Set-Content -Path $reqCore -Encoding ascii
         Log "  Retrying the voice packages without the optional Japanese text helper..." "Yellow"
-        Invoke-PipInEnv $EnvVoice @("install", "-r", $reqCore) 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+        Invoke-PipInEnv $EnvVoice @("install", "-r", $reqCore) "Installing the voice engine packages (without the Japanese text helper)" $pipLog
         if ($LASTEXITCODE -eq 0) {
             Log "  Voice packages installed (Japanese text helper skipped - voice still works)." "Yellow"
         } else {
@@ -1173,6 +1378,7 @@ try {
     # located it in $gptPy); the helper route stays as the fallback.
     if ($gptPy) { $gpuCheck = & $gptPy -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
     else { $gpuCheck = & $conda run -n $EnvVoice python -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
+    Write-LogOnly ("  PyTorch GPU check: " + $gpuCheck.Trim())
     if ($hasGpu) {
         if ($gpuCheck -match "GPU_OK") { Log "  PyTorch can see your GPU - voice synthesis will run on it." "Green" }
         else { Log "  NOTE: PyTorch is installed but could not see the GPU yet. Update your NVIDIA driver, then re-run this installer once." "Yellow" }
@@ -1189,8 +1395,9 @@ try {
     # to know the download finished, so a re-run does NOT download again.
     if (-not (Test-Path (Join-Path $hf "s2G488k.pth"))) {
         if (Test-Path $hf) { Remove-Item -Recurse -Force $hf -ErrorAction SilentlyContinue }
-        & git clone https://huggingface.co/lj1995/GPT-SoVITS $hf
-        if ($LASTEXITCODE -ne 0) { throw "Could not download the voice model files. Check your internet connection, then run the installer again." }
+        Invoke-Tool "Downloading the voice model files" (Resolve-Exe "git") @("clone", "--progress", "https://huggingface.co/lj1995/GPT-SoVITS", $hf)
+        if ($LASTEXITCODE -ne 0) { throw ("Could not download the voice model files. Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
+        Log "  Voice model files downloaded." "Green"
     } else { Log "  Voice model files already downloaded - reusing them." "Yellow" }
     $dst = Join-Path $gpt "GPT_SoVITS\pretrained_models"
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
@@ -1277,6 +1484,7 @@ try {
         # Fallback for exotic layouts where the env's python is elsewhere.
         $nltkOut = & $conda run -n $EnvVoice python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
     }
+    Write-LogOnly ("  voice text data fetch output: " + $nltkOut.Trim())
     if ($nltkOut -match "NLTK_DATA_OK") {
         Log "  Voice text data for Western-script words is in place." "Green"
     } else {
@@ -1288,7 +1496,7 @@ try {
     Push-Location (Join-Path $proj "frontend")
     # --no-audit --no-fund: skip npm's background registry checks - they
     # save nothing for an install and can add tens of seconds on fresh PCs.
-    & npm install --no-audit --no-fund | Out-Null
+    Invoke-Tool "Setting up the web interface" (Join-Path $env:SystemRoot "System32\cmd.exe") @("/d", "/c", "npm", "install", "--no-audit", "--no-fund")
     if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else { Log "  Frontend ready." "Green" }
     Pop-Location
 
@@ -1318,7 +1526,7 @@ try {
         Log "(You can switch to your own model or a cloud service any time in Settings -> Connection.)"
         Log ""
         Log ("(Install log saved to: " + $LogPath + ")")
-        Read-Host "Press Enter to close this window" | Out-Null
+        Offer-StartAmadeus $proj
         exit 0
     }
     Log "Everything is installed. Amadeus needs a model to think with:" "Green"
@@ -1336,7 +1544,7 @@ try {
     Log "     and paste its API key, if your provider has one."
     Log ""
     Log ("(Install log saved to: " + $LogPath + ")")
-    Read-Host "Press Enter to close this window" | Out-Null
+    Offer-StartAmadeus $proj
 
 } catch {
     Log ("UNEXPECTED ERROR: " + $_.Exception.Message) "Red"

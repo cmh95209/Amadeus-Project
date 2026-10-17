@@ -162,7 +162,7 @@ class _Server:
 _EXTRACT = r"""
 param($Installer, $Out)
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Installer, [ref]$null, [ref]$null)
-$names = @('Log', 'Get-Sha256', 'Get-VerifiedFile', 'Expand-ZipFile')
+$names = @('Write-LogLines', 'Log', 'Write-LogOnly', 'Get-Sha256', 'Get-VerifiedFile', 'Expand-ZipFile')
 $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $names -contains $n.Name }, $true)
 if (@($defs).Count -ne $names.Count) { throw ('expected ' + $names.Count + ' functions, found ' + @($defs).Count) }
 Set-Content -Path $Out -Value ((@($defs) | ForEach-Object { $_.Extent.Text }) -join "`n`n") -Encoding utf8
@@ -171,6 +171,7 @@ Set-Content -Path $Out -Value ((@($defs) | ForEach-Object { $_.Extent.Text }) -j
 _RUN = r"""
 param($Defs, $Url, $Dest, [double]$Bytes, $Sha, $LogFile)
 $LogPath = $LogFile
+$Utf8NoBom = New-Object Text.UTF8Encoding $false
 $DownloadRetryDelaySeconds = 0
 . $Defs
 try { Get-VerifiedFile $Url $Dest $Bytes $Sha "test file"; "RESULT=OK" }
@@ -251,6 +252,7 @@ class DownloadTests(unittest.TestCase):
 _UNZIP = r"""
 param($Defs, $Zip, $Dir, $LogFile)
 $LogPath = $LogFile
+$Utf8NoBom = New-Object Text.UTF8Encoding $false
 . $Defs
 try { Expand-ZipFile $Zip $Dir; "RESULT=OK" }
 catch { "RESULT=ERR " + $_.Exception.Message }
