@@ -665,6 +665,30 @@ button {
   color: #edf1f7;
 }
 
+/* Settings -> Connection: "Built-in" / "Custom Model" (same look as the
+   section buttons above). */
+.brain-choice { margin-bottom: 20px; }
+.brain-choice-label { display: block; margin-bottom: 8px; color: #c9d2df; font-size: 13px; }
+.brain-choice-buttons {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  background: #0b1017;
+}
+.brain-choice-buttons button {
+  flex: 1;
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8fa0b8;
+}
+.brain-choice-buttons button[aria-pressed="true"] { background: #202c3b; color: #edf1f7; }
+.brain-choice-buttons button:disabled { cursor: not-allowed; opacity: 0.5; }
+.brain-choice-buttons button[aria-pressed="true"]:disabled { opacity: 1; }
+
 .unsaved-dot {
   display: inline-block;
   width: 6px;

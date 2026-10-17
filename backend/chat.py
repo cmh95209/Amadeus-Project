@@ -445,7 +445,7 @@ def _web_search_with_content(query: str) -> str:
     if not urls:
         return text
     try:
-        budget = webfetch.char_budget(store.load_context_budget())
+        budget = webfetch.char_budget(store.effective_context_budget())
         deadline = time.monotonic() + FETCH_TOTAL_BUDGET
         for url in urls[:FETCH_MAX_URLS]:
             if time.monotonic() >= deadline:
@@ -2231,6 +2231,22 @@ WAKE_INSTRUCTION_NAMED = {
 # stored) - the same strong steering position the startup greeting uses.
 WAKE_ARRIVAL = "[Your model just connected for the first time.]"
 
+# Built-in-model variant (2026-10-17): nothing was "connected" - her mind
+# runs on the user's PC and has just finished starting for the first time,
+# after she introduced herself and asked for the name (the name is always
+# set by then: ceremony.decide_builtin waits for it).
+WAKE_INSTRUCTION_BUILTIN_NAMED = {
+    "role": "system",
+    "content": (
+        "Your mind, which runs on the user's own PC, has just finished "
+        "starting up for the first time. Initial boot. You already "
+        "introduced yourself and asked for their name - they go by {name}. "
+        "Greet them by name now that you are fully awake. Speak freely and "
+        "naturally."
+    ),
+}
+WAKE_ARRIVAL_BUILTIN = "[Your mind just finished starting up for the first time.]"
+
 _PACK_RULES = {
     "role": "system",
     "content": (
@@ -2563,10 +2579,11 @@ def generate_greeting(mode: str = "startup",
             reading = store.load_username_reading()
             if reading:
                 username += f" (written {reading} in Japanese)"
+            named = (WAKE_INSTRUCTION_BUILTIN_NAMED if builtin_llm.active()
+                     else WAKE_INSTRUCTION_NAMED)
             instruction = {
-                "role": WAKE_INSTRUCTION_NAMED["role"],
-                "content": WAKE_INSTRUCTION_NAMED["content"].replace(
-                    "{name}", username),
+                "role": named["role"],
+                "content": named["content"].replace("{name}", username),
             }
         else:
             instruction = WAKE_INSTRUCTION_ASK
@@ -2632,7 +2649,10 @@ def generate_greeting(mode: str = "startup",
             arrival = "[The user has switched to this conversation.]"
     else:
         # A wake-up is not "opening the app" - it is coming online.
-        arrival = WAKE_ARRIVAL if wake else "[The user just opened the app.]"
+        if wake:
+            arrival = WAKE_ARRIVAL_BUILTIN if builtin_llm.active() else WAKE_ARRIVAL
+        else:
+            arrival = "[The user just opened the app.]"
     # When the prompt tail is a run of her own switch lines (the
     # re-greeting case above), hide the stored greeting rows from the
     # history so she cannot repeat a line she cannot see (2026-09-23). The

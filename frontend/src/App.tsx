@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
-import { deriveFooter, placeGreeting } from "./greetingFlow";
+import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
 import {
@@ -33,7 +33,9 @@ import {
   regenerateMessageVoice,
   getVoiceRetention,
   setVoiceRetention,
-  getContextBudget,
+  getContextBudgetInfo,
+  getBrainMode,
+  setBrainMode,
   setContextBudget,
   getLLMServer,
   setLLMServer,
@@ -45,6 +47,7 @@ import {
   setUserProfile,
   testConnection,
   ConnectionStatus,
+  BrainMode,
   Conversation,
   listConversations,
   createConversation,
@@ -124,6 +127,12 @@ export default function App() {
   const [addressChoice, setAddressChoice] = useState("auto");
   const [addressCustom, setAddressCustom] = useState("");
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
+  // How she thinks (built-in model vs the user's own); null = unknown.
+  const [brain, setBrain] = useState<BrainMode | null>(null);
+  const [brainSwitching, setBrainSwitching] = useState(false);
+  const builtinMode = brain?.mode === "builtin";
+  // The built-in model's cap on the history budget (null = no cap).
+  const [builtinBudgetCap, setBuiltinBudgetCap] = useState<number | null>(null);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Connecting to Amadeus...");
@@ -176,6 +185,14 @@ export default function App() {
   });
   const connStatusText = !connStatus
     ? "Not tested yet."
+    : connStatus.builtin
+      ? connStatus.builtin_model_missing
+        ? "Her built-in model is not installed yet - run the installer again (it continues where it stopped)."
+        : !connStatus.reachable
+          ? "Her built-in model is not running. Restart Amadeus to start it."
+          : connStatus.loading || !connStatus.model_found
+            ? "Her built-in model is loading..."
+            : "Her built-in model is running."
     : !connStatus.reachable
       ? `Can't reach ${connStatus.address}. ${connStatus.error ? connStatus.error : "Is the server running?"}`
       : connStatus.model_configured
@@ -380,6 +397,13 @@ export default function App() {
     let failed = false;
     try {
       const g = await getGreeting(justSaved);
+      // A first-launch line never cuts off the one she is still saying
+      // (e.g. the built-in model got ready mid-intro): wait until she has
+      // finished before it is shown, voiced, or unlocks the chat box. The
+      // backend has already stored it.
+      if (g.kind !== undefined && g.response) {
+        await waitUntilQuiet(() => characterRef.current?.isSpeechBusy() ?? false);
+      }
       if (g.ceremony) setCeremonyState(g.ceremony); // gate + note follow this
       if (g.superseded) {
         // The user spoke while she was writing: the backend dropped the
@@ -390,7 +414,7 @@ export default function App() {
         return;
       }
       const line = g.response;
-      if (!line || (!g.ready && !(g.kind === "intro" || g.kind === "trying" || g.kind === "reminder"))) {
+      if (!line || (!g.ready && !isCeremonyWaitLine(g.kind, g.wait))) {
         // Nothing to say this probe (model not servable yet, or the
         // ceremony is waiting): back to idle, and let the next probe that
         // finds the model re-fire it.
@@ -406,15 +430,15 @@ export default function App() {
       // ready=false (the model is down by definition on a fresh install) and
       // still must be shown: they are what teach a first-time user to
       // connect their model.
-      const ceremonialWait =
-        g.kind === "intro" || g.kind === "trying" || g.kind === "reminder";
+      const ceremonialWait = isCeremonyWaitLine(g.kind, g.wait);
       if (!ceremonialWait) {
         greetedThisSession.current = true;
         sessionStorage.setItem("amadeusGreeted", "1");
       }
       settleGreetPhase(ceremonialWait ? "idle" : "done");
-      // Scripted first-launch lines (intro / trying / reminder / fallback)
-      // can never be regenerated; ordinary greetings and the wake-up can.
+      // Scripted first-launch lines (intro / trying / reminder / fallback,
+      // and their built-in variants) can never be regenerated; ordinary
+      // greetings and the wake-up can.
       const regenerable = g.kind === undefined || g.kind === "wake";
       setMessages((current) => placeGreeting(current, {
         role: "assistant", content: line, id: g.assistantId, is_greeting: true,
@@ -577,8 +601,9 @@ export default function App() {
     setConnTesting(true);
     try {
       // Apply the address being edited first, so the test matches what
-      // "Save connection" would store.
-      await setLLMServer(serverAddress);
+      // "Save connection" would store (not in built-in mode: the address
+      // field is hidden there and the test checks her built-in model).
+      if (!builtinMode) await setLLMServer(serverAddress);
       setConnStatus(await testConnection());
     } catch {
       setConnStatus(null);
@@ -589,7 +614,7 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr, savedName, profile] =
+      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetInfo, serverAddr, savedName, profile, brainInfo] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
@@ -598,19 +623,22 @@ export default function App() {
           getDeepThinking().catch(() => false),
           listConversations().catch(() => null),
           getVoiceRetention().catch(() => 100),
-          getContextBudget().catch(() => 40000),
+          getContextBudgetInfo().catch(() => ({ budget: 40000, builtinCap: null })),
           getLLMServer().catch(() => ""),
           getUsername().catch(() => ({ name: "", reading: "" })),
           getUserProfile().catch(() => ({ pronouns: "", address: "auto" })),
+          getBrainMode().catch(() => null),
         ]);
 
       setMessages(memory);
-      setModelName(currentModel);
+      setModelName(currentModel === "No Model Selected." ? "" : currentModel);
       setHasApiKey(configured);
       setWebAccessState(webOn);
       setDeepThinkingState(deepThinkingOn);
       setVoiceRetentionState(voiceCap);
-      setContextBudgetState(budgetCap);
+      setContextBudgetState(budgetInfo.budget);
+      setBuiltinBudgetCap(budgetInfo.builtinCap);
+      setBrain(brainInfo);
       setServerAddressState(serverAddr);
       setUserName(savedName.name);
       setUserNameReading(savedName.reading);
@@ -811,7 +839,10 @@ export default function App() {
     const nextModel = model.trim();
 
     if (settingsBusy || loading) return;
-    if (!nextModel) {
+    // Built-in mode: her model, server and key come from the installer, so
+    // Save stores only the rest (name, pronouns, ...) and never touches the
+    // user's own model settings (kept for when they switch back).
+    if (!nextModel && !builtinMode) {
       setSettingsError("Enter an LLM model.");
       return;
     }
@@ -821,17 +852,17 @@ export default function App() {
     setSettingsNotice("");
     let keySaved = false;
     try {
-      if (apiKey.trim()) {
+      if (!builtinMode && apiKey.trim()) {
         await setApiKey(apiKey.trim());
         keySaved = true;
         setHasApiKey(true);
         setApiKeyInput("");
       }
-      await setModel(nextModel);
+      if (!builtinMode) await setModel(nextModel);
       const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
       await setContextBudget(contextBudget);
-      await setLLMServer(serverAddress);
+      if (!builtinMode) await setLLMServer(serverAddress);
       // Saved last and never fatal: a backend older than this WebUI has no
       // /setUserProfile yet, and that must not undo the settings above.
       let profileSaved = true;
@@ -864,7 +895,7 @@ export default function App() {
       // the probe's job).
       void fireGreeting(true);
 
-      setStatus(`Model set to ${nextModel}`);
+      setStatus(builtinMode ? "Settings saved" : `Model set to ${nextModel}`);
       setSettingsNotice(
         profileSaved
           ? "Connection settings saved."
@@ -878,6 +909,33 @@ export default function App() {
       );
     } finally {
       setSavingSettings(false);
+    }
+  }
+
+  // Settings -> Connection: "Built-in" / "Custom Model". Saved at once; the
+  // launcher starts (or stops) her built-in model only when Amadeus starts,
+  // so the note asks for a restart.
+  async function chooseBrain(mode: "builtin" | "custom") {
+    if (brainSwitching || !brain || brain.mode === mode) return;
+    if (mode === "builtin" && !brain.available) return;
+    setBrainSwitching(true);
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      const next = await setBrainMode(mode);
+      setBrain(next);
+      const budget = await getContextBudgetInfo().catch(() => null);
+      if (budget) setBuiltinBudgetCap(budget.builtinCap);
+      setSettingsNotice(
+        mode === "builtin"
+          ? "Switched to her built-in model. Restart Amadeus to start it."
+          : "Switched to your own model. Restart Amadeus to free the memory her built-in model uses."
+      );
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not switch.");
+    } finally {
+      setBrainSwitching(false);
     }
   }
 
@@ -1771,6 +1829,45 @@ export default function App() {
             </nav>
 
             <div hidden={settingsSection !== "connection"}>
+              {brain && (
+                <div className="brain-choice" role="group" aria-label="How she thinks">
+                  <span className="brain-choice-label">How she thinks</span>
+                  <div className="brain-choice-buttons">
+                    <button
+                      type="button"
+                      aria-pressed={builtinMode}
+                      disabled={brainSwitching || settingsBusy || !brain.available}
+                      title={brain.available ? "Her own model, running on this PC" : "Set up by the installer"}
+                      onClick={() => void chooseBrain("builtin")}
+                    >
+                      Built-in
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={!builtinMode}
+                      disabled={brainSwitching || settingsBusy}
+                      onClick={() => void chooseBrain("custom")}
+                    >
+                      Custom Model (your own local or Cloud model)
+                    </button>
+                  </div>
+                  {!brain.available && (
+                    <p className="settings-help">
+                      Built-in is set up by the installer: run it again and
+                      choose option A to give her a model that runs on this PC.
+                    </p>
+                  )}
+                  {builtinMode && (
+                    <p className="settings-help">
+                      {brain.model_missing
+                        ? `${brain.model_label || "Her built-in model"} is not installed yet - run the installer again (it continues the download where it stopped).`
+                        : `She thinks with ${brain.model_label || "her built-in model"}, privately on this PC. Nothing to connect.`}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!builtinMode && (<>
               <p className="settings-intro">
                 Amadeus works with any OpenAI-compatible model server - local (Unsloth
                 Desktop, Ollama, llama.cpp, LM Studio, vLLM) or cloud (OpenRouter,
@@ -1830,6 +1927,7 @@ export default function App() {
                   placeholder="your model name"
                 />
               </label>
+              </>)}
 
               <label>
                 Your name
@@ -1955,7 +2053,7 @@ export default function App() {
                 shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
               </p>
 
-              {connStatus && connStatus.reachable && connStatus.models.length > 0 && (
+              {!builtinMode && connStatus && connStatus.reachable && connStatus.models.length > 0 && (
                 <div className="model-chips">
                   <span className="model-chips-label">Models on the server:</span>
                   {connStatus.models.map((name) => (
@@ -2044,6 +2142,12 @@ export default function App() {
                 uses less memory — good for small local models. Default is
                 40000. The model's context window should hold this number plus
                 about 6000.
+                {builtinMode && builtinBudgetCap !== null && (
+                  <>
+                    {" "}Her built-in model holds at most {builtinBudgetCap} of
+                    history, so a higher number is used as {builtinBudgetCap}.
+                  </>
+                )}
               </p>
 
               <div className="settings-toggle-row" aria-label="Deep thinking">
@@ -2126,7 +2230,7 @@ export default function App() {
                   onClick={saveModel}
                   disabled={settingsBusy || loading}
                 >
-                  {savingSettings ? "Saving..." : "Save connection"}
+                  {savingSettings ? "Saving..." : builtinMode ? "Save" : "Save connection"}
                 </button>
               </div>
             </div>

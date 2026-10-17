@@ -246,6 +246,9 @@ export type GreetingReply = {
    *  (ceremony wait-lines that do NOT finish the ceremony), "wake" |
    *  "fallback" (ceremony finished), or absent (ordinary greeting). */
   kind?: string;
+  /** A first-launch WAIT line (spoken, the ceremony goes on, the box stays
+   *  locked) - newer backends flag every such line, incl. the built-in ones. */
+  wait?: boolean;
   /** True when the user sent a message while the greeting was being
    *  written: the backend dropped the line (not an error, no retry). */
   superseded?: boolean;
@@ -313,6 +316,7 @@ async function fetchGreetingReport(
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
     ceremony,
     kind: typeof data.kind === "string" ? data.kind : undefined,
+    wait: data.wait === true,
   };
 }
 
@@ -543,8 +547,16 @@ export async function setVoiceRetention(limit: number): Promise<number> {
 }
 
 export async function getContextBudget(): Promise<number> {
+  return (await getContextBudgetInfo()).budget;
+}
+
+/** The user's budget plus the built-in model's cap on it (null = no cap). */
+export async function getContextBudgetInfo(): Promise<{ budget: number; builtinCap: number | null }> {
   const data = await parseResponse(await fetch(`${API_BASE}/getContextBudget`, { cache: "no-store" }));
-  return typeof data.budget === "number" ? data.budget : 40000;
+  return {
+    budget: typeof data.budget === "number" ? data.budget : 40000,
+    builtinCap: typeof data.builtin_cap === "number" ? data.builtin_cap : null,
+  };
 }
 
 export async function setContextBudget(budget: number): Promise<number> {
@@ -607,7 +619,51 @@ export type ConnectionStatus = {
   loading?: boolean;
   /** Is the voice engine answering? undefined from older backends. */
   voice_reachable?: boolean;
+  /** She thinks with the built-in model (installer option A). */
+  builtin?: boolean;
+  /** Built-in mode, but its model / llama.cpp is not on disk. */
+  builtin_model_missing?: boolean;
 };
+
+/** How she thinks: the built-in model the installer set up, or the user's
+ *  own / a cloud model ("custom"). */
+export type BrainMode = {
+  /** The installer set a built-in model up on this install (option A). */
+  available: boolean;
+  mode: "builtin" | "custom";
+  model_label: string;
+  model_missing: boolean;
+  context: number | null;
+  /** Only after a switch: the change fully applies after a restart. */
+  restart_needed?: boolean;
+};
+
+function toBrainMode(data: Record<string, unknown>): BrainMode {
+  return {
+    available: data.available === true,
+    mode: data.mode === "builtin" ? "builtin" : "custom",
+    model_label: typeof data.model_label === "string" ? data.model_label : "",
+    model_missing: data.model_missing === true,
+    context: typeof data.context === "number" ? data.context : null,
+    restart_needed: data.restart_needed === true,
+  };
+}
+
+export async function getBrainMode(): Promise<BrainMode> {
+  return toBrainMode(await parseResponse(await fetch(`${API_BASE}/brainMode`, { cache: "no-store" })));
+}
+
+export async function setBrainMode(mode: "builtin" | "custom"): Promise<BrainMode> {
+  return toBrainMode(
+    await parseResponse(
+      await fetch(`${API_BASE}/setBrainMode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      })
+    )
+  );
+}
 
 export async function getLLMServer(): Promise<string> {
   const data = await parseResponse(await fetch(`${API_BASE}/getLLMServer`, { cache: "no-store" }));

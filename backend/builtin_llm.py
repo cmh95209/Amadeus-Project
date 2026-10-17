@@ -66,6 +66,36 @@ def model_name(cfg=None) -> str:
     return stem or "builtin-model"
 
 
+def describe() -> dict:
+    """What Settings shows: is a built-in model set up on this install, is
+    it the one in use, and its state."""
+    cfg = load_config()
+    available = bool(cfg) and bool(cfg.get("model_file"))
+    return {
+        "available": available,
+        "mode": "builtin" if active() else "custom",
+        "model_label": (cfg or {}).get("model_label") or "",
+        "model_missing": available and model_missing(),
+        "context": (cfg or {}).get("context") if available else None,
+    }
+
+
+def save_mode(mode: str) -> None:
+    """Switch between the built-in model and the user's own. LookupError when
+    there is no built-in model on this install to switch to."""
+    cfg = load_config()
+    if not cfg or not cfg.get("model_file"):
+        raise LookupError("No built-in model is set up on this install. Run the "
+                          "installer again and choose option A.")
+    cfg = dict(cfg)
+    cfg["mode"] = "builtin" if mode == "builtin" else "custom"
+    path = config_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 def model_missing() -> bool:
     """True when the installer could not finish the downloads (or the files
     were removed since): the launcher then has nothing to start."""
@@ -74,6 +104,30 @@ def model_missing() -> bool:
         if not cfg.get(ok_key) or not os.path.isfile(str(cfg.get(file_key) or "")):
             return True
     return False
+
+
+# What one prompt needs besides the chat history (her personality, memories,
+# tools, instructions - the Settings help's "about 6000") and her reply
+# (the client's max_tokens). The built-in server's context window must hold
+# all three, so the history gets what is left.
+PROMPT_OVERHEAD_TOKENS = 6000
+REPLY_TOKENS = 4096
+MIN_HISTORY_TOKENS = 1000
+
+
+def history_budget_cap():
+    """The most chat history (tokens) a prompt may carry on the built-in
+    model, or None when built-in mode is off (no cap). 16K -> 6288,
+    32K -> 22672."""
+    if not active():
+        return None
+    try:
+        context = int((load_config() or {}).get("context") or 0)
+    except (TypeError, ValueError):
+        return None
+    if context <= 0:
+        return None
+    return max(MIN_HISTORY_TOKENS, context - PROMPT_OVERHEAD_TOKENS - REPLY_TOKENS)
 
 
 # Gemma 4 writes its reasoning between these markers. Thinking is off, but if

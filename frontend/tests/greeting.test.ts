@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { ConnectionStatus, MemoryMessage } from "../src/api";
-import { deriveFooter, NOT_LISTED_GRACE_MS, placeGreeting } from "../src/greetingFlow";
+import { deriveFooter, isCeremonyWaitLine, NOT_LISTED_GRACE_MS, placeGreeting, waitUntilQuiet } from "../src/greetingFlow";
 import type { GreetPhase } from "../src/greetingFlow";
 
 const greeting = (id: number): MemoryMessage => ({
@@ -88,5 +88,51 @@ assert.deepEqual(footer({ conn: conn({ voice_reachable: false }) }),
 assert.equal(footer({ conn: conn({ voice_reachable: undefined }) }).text, "Ready");
 // Health problems outrank the greeting phase (no "waking up" while offline).
 assert.match(footer({ conn: conn({ reachable: false }), greetPhase: "waking" }).text, /offline/);
+
+// ---- Built-in model (installer option A): the footer names her own model ----
+assert.equal(footer({ conn: conn({ builtin: true, builtin_model_missing: true }) }).text,
+  "Her built-in model is not installed. Run the installer again.");
+assert.equal(footer({ conn: conn({ builtin: true, reachable: false }) }).text,
+  "Her built-in model is not running. Restart Amadeus.");
+assert.equal(footer({ conn: conn({ builtin: true, loading: true }) }).text,
+  "Her built-in model is loading...");
+assert.equal(footer({ conn: conn({ builtin: true, model_found: false }) }).text,
+  "Her built-in model is loading...");
+assert.equal(footer({ conn: conn({ builtin: true }) }).text, "Ready");
+
+// ---- First-launch wait lines (chat box stays locked) ----
+for (const kind of ["intro", "trying", "reminder"]) {
+  assert.equal(isCeremonyWaitLine(kind, undefined), true, `${kind} is a wait line by name`);
+}
+assert.equal(isCeremonyWaitLine("builtin_intro", true), true, "flagged built-in wait line");
+assert.equal(isCeremonyWaitLine("wake", false), false);
+assert.equal(isCeremonyWaitLine("builtin_fallback", false), false);
+assert.equal(isCeremonyWaitLine(undefined, undefined), false);
+
+// ---- waitUntilQuiet: a first-launch line never cuts off the previous one ----
+{
+  // A fake clock: sleep() just advances time.
+  const run = async (busyUntil: number, opts: { maxMs?: number } = {}) => {
+    let t = 0;
+    let checks = 0;
+    await waitUntilQuiet(() => { checks += 1; return t < busyUntil; }, {
+      quietMs: 800, pollMs: 200, maxMs: opts.maxMs ?? 120_000,
+      sleep: async (ms) => { t += ms; }, now: () => t,
+    });
+    return { t, checks };
+  };
+  // Not speaking: goes ahead after the short quiet window.
+  assert.equal((await run(0)).t, 800, "silent player: only the quiet window");
+  // Speaking for 30 s: waits until 30 s + the quiet window.
+  const long = await run(30_000);
+  assert.ok(long.t >= 30_800 && long.t <= 31_000, `waited ${long.t} ms`);
+  // A stuck player never holds her next line back past maxMs.
+  assert.equal((await run(10_000_000, { maxMs: 5_000 })).t, 5_000, "gives up at maxMs");
+  // A brief gap between streamed chunks does not count as finished.
+  let t = 0;
+  const busy = () => t < 1_000 || (t >= 1_400 && t < 3_000);   // 400 ms gap
+  await waitUntilQuiet(busy, { quietMs: 800, pollMs: 200, sleep: async (ms) => { t += ms; }, now: () => t });
+  assert.ok(t >= 3_800, `a 400 ms gap mid-line is not the end (resolved at ${t})`);
+}
 
 console.log("greeting.test.ts: ok");

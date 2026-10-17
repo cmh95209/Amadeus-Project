@@ -1824,6 +1824,19 @@ def load_context_budget() -> int:
     return max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, value))
 
 
+def effective_context_budget() -> int:
+    """The history budget a prompt actually uses: the user's setting, but on
+    the built-in model never more than its context window can hold (the
+    40000 default would overflow a 16K / 32K window as a chat grows)."""
+    budget = load_context_budget()
+    try:
+        import builtin_llm   # late import: builtin_llm imports this module
+        cap = builtin_llm.history_budget_cap()
+    except Exception:
+        cap = None
+    return min(budget, cap) if cap else budget
+
+
 def save_context_budget(budget: int) -> int:
     """Persist the history token budget, clamped to [MIN_CONTEXT_BUDGET, MAX_CONTEXT_BUDGET]."""
     value = max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, int(budget or 0)))
@@ -2215,7 +2228,7 @@ def maybe_roll_summary(conversation_id=None) -> None:
 def build_prompt_messages(token_budget: int | None = None, exclude_ids=None,
                           conversation_id=None) -> List[Dict[str, str]]:
     if token_budget is None:
-        token_budget = load_context_budget()
+        token_budget = effective_context_budget()
     messages = load_memory_for_prompt(conversation_id=conversation_id,
                                       exclude_ids=exclude_ids)
     # Rolling summary: drop the rows the stored summary already covers and

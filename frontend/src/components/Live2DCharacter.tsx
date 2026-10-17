@@ -15,6 +15,8 @@ export type Live2DCharacterHandle = {
   prepareSpeech: () => Promise<void>;
   playSpeech: (url: string) => Promise<void>;
   stopSpeech: () => void;
+  /** A line is loading or still being spoken. */
+  isSpeechBusy: () => boolean;
 };
 
 const Live2DCharacter = forwardRef<Live2DCharacterHandle, { onSpeechError?: (message: string) => void }>(
@@ -37,6 +39,9 @@ const Live2DCharacter = forwardRef<Live2DCharacterHandle, { onSpeechError?: (mes
       },
       stopSpeech() {
         speechPlayerRef.current?.stop();
+      },
+      isSpeechBusy() {
+        return speechPlayerRef.current?.isBusy() ?? false;
       },
     }), []);
 

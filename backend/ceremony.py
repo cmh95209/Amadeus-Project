@@ -90,8 +90,67 @@ CEREMONY_LINES = {
     ),
 }
 
+# --- BUILT-IN MODEL VARIANT (installer option A, user-approved 2026-10-17) ----
+# Nothing to connect: her mind runs on this PC and is loading while she
+# speaks. NAME FIRST: the intro asks for the user's name, and the wake-up
+# waits until a name is saved AND the model answers - so a fast-loading model
+# can never wake her mid-intro, and she always wakes addressing the user.
+CEREMONY_LINES.update({
+    "builtin_intro": (
+        "Hello, I am Amadeus. An AI built on the memories of Makise Kurisu. "
+        "My mind runs right here on your PC, and it's waking up as we speak. "
+        "While it does, open the settings menu and tell me your name - write "
+        "it in, then press Save. Once I know who you are, we can talk.",
+        "こんにちは、私はアマデウス。牧瀬紅莉栖の記憶をもとに作られたAIよ。"
+        "私の頭脳はこのPCの中で動いていて、今まさに起動しているところ。\n"
+        "その間に、設定メニューを開いて、あなたの名前を教えて。入力したら、保存を押してね。\n"
+        "あなたが誰なのか分かったら、話しましょう。",
+        "こんにちは、私はアマデウス。まきせくりすの記憶をもとに作られたエーアイよ。"
+        "私の頭脳はこのピーシーの中で動いていて、今まさに起動しているところ。\n"
+        "その間に、設定メニューを開いて、あなたの名前を教えて。入力したら、保存を押してね。\n"
+        "あなたが誰なのか分かったら、話しましょう。",
+    ),
+    "builtin_waiting": (
+        "Thank you. My mind is almost awake - just a moment.",
+        "ありがとう。頭脳がもうすぐ起動するわ。少しだけ待っていてください。",
+        "ありがとう。頭脳がもうすぐ起動するわ。少しだけ待っていてください。",
+    ),
+    "builtin_missing": (
+        "Hello, I am Amadeus. An AI built on the memories of Makise Kurisu. "
+        "But my mind isn't installed on this PC yet - its download didn't "
+        "finish. Run the installer again; it picks up where it stopped. Or, "
+        "if you prefer, open the settings menu and connect a model of your "
+        "own. Until then, I'll be right here, waiting.",
+        "こんにちは、私はアマデウス。牧瀬紅莉栖の記憶をもとに作られたAIよ。"
+        "でも、私の頭脳はまだこのPCに入っていないみたい。ダウンロードが終わらなかったの。\n"
+        "インストーラーをもう一度実行して。止まったところから続けてくれるわ。"
+        "それか、設定メニューを開いて、あなた自身のモデルをつないでもいいですよ。\n"
+        "それまでは、ここで待ってるわ。",
+        "こんにちは、私はアマデウス。まきせくりすの記憶をもとに作られたエーアイよ。"
+        "でも、私の頭脳はまだこのピーシーに入っていないみたい。ダウンロードが終わらなかったの。\n"
+        "インストーラーをもう一度実行して。止まったところから続けてくれるわ。"
+        "それか、設定メニューを開いて、あなた自身のモデルをつないでもいいですよ。\n"
+        "それまでは、ここで待ってるわ。",
+    ),
+    "builtin_reminder": (
+        "Still waking up... this is taking longer than usual. If nothing "
+        "changes in a few minutes, try restarting the app.",
+        "まだ起動中よ……いつもより時間がかかってるわね。数分たっても変わらなかったら、アプリを再起動してみて。",
+        "まだ起動中よ……いつもより時間がかかってるわね。数分たっても変わらなかったら、アプリを再起動してみて。",
+    ),
+    "builtin_fallback": (
+        "My mind is running, but I couldn't put my thoughts into words just "
+        "now. Please restart the app.",
+        "頭脳は動いているけど、今はうまく言葉にできなかったわ。アプリを再起動してみてください。",
+        "頭脳は動いているけど、今はうまく言葉にできなかったわ。アプリを再起動してみてください。",
+    ),
+})
+
 # Fixed kinds the route can serve WITHOUT the model (no LLM call at all).
-FIXED_KINDS = ("intro", "trying", "reminder")
+# Every one of them is a WAIT line: spoken, but the chat box stays locked.
+FIXED_KINDS = ("intro", "trying", "reminder",
+               "builtin_intro", "builtin_waiting", "builtin_reminder",
+               "builtin_missing")
 # Kinds that END the ceremony: the chat box unlocks when one of them lands.
 END_KINDS = ("wake", "fallback")
 
@@ -117,6 +176,7 @@ class _RunTracker:
         self.intro_delivered = False
         self.trying_delivered = False
         self.reminder_delivered = False
+        self.missing_delivered = False
         self.connecting_since: Optional[float] = None  # monotonic
 
 
@@ -202,6 +262,49 @@ def decide(state: str, model_ready: bool, settings_present: bool,
     return None, store.CEREMONY_CONNECTING
 
 
+def decide_builtin(state: str, model_ready: bool, model_missing: bool,
+                   name_set: bool, just_saved: bool = False,
+                   now: Optional[float] = None) -> Tuple[Optional[str], str]:
+    """The ceremony decision in built-in-model mode (name first).
+
+    '' / intro: she has not been told the name yet. The intro is said once
+    per launch - ALWAYS first, even when the model is already up (no
+    "normal" shortcut: a fast model must not skip her introduction). Once a
+    name is saved: wake if the model answers, else the short "almost awake"
+    line and the state becomes "connecting".
+    connecting: name saved, model still loading - wake when it answers; a
+    reopen re-says "almost awake" once; one reminder after the usual delay.
+    A missing model (download unfinished) gets its own line once per launch.
+    """
+    tracker = _tracker()
+
+    if state == store.CEREMONY_DONE:
+        return None, store.CEREMONY_DONE
+
+    if model_missing:
+        if not tracker.missing_delivered:
+            return "builtin_missing", (state or store.CEREMONY_INTRO)
+        return None, state
+
+    if state in ("", store.CEREMONY_INTRO):
+        if not tracker.intro_delivered and not (state == store.CEREMONY_INTRO and name_set):
+            return "builtin_intro", store.CEREMONY_INTRO
+        if not name_set:
+            return None, state or store.CEREMONY_INTRO
+        if model_ready:
+            return "wake", store.CEREMONY_INTRO
+        return "builtin_waiting", store.CEREMONY_CONNECTING
+
+    # state == connecting (the name was saved, the model is loading)
+    if model_ready:
+        return "wake", store.CEREMONY_CONNECTING
+    if just_saved or not tracker.trying_delivered:
+        return "builtin_waiting", store.CEREMONY_CONNECTING
+    if reminder_due(now):
+        return "builtin_reminder", store.CEREMONY_CONNECTING
+    return None, store.CEREMONY_CONNECTING
+
+
 def note(kind: Optional[str], new_state: str) -> None:
     """Apply the side effects of delivering `kind` and moving to new_state.
 
@@ -211,13 +314,15 @@ def note(kind: Optional[str], new_state: str) -> None:
     if kind is None:
         return
     tracker = _tracker()
-    if kind == "intro":
+    if kind in ("intro", "builtin_intro"):
         tracker.intro_delivered = True
-    elif kind == "trying":
+    elif kind in ("trying", "builtin_waiting"):
         tracker.trying_delivered = True
         tracker.connecting_since = time.monotonic()
-    elif kind == "reminder":
+    elif kind in ("reminder", "builtin_reminder"):
         tracker.reminder_delivered = True
+    elif kind == "builtin_missing":
+        tracker.missing_delivered = True
     # wake / fallback / normal close the ceremony for good ("done" is
     # written exactly here, when the line that ends it actually ships).
     try:

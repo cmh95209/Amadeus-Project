@@ -381,8 +381,14 @@ def settingLLMModel():
 # - returns the currently active LLM model name as a string
 @application.route("/getCurrLLMModel", methods=["GET"])
 def getCurrLLMModel():
-    print("[Flask] /getCurrLLMModel triggered")  
-    LLM_Model = getLLMModel()
+    print("[Flask] /getCurrLLMModel triggered")
+    # Settings' model field is the user's OWN (custom) model. In built-in
+    # mode getLLMModel() names the built-in one, and saving that back would
+    # overwrite the user's custom choice - so the field gets the saved one.
+    if builtin_llm.active():
+        LLM_Model = (chat.LLM_Model or "").strip() or "No Model Selected."
+    else:
+        LLM_Model = getLLMModel()
     if LLM_Model:
         return jsonify({"status": "ok", "message": LLM_Model})
     else:
@@ -634,8 +640,41 @@ def set_voice_retention():
 
 @application.route("/getContextBudget", methods=["GET"])
 def get_context_budget():
-    """The user's conversation-history token budget (estimated tokens)."""
-    return jsonify({"budget": memory.load_context_budget()})
+    """The user's conversation-history token budget (estimated tokens), and
+    the built-in model's cap on it (null when built-in mode is off)."""
+    return jsonify({"budget": memory.load_context_budget(),
+                    "builtin_cap": builtin_llm.history_budget_cap()})
+
+
+# pre: none
+# post: how she thinks - the built-in model the installer set up (option A)
+#       or the user's own / a cloud model. "available" = the installer set a
+#       built-in model up on this install (option B never did).
+@application.route("/brainMode", methods=["GET"])
+def get_brain_mode():
+    return jsonify(builtin_llm.describe())
+
+
+# pre: body {"mode": "builtin" | "custom"}; "builtin" only when available
+# post: the choice is saved in data/local_llm.json. The launcher starts (or
+#       stops) her built-in model only when Amadeus starts, so the reply
+#       says a restart is needed for the switch to fully apply.
+@application.route("/setBrainMode", methods=["POST"])
+def set_brain_mode():
+    data = request.get_json(silent=True)
+    mode = data.get("mode") if isinstance(data, dict) else None
+    if mode not in ("builtin", "custom"):
+        return jsonify({"message": "mode must be 'builtin' or 'custom'"}), 400
+    try:
+        builtin_llm.save_mode(mode)
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"message": f"Could not save the choice: {exc}"}), 500
+    reset_llm()   # rebuild the model clients for the new server
+    info = builtin_llm.describe()
+    info["restart_needed"] = True
+    return jsonify(info)
 
 
 @application.route("/setContextBudget", methods=["POST"])
@@ -1045,6 +1084,8 @@ def _serve_ceremony_line(kind: str, ready: Dict[str, object],
         "conversation_id": conv_id,
         "ceremony": new_state,
         "kind": kind,
+        # A wait line: spoken, but the ceremony goes on (box stays locked).
+        "wait": True,
     })
 
 
@@ -1071,11 +1112,11 @@ def _serve_wake_up():
             voice = pack.assistant_reply_JPS
         except Exception as exc:
             print("[Flask] Wake-up failure:", repr(exc))
-            en, ja_display, ja_voice = ceremony.line("fallback")
+            kind = "builtin_fallback" if builtin_llm.active() else "fallback"
+            en, ja_display, ja_voice = ceremony.line(kind)
             pack = AmadeusPack(assistant_reply_ENG=en, assistant_reply_JPS=ja_display)
             assistant_id, conv_id = _store_greeting_line(pack)
             voice = ja_voice
-            kind = "fallback"
         ceremony.note(kind, memory.CEREMONY_DONE)
         speech_id = _mint_speech_id_text(voice, assistant_id)
         return jsonify({
@@ -1123,9 +1164,15 @@ def greet():
         # added). Until a key is present she stays on the waiting lines.
         if ready["ready"] and not has_api_key():
             ready = {"ready": False, "reason": "API key not set yet"}
-        kind, new_state = ceremony.decide(
-            state, bool(ready["ready"]), _connection_settings_present(),
-            just_saved=just_saved)
+        if builtin_llm.active():
+            # Built-in model: nothing to connect, NAME FIRST (ceremony.py).
+            kind, new_state = ceremony.decide_builtin(
+                state, bool(ready["ready"]), builtin_llm.model_missing(),
+                bool(memory.load_username().strip()), just_saved=just_saved)
+        else:
+            kind, new_state = ceremony.decide(
+                state, bool(ready["ready"]), _connection_settings_present(),
+                just_saved=just_saved)
         if kind in ceremony.FIXED_KINDS:
             return _serve_ceremony_line(kind, ready, new_state)
         if kind == "wake":
