@@ -41,6 +41,10 @@
 #   - Step 1 now prints the actual chip name (the first version had a typo).
 #
 #  WHAT'S NEW IN v1.3 (October 2026, app v2.1):
+#   - Installs and updates the fork's main branch (it used to follow a
+#     feature branch); an older install is moved to main automatically when
+#     it holds nothing of your own. Your saved settings are protected during
+#     the update (the old step listed a wrong file path and was skipped).
 #   - Installs e2k, the small offline model her voice uses to say English
 #     words the Japanese way.
 #   - An existing install updates even though the project's published
@@ -97,7 +101,11 @@ die() {
 #  Configuration (keep in sync with the Windows installer)
 # ----------------------------------------------------------------------------
 REPO_URL="https://github.com/cmh95209/Amadeus-Project"
-BRANCH="feature/character-memory-spike"
+# Since v2.1 every install follows main; installs from older installers sit
+# on the old feature branch and are moved to main in step 3 (when they hold
+# nothing of the user's own).
+BRANCH="main"
+LEGACY_BRANCH="feature/character-memory-spike"
 GPT_REPO_URL="https://github.com/RVC-Boss/GPT-SoVITS.git"
 HF_REPO_URL="https://huggingface.co/lj1995/GPT-SoVITS"
 
@@ -465,43 +473,62 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-#  STEP 3: the app itself (from the fork, on the feature branch)
+#  STEP 3: the app itself (from the fork, main branch)
 # ----------------------------------------------------------------------------
 step 3 "Getting Amadeus (the project files)"
 
 if [ -d "$PROJ/.git" ]; then
     log "  Found an existing Amadeus at $PROJ - updating it..."
-    if ! git -C "$PROJ" checkout --quiet "$BRANCH" 2>/dev/null; then
-        log "  (note: the local copy is not on the expected branch - continuing on what it has)"
+    # Personal live-value files (her saved connection, personality) are kept
+    # out of the update - the same rule as the Windows installer. Only files
+    # that are actually changed are shelved, and only a shelf made here is
+    # put back afterwards.
+    personal="$(git -C "$PROJ" diff --name-only 2>/dev/null \
+                | grep -E '(^|/)(llm_server|llm_model|personality)\.txt$' || true)"
+    stashed=""
+    if [ -n "$personal" ] && git -C "$PROJ" stash push --quiet -m "amadeus-installer-personal" -- $personal; then
+        stashed="yes"
     fi
-    # Personal live-value files (her saved connection, personality) are
-    # excluded from the update - the same rule as the Windows installer.
-    git -C "$PROJ" stash push -m "amadeus-installer-personal" \
-        -- backend/data/llm_model.txt backend/data/llm_server.txt \
-           backend/data/personality.txt backend/data/personality_ja.txt \
-        >/dev/null 2>&1 || true
+    restore_personal() { [ -n "$stashed" ] && git -C "$PROJ" stash pop --quiet >/dev/null 2>&1 || true; }
     git -C "$PROJ" fetch --quiet origin \
-        || die "Could not reach the project repository." \
-               "Check your internet connection, then re-run the installer."
-    if ! git -C "$PROJ" merge --ff-only --quiet "origin/$BRANCH"; then
-        # v2.1 (2026-10): the published history was rewritten once (personal
-        # details taken out of old commits). Move onto it ONLY when this copy
-        # holds nothing of the user's own: every commit the new branch lacks
-        # was published by this project, and both still share the original
-        # project's history. The personal files are stashed above.
+        || { restore_personal; die "Could not reach the project repository." \
+               "Check your internet connection, then re-run the installer."; }
+    # Move onto origin/$BRANCH ONLY when this copy holds nothing of the user's
+    # own: every commit the target lacks was published by this project, and
+    # both share the original project's history. Covers (a) an install made
+    # by an older installer on the old feature branch and (b) the one-time
+    # history clean-up of v2.1 (old commits no longer fast-forward).
+    only_project_commits() {
         own="$(git -C "$PROJ" log --format=%an "origin/$BRANCH..HEAD" 2>/dev/null \
                | grep -v -x -e 'cmh95209' -e 'Amadeus Local Build' || true)"
-        if git -C "$PROJ" merge-base HEAD "origin/$BRANCH" >/dev/null 2>&1 \
-           && [ -z "$own" ] \
-           && git -C "$PROJ" reset --quiet --keep "origin/$BRANCH"; then
-            log "  (the project's history was cleaned up - moved this copy onto it)"
+        git -C "$PROJ" merge-base HEAD "origin/$BRANCH" >/dev/null 2>&1 && [ -z "$own" ]
+    }
+    current="$(git -C "$PROJ" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ "$current" = "$LEGACY_BRANCH" ]; then
+        if only_project_commits && git -C "$PROJ" checkout --quiet -B "$BRANCH" "origin/$BRANCH"; then
+            git -C "$PROJ" branch --quiet --set-upstream-to "origin/$BRANCH" "$BRANCH" >/dev/null 2>&1 || true
+            git -C "$PROJ" branch --quiet -D "$LEGACY_BRANCH" >/dev/null 2>&1 || true
+            log "  (moved this copy from the old feature branch to main)"
         else
-            git -C "$PROJ" stash pop >/dev/null 2>&1 || true
-            die "Your existing Amadeus copy has diverged and cannot be updated automatically." \
+            restore_personal
+            die "Your existing Amadeus copy has changes of its own and cannot be updated automatically." \
                 "Easiest fix: delete the folder $PROJ and re-run this installer (a fresh copy is created)."
         fi
+    else
+        if ! git -C "$PROJ" checkout --quiet "$BRANCH" 2>/dev/null; then
+            log "  (note: the local copy is not on the expected branch - continuing on what it has)"
+        fi
+        if ! git -C "$PROJ" merge --ff-only --quiet "origin/$BRANCH" 2>/dev/null; then
+            if only_project_commits && git -C "$PROJ" reset --quiet --keep "origin/$BRANCH"; then
+                log "  (the project's history was cleaned up - moved this copy onto it)"
+            else
+                restore_personal
+                die "Your existing Amadeus copy has diverged and cannot be updated automatically." \
+                    "Easiest fix: delete the folder $PROJ and re-run this installer (a fresh copy is created)."
+            fi
+        fi
     fi
-    git -C "$PROJ" stash pop >/dev/null 2>&1 || true
+    restore_personal
     log "  Updated to the latest version on the $BRANCH branch."
 else
     log "  Downloading the project (a few dozen MB)..."

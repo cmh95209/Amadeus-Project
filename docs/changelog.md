@@ -29,8 +29,10 @@ awareness; a greeting never lands after you already spoke.
 reply now changes what she remembers; the status bar says what the app is
 really doing (model loading, voice offline).
 
-**Installers.** Windows v4.12 / macOS v1.3 add e2k, and an existing install
-moves onto the new version automatically when the installer is re-run.
+**Installers.** Windows v4.12 / macOS v1.3 add e2k and now install and update
+the `main` branch (they used to follow a feature branch). An existing install -
+including one made by an older installer - moves onto the new version
+automatically when the installer is re-run.
 
 ## v2.0 — Long-Term Memory, Voice-First Dialogue, First Meeting, macOS — October 2026
 

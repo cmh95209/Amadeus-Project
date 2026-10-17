@@ -6,6 +6,9 @@
 #  latest release on GitHub, if you prefer downloading it from there.
 #
 #  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
+#   - Installs and updates the fork's main branch (it used to follow a
+#     feature branch). An existing install from an older installer is moved
+#     to main automatically when it holds nothing of your own.
 #   - Installs e2k, the small offline model her voice uses to say English
 #     words the Japanese way.
 #   - An existing install updates even though the project's published
@@ -134,7 +137,7 @@
 #     (fixes installs that stopped at Step 5 on some machines).
 #
 #  WHAT'S NEW IN v2 (September 13, 2026):
-#   - Installs YOUR fork's feature branch (local LLM support, multi-session
+#   - Installs YOUR fork (since v4.12 its main branch; local LLM support, multi-session
 #     conversations, voice replay, connection test button, ...) instead of
 #     the original project.
 #   - Existing installs get gently updated from the fork when it is safe
@@ -176,12 +179,12 @@ $env:CONDA_PLUGINS_AUTO_ACCEPT_TOS = "yes"
 if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE "Amadeus" }
 $InstallDir = $InstallDir.TrimEnd('\')
 $LogPath    = Join-Path $InstallDir "install_log.txt"
-# Your fork's FEATURE branch holds all the current features (greetings,
-# voice, long-term memory, the first-meeting welcome); main lags behind
-# until that branch is merged. FLIP $Branch BACK TO "main" once the merge
-# is done.
-$ForkUrl   = "https://github.com/cmh95209/Amadeus-Project.git"
-$Branch    = "feature/character-memory-spike"
+# Since v2.1 every install follows the fork's main branch. Installs made by
+# older installers sit on the old feature branch; they are moved to main
+# (Step 3) when they hold nothing of the user's own.
+$ForkUrl       = "https://github.com/cmh95209/Amadeus-Project.git"
+$Branch        = "main"
+$LegacyBranch  = "feature/character-memory-spike"
 
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
@@ -397,6 +400,17 @@ try {
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
                     elseif (Move-ToRewrittenHistory "fork/$Branch" $personal) { Log "  Updated to the latest version (the project's history was cleaned up)." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
+                } elseif ($current -eq $LegacyBranch -and -not $status) {
+                    # An install from an older installer (feature branch): move
+                    # it to main - only when it holds nothing of the user's own.
+                    if (Move-ToRewrittenHistory "fork/$Branch" $personal) {
+                        & git checkout -q -B $Branch 2>$null | Out-Null
+                        & git branch -q --set-upstream-to "fork/$Branch" $Branch 2>$null | Out-Null
+                        & git branch -q -D $LegacyBranch 2>$null | Out-Null
+                        Log "  Updated to the latest version (now following the main branch)." "Green"
+                    } else {
+                        Log ("  This folder has changes of its own on branch '" + $current + "', so I did NOT touch it.") "Yellow"
+                    }
                 } elseif ($current -ne $Branch) {
                     Log ("  This folder is on branch '" + $current + "', so I did NOT touch it.") "Yellow"
                     Log ("  The new features live on branch '" + $Branch + "'.") "Yellow"
