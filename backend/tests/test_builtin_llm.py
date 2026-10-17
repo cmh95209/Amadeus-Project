@@ -276,8 +276,11 @@ class LauncherTests(unittest.TestCase):
                      "--temp 1.0 --top-p 0.95 --top-k 64",
                      "--alias gemma-4-12B-it-qat-UD-Q4_K_XL"):
             self.assertIn(part, joined)
-        i = cmd.index("--chat-template-kwargs")
-        self.assertEqual(json.loads(cmd[i + 1]), {"enable_thinking": False})
+        # Thinking is set per request (backend + sidecar), not server-wide:
+        # b11400 deprecates --chat-template-kwargs, and --reasoning off might
+        # refuse Deep thinking's per-request "on".
+        self.assertNotIn("--chat-template-kwargs", cmd)
+        self.assertNotIn("--reasoning", cmd)
         self.assertNotIn("-md", cmd)
 
     def test_command_for_a_big_tier_keeps_normal_memory(self):

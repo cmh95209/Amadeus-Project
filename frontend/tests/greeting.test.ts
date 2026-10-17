@@ -33,6 +33,14 @@ assert.deepEqual(
   "greeting slots above newer stored rows",
 );
 
+// The pane already shows this greeting (a history reload carried it): it
+// is not added a second time.
+assert.deepEqual(
+  ids(placeGreeting([{ role: "user", content: "a", id: 1 }, greeting(2)], greeting(2))),
+  [1, 2],
+  "a greeting already in the pane is not duplicated",
+);
+
 // A greeting without an id (old backend) just goes to the bottom.
 assert.deepEqual(
   ids(placeGreeting([{ role: "user", content: "hi" }], { role: "assistant", content: "g" })),

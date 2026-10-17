@@ -77,6 +77,78 @@ class EnvSuffixTests(unittest.TestCase):
             shutil.rmtree(mine)
             self.assertIsNone(self.launcher._cm_base_python())
 
+    def test_conda_home_from_any_conda_on_path(self):
+        home = self.tmp / "miniconda3"
+        (home / "envs").mkdir(parents=True)
+        (home / "conda-meta").mkdir()
+        for rel in (("Scripts", "conda.exe"), ("Library", "bin", "conda.BAT"),
+                    ("condabin", "conda.bat"), ("bin", "conda")):
+            exe = home.joinpath(*rel)
+            exe.parent.mkdir(parents=True, exist_ok=True)
+            exe.write_text("", encoding="utf-8")
+            with self.subTest(conda=str(Path(*rel))):
+                self.assertEqual(self.launcher.conda_home(str(exe)), home.resolve())
+        stray = self.tmp / "elsewhere" / "conda.exe"
+        stray.parent.mkdir()
+        stray.write_text("", encoding="utf-8")
+        self.assertIsNone(self.launcher.conda_home(str(stray)))
+
+    def test_sidecar_base_python_found_via_library_bin(self):
+        # 2026-10-18: PATH found miniconda3\Library\bin\conda.BAT first.
+        self._write("-test")
+        home = self.tmp / "miniconda3"
+        bat = home / "Library" / "bin" / "conda.BAT"
+        bat.parent.mkdir(parents=True)
+        bat.write_text("", encoding="utf-8")
+        rel = "python.exe" if os.name == "nt" else os.path.join("bin", "python")
+        py = home / "envs" / "amadeus-cm-test" / rel
+        py.parent.mkdir(parents=True)
+        py.write_text("", encoding="utf-8")
+        with patch.object(self.launcher, "find_conda", return_value=str(bat)):
+            self.assertEqual(self.launcher._cm_base_python(), py.resolve())
+
+    def test_too_old_sidecar_venv_is_detected(self):
+        self.launcher.CM_DIR = self.tmp / "memory_sidecar"
+        cfg = self.launcher.CM_DIR / "venv" / "pyvenv.cfg"
+        cfg.parent.mkdir(parents=True)
+        for version, ok in (("3.10.22", False), ("3.11.9", False), ("3.12.0", True), ("3.13.5", True)):
+            with self.subTest(version=version):
+                cfg.write_text(f"home = x\nversion = {version}\n", encoding="utf-8")
+                self.assertEqual(self.launcher._cm_venv_python_ok(), ok)
+        cfg.unlink()
+        self.assertTrue(self.launcher._cm_venv_python_ok())   # unreadable = as before
+
+    def test_stale_old_venv_is_rebuilt_not_retried(self):
+        sc = self.tmp / "memory_sidecar"
+        (sc / "venv").mkdir(parents=True)
+        (sc / "cm_sidecar.py").write_text("", encoding="utf-8")
+        (sc / "requirements.txt").write_text("", encoding="utf-8")
+        (sc / "venv" / "pyvenv.cfg").write_text("version = 3.10.22\n", encoding="utf-8")
+        self.launcher.CM_DIR = sc
+        fake_py = sc / "venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+        fake_py.parent.mkdir(parents=True)
+        fake_py.write_text("", encoding="utf-8")
+        good = self.tmp / "py313" / "python.exe"
+        calls = []
+        with patch.object(self.launcher, "_cm_base_python", return_value=good), \
+             patch.object(self.launcher.subprocess, "run", side_effect=lambda cmd, **k: calls.append(cmd)), \
+             patch.object(self.launcher, "_pip_install_sidecar", return_value=True):
+            self.assertTrue(self.launcher.ensure_cm_sidecar())
+        self.assertEqual(calls[0][:3], [str(good), "-m", "venv"])   # rebuilt from the right Python
+
+    def test_no_suitable_python_means_no_doomed_venv(self):
+        sc = self.tmp / "memory_sidecar"
+        sc.mkdir()
+        (sc / "cm_sidecar.py").write_text("", encoding="utf-8")
+        (sc / "requirements.txt").write_text("", encoding="utf-8")
+        self.launcher.CM_DIR = sc
+        with patch.object(self.launcher, "_cm_base_python", return_value=None), \
+             patch.object(self.launcher.sys, "version_info", (3, 10, 22)), \
+             patch.object(self.launcher.subprocess, "run") as run:
+            self.assertFalse(self.launcher.ensure_cm_sidecar())
+            run.assert_not_called()
+        self.assertFalse((sc / "venv").exists())
+
     def test_voice_engine_runs_in_suffixed_env(self):
         cmd = self.launcher.gptsovits_command("conda")
         self.assertEqual(cmd[1:4], ["run", "-n", "GPTSoVITS"])

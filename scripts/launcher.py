@@ -100,9 +100,13 @@ def builtin_files_ready(cfg: dict) -> tuple[bool, str]:
 
 
 def llama_server_command(cfg: dict) -> list[str]:
-    """llama-server with the tier's settings. Thinking stays OFF at the
-    server too (the backend also asks per request); sampling = Unsloth's
-    recommendation for Gemma 4 (the Model Sampling panel can override)."""
+    """llama-server with the tier's settings; sampling = Unsloth's
+    recommendation for Gemma 4 (the Model Sampling panel can override).
+    Thinking is NOT set server-wide: every request already says it (the
+    backend's normal client "off", Deep thinking "on", the memory sidecar
+    "off"), and b11400 deprecates --chat-template-kwargs for this while its
+    replacement (--reasoning off) might also refuse Deep thinking's per-
+    request "on". The backend's thought filter catches any leak."""
     cmd = [
         str(cfg["server_exe"]),
         "-m", str(cfg["model_file"]),
@@ -112,7 +116,6 @@ def llama_server_command(cfg: dict) -> list[str]:
         "-c", str(int(cfg.get("context") or 16384)),
         "-ngl", str(int(cfg.get("gpu_layers") if cfg.get("gpu_layers") is not None else 999)),
         "--jinja",
-        "--chat-template-kwargs", '{"enable_thinking":false}',
         "--temp", "1.0", "--top-p", "0.95", "--top-k", "64",
     ]
     if cfg.get("kv_cache") == "q8_0":
@@ -213,13 +216,48 @@ def _cm_base_python() -> Path | None:
     conda = find_conda()
     if not conda:
         return None
-    home = Path(conda).resolve().parent.parent
+    home = conda_home(conda)
+    if home is None:
+        return None
     name = env_name("amadeus-cm")
     if os.name == "nt":
         candidate = home / "envs" / name / "python.exe"
     else:
         candidate = home / "envs" / name / "bin" / "python"
     return candidate if candidate.exists() else None
+
+
+def conda_home(conda: str) -> Path | None:
+    """The conda installation folder (the one holding envs/) for whichever
+    conda program PATH found. Usually two folders up (Scripts\\conda.exe,
+    bin/conda), but some setups put miniconda3\\Library\\bin\\conda.BAT or
+    condabin\\conda.bat first on PATH - "two up" then lands in Library\\ and
+    the sidecar's own environment is not found (2026-10-18, test install:
+    the sidecar venv was built from Python 3.10 and could never install).
+    So walk up until a folder with envs/ (or conda-meta/) appears."""
+    path = Path(conda).resolve()
+    for folder in list(path.parents)[:4]:
+        if (folder / "envs").is_dir() or (folder / "conda-meta").is_dir():
+            return folder
+    return None
+
+
+# The sidecar's pinned packages need this Python or newer (numpy 2.5.x).
+CM_MIN_PYTHON = (3, 12)
+
+
+def _cm_venv_python_ok() -> bool:
+    """Does the sidecar venv's Python meet CM_MIN_PYTHON? (Read from the
+    venv's pyvenv.cfg; unreadable = assume fine, as before.)"""
+    import re
+    try:
+        text = (CM_DIR / "venv" / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    m = re.search(r"^\s*version(?:_info)?\s*=\s*(\d+)\.(\d+)", text, re.M)
+    if not m:
+        return True
+    return (int(m.group(1)), int(m.group(2))) >= CM_MIN_PYTHON
 
 
 def ensure_cm_sidecar() -> bool:
@@ -238,6 +276,13 @@ def ensure_cm_sidecar() -> bool:
         return False
     if _cm_python().exists() and _cm_marker().exists():
         return True
+    if _cm_python().exists() and not _cm_venv_python_ok():
+        # An unfinished venv built from a Python too old for the pinned
+        # packages (numpy 2.5 needs 3.12+) would fail on every start: start
+        # it over from the right interpreter instead of retrying forever.
+        print("[Launcher] Memory sidecar venv was built from a Python older "
+              f"than {CM_MIN_PYTHON[0]}.{CM_MIN_PYTHON[1]} - rebuilding it...")
+        shutil.rmtree(CM_DIR / "venv", ignore_errors=True)
     if _cm_python().exists():
         print("[Launcher] Memory sidecar venv exists but its install is "
               "unverified (an earlier run was interrupted?) - re-running "
@@ -246,6 +291,13 @@ def ensure_cm_sidecar() -> bool:
             return False
     else:
         base = _cm_base_python()
+        if base is None and sys.version_info[:2] < CM_MIN_PYTHON:
+            print("[Launcher] WARNING: the memory sidecar needs Python "
+                  f"{CM_MIN_PYTHON[0]}.{CM_MIN_PYTHON[1]}+, and its own "
+                  f"'{env_name('amadeus-cm')}' environment was not found - "
+                  "the app runs without long-term memory. Re-running the "
+                  "installer creates that environment.")
+            return False
         source = ("the dedicated 'amadeus-cm' environment"
                   if base is not None else "the app environment")
         print("[Launcher] Memory sidecar not installed yet - one-time setup "

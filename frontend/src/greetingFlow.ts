@@ -126,6 +126,10 @@ export function placeGreeting(
   greeting: MemoryMessage,
 ): MemoryMessage[] {
   const gid = greeting.id;
+  // Already showing (a history reload that landed while the greeting was
+  // being shown already carried the stored row - 2026-10-18 test install:
+  // the same greeting twice in a row): never add it a second time.
+  if (typeof gid === "number" && messages.some((m) => m.id === gid)) return messages;
   const index =
     typeof gid === "number"
       ? messages.findIndex(
