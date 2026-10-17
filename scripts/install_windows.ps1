@@ -179,7 +179,14 @@ param(
     [string]$EnvSuffix = "",
     # Pretend the graphics card has this much memory (GB), to walk through
     # every local-model tier on one PC. -1 = use the real card.
-    [int]$SimulateVramGB = -1
+    [int]$SimulateVramGB = -1,
+    # Same for normal memory (RAM, GB). -1 = the real amount.
+    [int]$SimulateRamGB = -1,
+    # Only look at this PC (graphics card, memory, disk) and print which
+    # local model it would get - installs nothing, creates no folder.
+    # Add -Json for machine-readable output (used by the project's tests).
+    [switch]$HardwareCheckOnly,
+    [switch]$Json
 )
 
 $ErrorActionPreference = "Continue"
@@ -296,6 +303,211 @@ function Invoke-PipInEnv($name, $pipArgs){
     if ($py) { & $py -m pip $pipArgs } else { & $conda run -n $name pip $pipArgs }
 }
 
+# ============================================================================
+#  Built-in local model: hardware check (read-only - it only LOOKS at the PC)
+# ============================================================================
+# Which Gemma 4 model and settings this PC gets. This is an exact copy of
+# scripts/local_llm_tiers.json (the installer runs before the project is
+# downloaded, so it carries its own); the project's tests keep them identical.
+# >>> TIER TABLE (copy of scripts/local_llm_tiers.json)
+$TierTableJson = @'
+{
+  "version": 1,
+  "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical.",
+  "dedicated_card_min_gb": 2,
+  "voice_on_cpu_min_ram_gb": 16,
+  "models": {
+    "E4B": {
+      "label": "Gemma 4 E4B (QAT)",
+      "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
+      "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 4.22
+    },
+    "12B": {
+      "label": "Gemma 4 12B (QAT)",
+      "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
+      "file": "gemma-4-12b-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 6.72
+    },
+    "26B-A4B": {
+      "label": "Gemma 4 26B-A4B (QAT)",
+      "repo": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      "file": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 14.25
+    },
+    "31B": {
+      "label": "Gemma 4 31B (QAT)",
+      "repo": "unsloth/gemma-4-31B-it-qat-GGUF",
+      "file": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 17.29
+    }
+  },
+  "tiers": [
+    {"id": "under-8",  "min_vram_gb": 2,  "model": "E4B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "warning": true},
+    {"id": "8-15",     "min_vram_gb": 8,  "model": "12B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "warning": false},
+    {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false},
+    {"id": "24-31",    "min_vram_gb": 24, "model": "26B-A4B", "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false},
+    {"id": "32-plus",  "min_vram_gb": 32, "model": "31B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false}
+  ]
+}
+'@
+# <<< TIER TABLE
+$TierTable = $TierTableJson | ConvertFrom-Json
+
+# Nearest whole GB, halves rounded up (PowerShell's own rounding would turn
+# 8.5 into 8). Cards report a little under their label - an RTX 5090 says
+# 32607 MiB = 31.8 GB - so a plain comparison would drop every card a tier.
+function Round-Gb([double]$gb){ return [int][math]::Floor($gb + 0.5) }
+
+# The biggest separate graphics card, or $null. NVIDIA: nvidia-smi (exact
+# memory + driver version). Others: Windows' own record of each display
+# adapter in the registry - its 64-bit memory value, because the usual
+# Windows figure (Win32_VideoController.AdapterRAM) stops at 4 GB. Built-in
+# graphics report little or no memory of their own (they borrow normal
+# memory) and so count as "no card".
+function Get-GraphicsCard {
+    $best = $null
+    if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+        try {
+            foreach ($line in (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null)) {
+                $p = $line -split ',\s*'
+                if ($p.Count -ge 3 -and $p[1].Trim() -match '^\d+$') {
+                    $gb = Round-Gb ([double]$p[1].Trim() / 1024)
+                    if (-not $best -or $gb -gt $best.vram_gb) {
+                        $best = [pscustomobject]@{ vendor = "nvidia"; name = $p[0].Trim(); vram_gb = $gb; driver = $p[2].Trim() }
+                    }
+                }
+            }
+        } catch {}
+    }
+    if ($best) { return $best }
+    # The registry also keeps records of cards that were REMOVED (a PC can
+    # still list a card it no longer has), so only adapters Windows reports as
+    # present right now count. If Windows won't list them, all records count.
+    $present = $null
+    try { $present = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { [string]$_.Name }) } catch {}
+    $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    foreach ($k in (Get-ChildItem $classKey -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' })) {
+        $props = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        $name = [string]$props.DriverDesc
+        if ($present -and ($present -notcontains $name)) { continue }
+        $bytes = [double]0
+        $q = $props.'HardwareInformation.qwMemorySize'
+        if ($q) { $bytes = [double]$q }
+        else {
+            $m = $props.'HardwareInformation.MemorySize'
+            if ($m -is [byte[]] -and $m.Length -ge 4) { $bytes = [double][BitConverter]::ToUInt32($m, 0) }
+            elseif ($m) { $bytes = [double]$m }
+        }
+        $who = ($name + " " + [string]$props.ProviderName)
+        # An NVIDIA card that nvidia-smi could not report has a missing or
+        # broken driver: neither llama.cpp's CUDA build nor the voice
+        # engine's CUDA PyTorch (installed only when nvidia-smi works) can
+        # use it, so it is treated like any other card (Vulkan build).
+        if     ($who -match 'NVIDIA')              { $vendor = "nvidia-unverified" }
+        elseif ($who -match 'AMD|ATI|Radeon')      { $vendor = "amd" }
+        elseif ($who -match 'Intel')               { $vendor = "intel" }
+        else { continue }
+        $gb = Round-Gb ($bytes / 1GB)
+        if (-not $best -or $gb -gt $best.vram_gb) {
+            $best = [pscustomobject]@{ vendor = $vendor; name = $name; vram_gb = $gb; driver = [string]$props.DriverVersion }
+        }
+    }
+    if ($best -and $best.vram_gb -lt $TierTable.dedicated_card_min_gb) { return $null }
+    return $best
+}
+
+# Normal memory (RAM) in whole GB, or -1 when Windows won't say.
+function Get-RamGb {
+    try {
+        $sum = (Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | Measure-Object Capacity -Sum).Sum
+        if ($sum -gt 0) { return (Round-Gb ($sum / 1GB)) }
+    } catch {}
+    try { return (Round-Gb ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
+    return -1
+}
+
+# Free space (GB, one decimal) on the drive that holds $path.
+function Get-FreeDiskGb($path){
+    try {
+        $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($path))
+        return [math]::Floor((New-Object IO.DriveInfo $root).AvailableFreeSpace / 1GB * 10) / 10
+    } catch { return -1 }
+}
+
+# The decision for this hardware - the same rules as scripts/llm_tiers.py
+# (choose); the project's tests run both on the same inputs.
+function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb){
+    if (-not $vendor -or $vramGb -lt $TierTable.dedicated_card_min_gb) {
+        return [pscustomobject]@{ offered = $false; reason = "no_card" }
+    }
+    $tier = $null
+    foreach ($t in ($TierTable.tiers | Sort-Object min_vram_gb)) { if ($vramGb -ge $t.min_vram_gb) { $tier = $t } }
+    # Her voice engine can use only NVIDIA cards; on any other card it runs
+    # on the processor, which needs plenty of normal memory.
+    $voice = if ($vendor -eq "nvidia") { $tier.voice_device } else { "cpu" }
+    if ($voice -eq "cpu" -and $ramGb -ge 0 -and $ramGb -lt $TierTable.voice_on_cpu_min_ram_gb) {
+        return [pscustomobject]@{ offered = $false; reason = "low_ram" }
+    }
+    return [pscustomobject]@{
+        offered = $true; reason = ""; tier = $tier.id; model = $tier.model
+        context = [int]$tier.context; kv_cache = $tier.kv_cache; voice_device = $voice
+        warning = [bool]$tier.warning; build = $(if ($vendor -eq "nvidia") { "cuda" } else { "vulkan" })
+    }
+}
+
+# Look at the PC (honouring the -Simulate* test options) and decide.
+function Invoke-HardwareCheck($dir){
+    $card = Get-GraphicsCard
+    $ram  = Get-RamGb
+    $simulated = $false
+    if ($SimulateVramGB -ge 0) {
+        $simulated = $true
+        if ($SimulateVramGB -lt $TierTable.dedicated_card_min_gb) { $card = $null }
+        elseif ($card) { $card = [pscustomobject]@{ vendor = $card.vendor; name = $card.name + " (pretending " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = $card.driver } }
+        else { $card = [pscustomobject]@{ vendor = "nvidia"; name = "(pretend NVIDIA card, " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = "" } }
+    }
+    if ($SimulateRamGB -ge 0) { $simulated = $true; $ram = $SimulateRamGB }
+    $vendor = $null; $vram = 0
+    if ($card) { $vendor = $card.vendor; $vram = [int]$card.vram_gb }
+    $choice = Select-LlmTier $vendor $vram $ram
+    $model = $null
+    if ($choice.offered) { $model = $TierTable.models.($choice.model) }
+    return [pscustomobject]@{
+        card = $card; ram_gb = $ram; disk_free_gb = (Get-FreeDiskGb $dir)
+        simulated = $simulated; choice = $choice; model = $model
+    }
+}
+
+# Plain-language summary lines of a hardware check (for the screen + log).
+function Format-HardwareCheck($hw){
+    $lines = @()
+    if ($hw.card) { $lines += ("  Graphics card : " + $hw.card.name + " - " + $hw.card.vram_gb + " GB graphics memory") }
+    else          { $lines += "  Graphics card : none found (only built-in graphics)" }
+    $lines += ("  Normal memory : " + $(if ($hw.ram_gb -ge 0) { [string]$hw.ram_gb + " GB" } else { "unknown" }))
+    $lines += ("  Free disk     : " + $hw.disk_free_gb + " GB")
+    if ($hw.choice.offered) {
+        $lines += ("  Local model   : " + $hw.model.label + " (" + $hw.model.size_gb + " GB download)")
+        $lines += ("  Settings      : " + $hw.choice.context + " context, " + $hw.choice.kv_cache + " memory, voice on the " + $(if ($hw.choice.voice_device -eq "cpu") { "processor" } else { "graphics card" }) + ", " + $hw.choice.build + " build")
+        if ($hw.choice.warning) { $lines += "  (Not recommended on this PC - under 8 GB of graphics memory.)" }
+    } elseif ($hw.choice.reason -eq "no_card") {
+        $lines += "  Local model   : not offered - no separate graphics card (option B only)"
+    } else {
+        $lines += "  Local model   : not offered - her voice would run on the processor, which needs 16 GB of normal memory (option B only)"
+    }
+    if ($hw.simulated) { $lines += "  (TEST: pretend hardware values in use)" }
+    return $lines
+}
+
+if ($HardwareCheckOnly) {
+    $hwDir = if ($InstallDir) { $InstallDir } else { Join-Path $env:USERPROFILE "Amadeus" }
+    $hw = Invoke-HardwareCheck $hwDir
+    if ($Json) { $hw | ConvertTo-Json -Depth 5 -Compress }
+    else { Write-Host "Amadeus hardware check (nothing is installed):" -ForegroundColor Cyan; Format-HardwareCheck $hw | ForEach-Object { Write-Host $_ } }
+    exit 0
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12) started " + (Get-Date))
 
@@ -318,6 +530,9 @@ try {
     if ($EnvSuffix -and $EnvSuffix -notmatch '^-?[A-Za-z0-9_]+$') {
         Die ("-EnvSuffix may contain only letters, digits and _ (got: " + $EnvSuffix + ")")
     }
+    Log "Checking this PC (read-only):"
+    $hw = Invoke-HardwareCheck $InstallDir
+    Format-HardwareCheck $hw | ForEach-Object { Log $_ }
     Read-Host "Press Enter to begin" | Out-Null
 
     # ---------- STEP 1: winget ----------

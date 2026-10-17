@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical.",
+  "dedicated_card_min_gb": 2,
+  "voice_on_cpu_min_ram_gb": 16,
+  "models": {
+    "E4B": {
+      "label": "Gemma 4 E4B (QAT)",
+      "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
+      "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 4.22
+    },
+    "12B": {
+      "label": "Gemma 4 12B (QAT)",
+      "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
+      "file": "gemma-4-12b-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 6.72
+    },
+    "26B-A4B": {
+      "label": "Gemma 4 26B-A4B (QAT)",
+      "repo": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      "file": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 14.25
+    },
+    "31B": {
+      "label": "Gemma 4 31B (QAT)",
+      "repo": "unsloth/gemma-4-31B-it-qat-GGUF",
+      "file": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+      "size_gb": 17.29
+    }
+  },
+  "tiers": [
+    {"id": "under-8",  "min_vram_gb": 2,  "model": "E4B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "warning": true},
+    {"id": "8-15",     "min_vram_gb": 8,  "model": "12B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "warning": false},
+    {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false},
+    {"id": "24-31",    "min_vram_gb": 24, "model": "26B-A4B", "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false},
+    {"id": "32-plus",  "min_vram_gb": 32, "model": "31B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false}
+  ]
+}

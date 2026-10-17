@@ -1,0 +1,175 @@
+# -*- coding: utf-8 -*-
+"""Offline checks for the built-in local model's tier table and choice rules.
+
+Covers:
+  1. the installer's embedded copy of scripts/local_llm_tiers.json is
+     identical to the file (the installer runs before the project exists, so
+     it carries its own copy);
+  2. the table says what the user decided;
+  3. the Python rules (scripts/llm_tiers.py, used by the launcher);
+  4. the installer's PowerShell rules give the SAME answer as the Python
+     ones for a grid of pretend hardware (Windows only - runs the real
+     installer with -HardwareCheckOnly, which installs nothing).
+"""
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import unittest
+from pathlib import Path
+
+_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_INSTALLER = _SCRIPTS / "install_windows.ps1"
+
+
+def _load_tiers():
+    spec = importlib.util.spec_from_file_location("amadeus_llm_tiers_under_test",
+                                                  _SCRIPTS / "llm_tiers.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+tiers = _load_tiers()
+TABLE = tiers.load_table()
+
+
+def _embedded_table() -> dict:
+    text = _INSTALLER.read_text(encoding="utf-8")
+    m = re.search(r"# >>> TIER TABLE.*?\n\$TierTableJson = @'\n(.*?)\n'@\n# <<< TIER TABLE",
+                  text.replace("\r\n", "\n"), re.S)
+    if not m:
+        raise AssertionError("TIER TABLE block not found in install_windows.ps1")
+    return json.loads(m.group(1))
+
+
+class TableCopyTests(unittest.TestCase):
+    def test_installer_copy_is_identical(self):
+        self.assertEqual(_embedded_table(), TABLE)
+
+
+class TableDecisionTests(unittest.TestCase):
+    """The user's decisions (the approved tier plan)."""
+
+    def tier(self, tier_id):
+        return next(t for t in TABLE["tiers"] if t["id"] == tier_id)
+
+    def test_one_model_per_tier(self):
+        expected = {"under-8": "E4B", "8-15": "12B", "16-23": "12B",
+                    "24-31": "26B-A4B", "32-plus": "31B"}
+        self.assertEqual({t["id"]: t["model"] for t in TABLE["tiers"]}, expected)
+        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [2, 8, 16, 24, 32])
+
+    def test_below_16_gb_share_one_setup_voice_on_processor(self):
+        for tier_id in ("under-8", "8-15"):
+            t = self.tier(tier_id)
+            self.assertEqual((t["context"], t["kv_cache"], t["voice_device"]),
+                             (16384, "q8_0", "cpu"))
+
+    def test_16_gb_and_up_voice_on_card(self):
+        for tier_id in ("16-23", "24-31", "32-plus"):
+            t = self.tier(tier_id)
+            self.assertEqual((t["context"], t["kv_cache"], t["voice_device"]),
+                             (32768, "f16", "cuda"))
+
+    def test_only_the_smallest_tier_warns(self):
+        self.assertEqual([t["id"] for t in TABLE["tiers"] if t["warning"]], ["under-8"])
+
+    def test_official_unsloth_qat_files_only(self):
+        self.assertEqual(set(TABLE["models"]), {"E4B", "12B", "26B-A4B", "31B"})
+        for key, model in TABLE["models"].items():
+            with self.subTest(model=key):
+                self.assertTrue(model["repo"].startswith("unsloth/gemma-4-"))
+                self.assertTrue(model["repo"].endswith("-it-qat-GGUF"))
+                self.assertTrue(model["file"].endswith("-it-qat-UD-Q4_K_XL.gguf"))
+                self.assertGreater(model["size_gb"], 0)
+
+    def test_memory_rule(self):
+        self.assertEqual(TABLE["voice_on_cpu_min_ram_gb"], 16)
+
+
+class RoundingTests(unittest.TestCase):
+    def test_cards_reporting_a_little_under_their_label(self):
+        self.assertEqual(tiers.round_gb(32607 / 1024), 32)   # RTX 5090
+        self.assertEqual(tiers.round_gb(8188 / 1024), 8)     # a typical "8 GB" card
+        self.assertEqual(tiers.round_gb(34190917632 / 2**30), 32)  # registry bytes
+
+    def test_halves_round_up(self):
+        self.assertEqual(tiers.round_gb(7.5), 8)
+        self.assertEqual(tiers.round_gb(8.5), 9)
+
+
+# (vendor, vram, ram) -> expected (offered, reason or model, voice, build, warning)
+GRID = [
+    (None, 0, 32, (False, "no_card")),
+    ("nvidia", 1, 32, (False, "no_card")),
+    ("nvidia", 6, 32, (True, "E4B", "cpu", "cuda", True)),
+    ("nvidia", 6, 8, (False, "low_ram")),
+    ("nvidia", 8, 16, (True, "12B", "cpu", "cuda", False)),
+    ("nvidia", 8, 8, (False, "low_ram")),
+    ("nvidia", 12, 32, (True, "12B", "cpu", "cuda", False)),
+    ("nvidia", 16, 8, (True, "12B", "cuda", "cuda", False)),
+    ("nvidia", 24, 32, (True, "26B-A4B", "cuda", "cuda", False)),
+    ("nvidia", 32, 32, (True, "31B", "cuda", "cuda", False)),
+    ("nvidia", 48, 64, (True, "31B", "cuda", "cuda", False)),
+    ("amd", 16, 8, (False, "low_ram")),
+    ("amd", 24, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
+    ("intel", 12, 16, (True, "12B", "cpu", "vulkan", False)),
+    ("nvidia-unverified", 24, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
+    ("nvidia", 8, -1, (True, "12B", "cpu", "cuda", False)),   # memory unknown
+]
+
+
+def _summary(choice):
+    if not choice["offered"]:
+        return (False, choice["reason"])
+    return (True, choice["model"], choice["voice_device"], choice["build"], choice["warning"])
+
+
+class PythonRuleTests(unittest.TestCase):
+    def test_grid(self):
+        for vendor, vram, ram, expected in GRID:
+            with self.subTest(vendor=vendor, vram=vram, ram=ram):
+                self.assertEqual(_summary(tiers.choose(TABLE, vendor, vram, ram)), expected)
+
+    def test_offered_choice_carries_tier_settings(self):
+        c = tiers.choose(TABLE, "nvidia", 32, 32)
+        self.assertEqual((c["tier"], c["context"], c["kv_cache"]), ("32-plus", 32768, "f16"))
+
+
+_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
+
+
+@unittest.skipUnless(_POWERSHELL, "Windows PowerShell not available")
+class PowerShellAgreesTests(unittest.TestCase):
+    """The installer, run for real with pretend hardware, agrees with Python.
+    The pretend card keeps this PC's card maker (or NVIDIA if it has none)."""
+
+    def run_check(self, vram, ram):
+        out = subprocess.run(
+            [_POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+             str(_INSTALLER), "-HardwareCheckOnly", "-Json",
+             "-SimulateVramGB", str(vram), "-SimulateRamGB", str(ram)],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    def test_grid_matches_python(self):
+        for vram, ram in [(0, 32), (6, 32), (6, 8), (8, 16), (8, 8), (12, 32),
+                          (16, 8), (24, 32), (32, 32), (48, 64)]:
+            with self.subTest(vram=vram, ram=ram):
+                hw = self.run_check(vram, ram)
+                vendor = hw["card"]["vendor"] if hw["card"] else None
+                expected = tiers.choose(TABLE, vendor, vram, ram)
+                self.assertEqual(_summary(hw["choice"]), _summary(expected))
+                if expected["offered"]:
+                    self.assertEqual(hw["choice"]["tier"], expected["tier"])
+                    self.assertEqual(hw["choice"]["context"], expected["context"])
+                    self.assertEqual(hw["choice"]["kv_cache"], expected["kv_cache"])
+                    self.assertEqual(hw["model"], TABLE["models"][expected["model"]])
+
+
+if __name__ == "__main__":
+    unittest.main()
