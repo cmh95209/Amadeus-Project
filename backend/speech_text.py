@@ -207,11 +207,14 @@ _e2k_lock = threading.Lock()
 
 def _read_list(path: str) -> dict:
     """{word (casefolded): kana} from a 'word = カタカナ' file; cached by
-    modification time so an edit applies to the next line."""
+    modification time AND size so an edit applies to the next line (two
+    writes within one timestamp tick keep the same time - the size still
+    changes; this made the user-list test flaky)."""
     try:
-        mtime = os.path.getmtime(path)
+        st = os.stat(path)
     except OSError:
         return {}
+    mtime = (st.st_mtime_ns, st.st_size)
     cached = _list_cache.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
