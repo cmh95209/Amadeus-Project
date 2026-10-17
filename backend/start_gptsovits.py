@@ -156,8 +156,37 @@ def main():
     print("[Amadeus] Starting GPT-SoVITS native API...")
     _install_audio_fallback()
 
-    # Run script
+    # Run script (with a processor-only copy of its settings when the
+    # launcher asks for it - see _voice_config_args)
+    sys.argv = [str(GPT_ROOT / "api_v2.py")] + _voice_config_args(PROJECT_ROOT, GPT_ROOT)
     runpy.run_path(str(GPT_ROOT / "api_v2.py"), run_name="__main__")
+
+
+def _voice_config_args(project_root: Path, gpt_root: Path) -> list:
+    """Extra api_v2 arguments. With AMADEUS_VOICE_DEVICE=cpu (the launcher
+    sets it for built-in-model tiers under 16 GB of graphics memory, where
+    the card is full with her model) the engine gets a COPY of its settings
+    file with device cpu / no half precision, in .runtime/ - the engine's
+    own file is never edited, so switching back needs nothing. The engine
+    has no automatic fallback of its own: it only uses the processor when
+    no NVIDIA card exists at all."""
+    if os.environ.get("AMADEUS_VOICE_DEVICE", "").strip().lower() != "cpu":
+        return []
+    import yaml
+    source = gpt_root / "GPT_SoVITS" / "configs" / "tts_infer.yaml"
+    try:
+        data = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"[Amadeus] could not read {source} ({exc!r}) - voice keeps its own device setting.")
+        return []
+    custom = data.setdefault("custom", {})
+    custom["device"] = "cpu"
+    custom["is_half"] = False
+    target = project_root / ".runtime" / "tts_infer_cpu.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    print(f"[Amadeus] voice runs on the processor (settings copy: {target})")
+    return ["-c", str(target)]
 
 
 if __name__ == "__main__":

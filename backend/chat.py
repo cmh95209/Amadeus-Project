@@ -1,4 +1,5 @@
 import memory as store
+import builtin_llm
 from llm import get_llm, reset_llm, maybe_strip_rejected_params
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -38,6 +39,8 @@ def setLLMModel(new_model: str):
 #      else, return the LLM Model e.g., "deepseek/deepseek-v3.2-exp"
 def getLLMModel():
     global LLM_Model
+    if builtin_llm.active():
+        return builtin_llm.model_name()   # what the built-in server serves
     return LLM_Model.strip() if LLM_Model else "No Model Selected."
 
 
@@ -66,7 +69,9 @@ def getPersonality() -> str:
 
 
 def has_api_key() -> bool:
-    return bool(API_KEY.strip())
+    # The built-in model's server has no key, so the key gate never applies
+    # to it (and no fake key goes into api_key.txt).
+    return builtin_llm.active() or bool(API_KEY.strip())
 
 
 #pre:

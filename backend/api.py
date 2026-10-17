@@ -22,6 +22,7 @@ from chat import (
     GreetingSuperseded,
 )
 
+import builtin_llm
 import ceremony
 import llm
 import memory
@@ -130,6 +131,14 @@ def _model_not_found_message() -> str:
     )
 
 
+def _model_server_address() -> str:
+    """The model server Amadeus is using: the built-in one when that mode is
+    on, else the saved address (or the auto-detected local port)."""
+    if builtin_llm.active():
+        return builtin_llm.server_url()
+    return memory.load_llm_server() or llm._server_url()
+
+
 def _llm_error_message(exc: Exception) -> str:
     """Translate a model-server failure into a plain-English message."""
     try:
@@ -137,6 +146,12 @@ def _llm_error_message(exc: Exception) -> str:
         if isinstance(exc, openai.NotFoundError):
             return _model_not_found_message()
         if isinstance(exc, openai.APIConnectionError):
+            if builtin_llm.active():
+                if builtin_llm.model_missing():
+                    return ("Her built-in model is not installed yet. Run the installer "
+                            "again - it continues the download where it stopped.")
+                return ("Can't reach her built-in model. It may still be starting - "
+                        "if this keeps happening, restart Amadeus.")
             return f"Can't reach the model server at {llm._server_url()}. Is it running?"
         if isinstance(exc, openai.APITimeoutError):
             return "The model server took too long to respond. Is it busy or overloaded?"
@@ -647,7 +662,7 @@ def get_sampling():
         "sampling": memory.load_sampling(),
         "params": memory.SAMPLING_PARAMS,
         "local_only": list(memory.SAMPLING_LOCAL_ONLY),
-        "rejected": llm.rejected_sampling_params(llm._server_url()),
+        "rejected": llm.rejected_sampling_params(_model_server_address()),
     })
 
 
@@ -814,8 +829,9 @@ def _model_in_list(model_name: str, server_models: list[str]) -> bool:
 #       endpoint and reports reachability plus the model names it offers
 @application.route("/testConnection", methods=["GET"])
 def test_connection():
-    configured = memory.load_llm_server()
-    address = configured or llm._server_url()
+    builtin = builtin_llm.active()
+    configured = True if builtin else memory.load_llm_server()
+    address = _model_server_address()
     probe = llm.test_server(address, api_key=chat.API_KEY)
     model_name = getLLMModel()
     model_configured = bool(model_name.strip()) and model_name != "No Model Selected."
@@ -847,6 +863,8 @@ def test_connection():
         "batch_warning": batch_warning,
         "error": probe["error"],
         "voice_reachable": _voice_engine_reachable(),
+        "builtin": builtin,
+        "builtin_model_missing": builtin and builtin_llm.model_missing(),
     })
 
 
@@ -959,8 +977,10 @@ def model_ready() -> Dict[str, object]:
     route only fires when the footer would show 'connected'. No LLM generation
     is attempted here - this is a cheap reachability + model-name check only.
     """
-    address = memory.load_llm_server() or llm._server_url()
+    address = _model_server_address()
     model_name = getLLMModel()
+    if builtin_llm.active() and builtin_llm.model_missing():
+        return {"ready": False, "reason": "built-in model not installed"}
     if not model_name or model_name == "No Model Selected.":
         return {"ready": False, "reason": "no model configured"}
     probe = llm.test_server(address, api_key=chat.API_KEY, timeout=5.0)

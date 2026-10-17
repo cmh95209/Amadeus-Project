@@ -59,6 +59,120 @@ def env_name(base: str) -> str:
     return base + env_suffix()
 
 
+# ---------------------------------------------------------------------------
+# Built-in local model (installer option A): llama-server on its own port.
+# 8091 on purpose - the backend used to auto-probe 8000/8888 (Unsloth
+# Desktop's ports), and the built-in brain must never collide with those.
+# ---------------------------------------------------------------------------
+LLM_PORT = 8091
+BUILTIN_CONFIG = BACKEND_DIR / "data" / "local_llm.json"
+
+
+def load_builtin_config() -> dict | None:
+    """The installer's built-in model settings when that mode is on, else
+    None (no file, unreadable, or the user chose their own model)."""
+    import json
+    try:
+        data = json.loads(BUILTIN_CONFIG.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("mode") != "builtin":
+        return None
+    return data
+
+
+def builtin_model_name(cfg: dict) -> str:
+    """The name the model is served under (--alias). backend/builtin_llm.py
+    derives the same name from the same file."""
+    return Path(str(cfg.get("model_file") or "")).stem or "builtin-model"
+
+
+def builtin_files_ready(cfg: dict) -> tuple[bool, str]:
+    """(True, "") when llama-server and the model are on disk, else
+    (False, plain-English reason)."""
+    exe = str(cfg.get("server_exe") or "")
+    model = str(cfg.get("model_file") or "")
+    if not cfg.get("server_ok") or not Path(exe).is_file():
+        return False, "her model's helper program (llama.cpp) is not installed"
+    if not cfg.get("model_ok") or not Path(model).is_file():
+        return False, f"her model file is not downloaded ({Path(model).name or 'unknown'})"
+    return True, ""
+
+
+def llama_server_command(cfg: dict) -> list[str]:
+    """llama-server with the tier's settings. Thinking stays OFF at the
+    server too (the backend also asks per request); sampling = Unsloth's
+    recommendation for Gemma 4 (the Model Sampling panel can override)."""
+    cmd = [
+        str(cfg["server_exe"]),
+        "-m", str(cfg["model_file"]),
+        "--host", "127.0.0.1",
+        "--port", str(cfg.get("port") or LLM_PORT),
+        "--alias", builtin_model_name(cfg),
+        "-c", str(int(cfg.get("context") or 16384)),
+        "-ngl", str(int(cfg.get("gpu_layers") if cfg.get("gpu_layers") is not None else 999)),
+        "--jinja",
+        "--chat-template-kwargs", '{"enable_thinking":false}',
+        "--temp", "1.0", "--top-p", "0.95", "--top-k", "64",
+    ]
+    if cfg.get("kv_cache") == "q8_0":
+        # A compressed conversation memory needs flash attention on.
+        cmd += ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+    drafter = str(cfg.get("drafter_file") or "")
+    if cfg.get("use_drafter") and cfg.get("drafter_ok") and Path(drafter).is_file():
+        # Gemma 4's own speed-up drafter (Unsloth's recommended settings).
+        cmd += ["-md", drafter, "--spec-type", "draft-mtp", "--spec-draft-n-max", "4"]
+    return cmd
+
+
+def apply_simulated_vram(cfg: dict, vram_gb: int) -> dict | None:
+    """Test option: run the settings of the tier a card with `vram_gb`
+    would get (the same rules as the installer). Uses that tier's model
+    file if it was downloaded into the same models folder; None when such
+    a card would get no local model at all."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import llm_tiers
+    table = llm_tiers.load_table()
+    vendor = "nvidia" if str(cfg.get("build", "")).startswith("cuda") else "amd"
+    choice = llm_tiers.choose(table, vendor, vram_gb, -1, "999")
+    if not choice["offered"]:
+        return None
+    model = table["models"][choice["model"]]
+    models_dir = Path(str(cfg.get("model_file") or "")).parent
+    out = dict(cfg)
+    out.update({
+        "model": choice["model"], "model_label": model["label"], "tier": choice["tier"],
+        "context": choice["context"], "kv_cache": choice["kv_cache"],
+        "voice_device": choice["voice_device"],
+        "model_file": str(models_dir / model["file"]),
+        "model_ok": (models_dir / model["file"]).is_file(),
+        "drafter_file": str(models_dir / model["drafter"]["file"]),
+        "drafter_ok": (models_dir / model["drafter"]["file"]).is_file(),
+        "simulated": True,
+    })
+    return out
+
+
+def sidecar_builtin_env(cfg: dict) -> dict:
+    """Point the memory sidecar at the built-in server WITHOUT touching the
+    user's own settings files: it reads its server + model from files whose
+    paths these variables override."""
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    server_file = RUNTIME_DIR / "builtin_llm_server.txt"
+    model_file = RUNTIME_DIR / "builtin_llm_model.txt"
+    server_file.write_text(f"http://127.0.0.1:{cfg.get('port') or LLM_PORT}/v1", encoding="utf-8")
+    model_file.write_text(builtin_model_name(cfg), encoding="utf-8")
+    return {"CM_SERVER_FILE": str(server_file), "CM_MODEL_FILE": str(model_file)}
+
+
+def voice_env(cfg: dict | None) -> dict:
+    """Tiers under 16 GB run her voice on the processor (the card is full
+    with the model); backend/start_gptsovits.py reads this."""
+    if cfg and cfg.get("voice_device") == "cpu":
+        return {"AMADEUS_VOICE_DEVICE": "cpu"}
+    return {}
+
+
 def _cm_python() -> Path:
     rel = Path("venv") / "Scripts" / "python.exe" if os.name == "nt" \
         else Path("venv") / "bin" / "python"
@@ -315,10 +429,10 @@ def clear_port(name: str, port: int) -> None:
     )
 
 
-def clear_stale_amadeus_processes() -> None:
+def clear_stale_amadeus_processes(extra: dict | None = None) -> None:
     print("[Launcher] Cleaning stale Amadeus processes...")
 
-    for name, port in AMADEUS_PORTS.items():
+    for name, port in {**AMADEUS_PORTS, **(extra or {})}.items():
         clear_port(name, port)
 
     print("[Launcher] Cleanup complete.")
@@ -354,10 +468,12 @@ def open_log(name: str) -> IO[str]:
     return handle
 
 
-def start_process(name: str, command: list[str], cwd: Path) -> subprocess.Popen:
+def start_process(name: str, command: list[str], cwd: Path,
+                  extra_env: dict | None = None) -> subprocess.Popen:
     log = open_log(name)
 
     env = dict(os.environ)
+    env.update(extra_env or {})
     env["PYTHONUNBUFFERED"] = "1"  # print() reaches the log live, not on exit
     # Every Python service writes its console (this UTF-8 log file, see
     # open_log) in UTF-8 whatever the user's Windows locale is: on an
@@ -628,9 +744,15 @@ def gptsovits_command(conda: str) -> list[str]:
     ]
 
 
-def run(no_browser: bool = False) -> None:
+def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
     conda = find_conda()
     npm = find_npm()
+    builtin = load_builtin_config()
+    if builtin and simulate_vram_gb is not None:
+        print(f"[Launcher] TEST: pretending the graphics card has {simulate_vram_gb} GB.")
+        builtin = apply_simulated_vram(builtin, simulate_vram_gb)
+        if builtin is None:
+            print("[Launcher] TEST: such a card gets no local model - starting without it.")
 
     if not conda:
         raise RuntimeError(
@@ -643,11 +765,27 @@ def run(no_browser: bool = False) -> None:
         )
 
     preflight(conda, npm)
-    clear_stale_amadeus_processes()
+    clear_stale_amadeus_processes({"built-in model": LLM_PORT} if builtin else None)
     ensure_frontend_dependencies(npm)
 
+    # The built-in model starts FIRST: loading 4-17 GB takes the longest, so
+    # it overlaps the other services' start-up. A missing model never stops
+    # the app - the backend reports it (and the WebUI shows it).
+    llm_proc = None
+    if builtin:
+        ready, why = builtin_files_ready(builtin)
+        if ready:
+            print(f"\n[Launcher] Starting her built-in model ({builtin.get('model_label', builtin_model_name(builtin))}, "
+                  f"{builtin.get('context')} context, {builtin.get('kv_cache')} memory, "
+                  f"voice on the {'processor' if builtin.get('voice_device') == 'cpu' else 'graphics card'})...")
+            llm_proc = start_process("llm", llama_server_command(builtin), PROJECT_ROOT)
+        else:
+            print(f"\n[Launcher] WARNING: built-in model not started - {why}. "
+                  "Run the installer again to finish setting it up.")
+
     print("\n[Launcher] Starting GPT-SoVITS...")
-    gpt = start_process("gptsovits", gptsovits_command(conda), PROJECT_ROOT)
+    gpt = start_process("gptsovits", gptsovits_command(conda), PROJECT_ROOT,
+                        voice_env(builtin))
     wait_for_port("GPT-SoVITS", GPT_PORT, gpt, timeout=180)
 
     # CharacterMemory sidecar: the slowest starter (CPU embedder + lore
@@ -661,12 +799,14 @@ def run(no_browser: bool = False) -> None:
     # retries twice more before giving up.
     cm = None
     cm_available = False
+    cm_env = sidecar_builtin_env(builtin) if builtin else None
     if ensure_cm_sidecar():
         print("[Launcher] Starting CharacterMemory sidecar...")
         cm = start_process(
             "cm-sidecar",
             [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
             CM_DIR,
+            cm_env,
         )
         cm_available = True
     else:
@@ -704,12 +844,23 @@ def run(no_browser: bool = False) -> None:
                         "cm-sidecar",
                         [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
                         CM_DIR,
+                        cm_env,
                     )
                 else:
                     print("[Launcher] WARNING: cm-sidecar not ready after 3 "
                           "attempts - the app runs without long-term memory. "
                           "Check .runtime/logs/cm-sidecar.log for details.")
                     cm = None
+
+    # llama-server opens its port right away and answers "loading" until the
+    # model is in memory; the WebUI shows that state. Here we only make sure
+    # it did not die on start (e.g. not enough graphics memory).
+    if llm_proc is not None:
+        try:
+            wait_for_port("built-in model", LLM_PORT, llm_proc, timeout=180)
+        except (TimeoutError, RuntimeError) as e:
+            print(f"[Launcher] WARNING: her built-in model did not start ({e}). "
+                  "Check .runtime/logs/llm.log for details.")
 
     url = f"http://127.0.0.1:{FRONTEND_PORT}/"
 
@@ -724,6 +875,7 @@ def run(no_browser: bool = False) -> None:
         _open_browser(url)
 
     cm_warned = False
+    llm_warned = False
     while True:
         for name, process in (
             ("GPT-SoVITS", gpt),
@@ -744,6 +896,13 @@ def run(no_browser: bool = False) -> None:
             print("[Launcher] WARNING: cm-sidecar stopped (exit "
                   f"{cm.returncode}) - continuing without long-term memory. "
                   "Check .runtime/logs/cm-sidecar.log for details.")
+        # The built-in model stopping does not tear the app down either:
+        # she reports it as unreachable, and a restart brings it back.
+        if llm_proc is not None and not llm_warned and llm_proc.poll() is not None:
+            llm_warned = True
+            print("[Launcher] WARNING: her built-in model stopped (exit "
+                  f"{llm_proc.returncode}). Restart Amadeus to bring it back; "
+                  "details in .runtime/logs/llm.log.")
 
         time.sleep(1)
 
@@ -755,10 +914,17 @@ def main() -> int:
         action="store_true",
         help="Do not automatically open the WebUI in a browser.",
     )
+    parser.add_argument(
+        "--simulate-vram-gb",
+        type=int,
+        default=None,
+        help="TEST: run the built-in model with the settings a card with this "
+             "much graphics memory would get (its model must be downloaded).",
+    )
     args = parser.parse_args()
 
     try:
-        run(no_browser=args.no_browser)
+        run(no_browser=args.no_browser, simulate_vram_gb=args.simulate_vram_gb)
         return 0
     except KeyboardInterrupt:
         return 0

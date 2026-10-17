@@ -41,7 +41,7 @@ set "npm_config_script_shell=cmd.exe"
 powershell -NoProfile -Command "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned" >nul 2>&1
 
 echo Using Amadeus Python: %AMADEUS_PY%
-"%AMADEUS_PY%" "%CD%\scripts\launcher.py"
+"%AMADEUS_PY%" "%CD%\scripts\launcher.py" %*
 
 set "EXIT_CODE=%errorlevel%"
 

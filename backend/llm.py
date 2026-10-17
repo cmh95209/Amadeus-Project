@@ -4,6 +4,7 @@ from pathlib import Path
 import requests
 from langchain_openai import ChatOpenAI
 
+import builtin_llm
 import memory
 
 # =============================================================================
@@ -38,6 +39,11 @@ def _port_alive(host: str, port: int, timeout: float = 1.5) -> bool:
 
 
 def _server_url() -> str:
+    # 0) Built-in mode: only the launcher's own llama-server - never another
+    #    local server found on the usual ports (see builtin_llm).
+    if builtin_llm.active():
+        return builtin_llm.server_url()
+
     # 1) What the user's file says (remember it, but check if it answers).
     configured = ""
     try:
@@ -81,6 +87,24 @@ _LLM_CACHE_PARAMS = {}   # cache key -> list of user sampling params that client
 # parameter with HTTP 400. In-memory only (session-scoped), so switching to a
 # different server later starts with a clean slate.
 _REJECTED = {}
+
+
+class _ThoughtFreeChatOpenAI(ChatOpenAI):
+    """ChatOpenAI whose replies never carry an inline Gemma 4 thought block
+    (builtin_llm.strip_thoughts). Every Amadeus call - chat, greetings,
+    tools, translations - goes through this one place."""
+
+    def _create_chat_result(self, response, generation_info=None):
+        result = super()._create_chat_result(response, generation_info)
+        for gen in result.generations:
+            message = getattr(gen, "message", None)
+            if message is not None and isinstance(message.content, str):
+                cleaned = builtin_llm.strip_thoughts(message.content)
+                if cleaned != message.content:
+                    message.content = cleaned
+                    if hasattr(gen, "text"):
+                        gen.text = cleaned
+        return result
 
 
 def reset_llm():
@@ -245,6 +269,8 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
     # has changed. If the address moved since we built the client, rebuild it
     # so we never keep talking to a dead port.
     base_url = _server_url()
+    if builtin_llm.active():
+        model = builtin_llm.model_name()
 
     # The user's Model Sampling settings are part of the client identity:
     # changing them rebuilds the client, so new values apply to the next
@@ -334,7 +360,7 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
     # user's own output cap when set) override the built-in defaults above.
     kwargs.update(sampling_standard)
 
-    _LLM_CACHE[key] = ChatOpenAI(**kwargs)
+    _LLM_CACHE[key] = _ThoughtFreeChatOpenAI(**kwargs)
     _LLM_CACHE_URL[key] = base_url
     _LLM_CACHE_PARAMS[key] = sent_params
     return _LLM_CACHE[key]
