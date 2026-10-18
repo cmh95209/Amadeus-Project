@@ -99,11 +99,25 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual((self.choice()["tier"], self.choice()["context"]), ("12-15", 24576))
         self.assertEqual(self.settings()["context"], 24576)
 
-    def test_option_b_writes_no_settings(self):
-        out = self.screens(["B"])
+    def test_option_b_without_a_card_writes_no_settings(self):
+        out = self.screens(["B"], "-SimulateVramGB", "0")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(self.choice()["mode"], "custom")
         self.assertFalse(self.settings_path().exists())
+
+    def test_option_b_with_a_card_prepares_built_in(self):
+        # 2026-10-18: option B also installs llama.cpp (no model), so
+        # Built-in can run a GGUF of the user's own later - the settings
+        # file is written with mode "custom" and this PC's tier settings.
+        out = self.screens(["B"], "-SimulateVramGB", "24", "-SimulateRamGB", "32")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.choice()["mode"], "custom")
+        s = self.settings()
+        self.assertEqual((s["mode"], s["model"], s["tier"], s["context"]),
+                         ("custom", "12B", "24-plus", 49152))
+        self.assertFalse(s["model_ok"])     # no model of hers was downloaded
+        self.assertFalse(s["server_ok"])    # screens-only mode downloads nothing
+        self.assertEqual(Path(s["model_file"]).parent, self.dir / "models")
 
     def test_small_card_warns_and_can_switch_to_b(self):
         out = self.screens(["A", "B"], "-SimulateVramGB", "6", "-SimulateRamGB", "32")

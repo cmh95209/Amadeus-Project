@@ -223,11 +223,24 @@ def builtin_model_name(cfg: dict) -> str:
 
 def selected_model_file(cfg: dict) -> str:
     """The GGUF she loads: the one picked in Settings (while it exists),
-    else the installer's (backend/builtin_llm.py selected_file)."""
+    else the installer's, else the first chat model in the models folder
+    (the same rule as backend/builtin_llm.py selected_file)."""
     chosen = str(cfg.get("selected_file") or "")
     if chosen and Path(chosen).is_file():
         return chosen
-    return str(cfg.get("model_file") or "")
+    tier_file = str(cfg.get("model_file") or "")
+    if not tier_file or Path(tier_file).is_file():
+        return tier_file
+    folder = Path(tier_file).parent
+    try:
+        others = sorted((p for p in folder.iterdir()
+                         if p.is_file() and p.name.lower().endswith(".gguf")
+                         and not p.name.lower().startswith("mtp-")
+                         and "mmproj" not in p.name.lower()),
+                        key=lambda p: p.name.lower())
+    except OSError:
+        others = []
+    return str(others[0]) if others else tier_file
 
 
 def builtin_files_ready(cfg: dict) -> tuple[bool, str]:

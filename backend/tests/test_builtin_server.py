@@ -121,6 +121,25 @@ class ModelListTests(_ServerBase):
             with self.subTest(file=bad):
                 self.assertIsNone(self.b.resolve_model_file(bad))
 
+    def test_own_gguf_when_hers_is_not_downloaded(self):
+        # An option-B install: llama.cpp but no model of hers. The user's
+        # own GGUF in the folder is the one she loads.
+        cfg = _config(self.tmp, model_ok=False, port=self.port, n=1)   # (creates the file)
+        Path(cfg["model_file"]).unlink()
+        _write(self.cfg_path, cfg)
+        self.assertTrue(self.b.model_missing())
+        self.assertFalse(self.b.runner_missing())
+        info = self.b.describe()
+        self.assertTrue(info["available"])
+        self.assertEqual((info["model_missing"], info["runner_missing"]), (True, False))
+        own = self.models / "my-own-model.gguf"
+        own.write_bytes(b"x")
+        self.assertEqual(self.b.selected_file(), str(own))
+        self.assertFalse(self.b.model_missing())
+        with self.assertRaises(LookupError):   # no file at all -> a clear message
+            own.unlink()
+            self.s.load()
+
     def test_selected_file_and_label(self):
         own = self.models / "my-own-model.gguf"
         own.write_bytes(b"x")
@@ -232,6 +251,15 @@ class LauncherModelTests(unittest.TestCase):
         cfg["selected_file"] = str(own)
         self.assertEqual(self.launcher.builtin_vram_need_gb(cfg), 13.0)
         self.assertIsNone(self.launcher.builtin_vram_need_gb(_config(self.tmp)))   # old file: no estimate
+
+    def test_launcher_falls_back_to_a_gguf_in_the_folder(self):
+        cfg = _config(self.tmp, model_ok=False)
+        Path(cfg["model_file"]).unlink()
+        (self.tmp / "models" / "mtp-x.gguf").write_bytes(b"x")       # never a speed-up file
+        own = self.tmp / "models" / "b-own.gguf"
+        own.write_bytes(b"x")
+        self.assertEqual(self.launcher.selected_model_file(cfg), str(own))
+        self.assertEqual(self.launcher.builtin_files_ready(cfg), (True, ""))
 
     def test_files_ready_with_an_own_file(self):
         cfg = _config(self.tmp, model_ok=False)

@@ -644,6 +644,8 @@ export type BrainMode = {
   mode: "builtin" | "custom";
   model_label: string;
   model_missing: boolean;
+  /** llama.cpp itself is missing (not only a model file). */
+  runner_missing: boolean;
   context: number | null;
   /** Only after a switch: the change fully applies after a restart. */
   restart_needed?: boolean;
@@ -655,6 +657,7 @@ function toBrainMode(data: Record<string, unknown>): BrainMode {
     mode: data.mode === "builtin" ? "builtin" : "custom",
     model_label: typeof data.model_label === "string" ? data.model_label : "",
     model_missing: data.model_missing === true,
+    runner_missing: data.runner_missing === true,
     context: typeof data.context === "number" ? data.context : null,
     restart_needed: data.restart_needed === true,
   };

@@ -115,12 +115,18 @@ def resolve_model_file(file: str):
 
 def selected_file(cfg=None) -> str:
     """The GGUF she loads: the one picked in Settings (while it still
-    exists), else the installer's."""
+    exists), else the installer's, else the first chat model in the models
+    folder (an option-B install has llama.cpp but no model of hers - the
+    user's own GGUF is then the one). "" -> the installer's (missing) path."""
     cfg = cfg if cfg is not None else (load_config() or {})
     chosen = str(cfg.get("selected_file") or "")
     if chosen and os.path.isfile(chosen):
         return chosen
-    return str(cfg.get("model_file") or "")
+    tier_file = str(cfg.get("model_file") or "")
+    if tier_file and os.path.isfile(tier_file):
+        return tier_file
+    others = list_models(cfg)
+    return others[0]["file"] if others else tier_file
 
 
 def model_label(cfg=None) -> str:
@@ -154,6 +160,8 @@ def describe() -> dict:
         "mode": "builtin" if active() else "custom",
         "model_label": model_label(cfg) if available else "",
         "model_missing": available and model_missing(),
+        # llama.cpp itself is missing (vs. only the model file).
+        "runner_missing": available and runner_missing(),
         "context": (cfg or {}).get("context") if available else None,
     }
 
@@ -178,6 +186,12 @@ def save_config(cfg: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
     os.replace(tmp, path)
+
+
+def runner_missing() -> bool:
+    """llama.cpp (llama-server) is not installed."""
+    cfg = load_config() or {}
+    return not cfg.get("server_ok") or not os.path.isfile(str(cfg.get("server_exe") or ""))
 
 
 def model_missing() -> bool:

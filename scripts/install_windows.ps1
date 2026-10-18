@@ -23,6 +23,9 @@
 #     her first start no longer begins with that download.
 #   - The app's logs are in a normal, visible "logs" folder inside the
 #     project folder (they used to be in the hidden-looking .runtime\logs).
+#   - Option B on a PC with a graphics card also installs llama.cpp (no
+#     model): put a GGUF file in the models folder and choose Built-in in
+#     Settings -> Connection to run it on this PC.
 #
 #  WHAT'S NEW IN v4.12.1 (October 2026, app v2.1.1):
 #   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
@@ -1003,7 +1006,10 @@ function Get-HfUrl($m, $file){ return ("https://huggingface.co/" + $m.repo + "/r
 # The app's built-in-model settings: backend\data\local_llm.json. Written
 # even when a download failed (model_ok/server_ok false), so the app knows
 # the model is missing instead of silently falling back to something else.
-# Option B on an install that had A before: kept, but switched to "custom".
+# Option B (v4.13): on a PC with a graphics card, the same file is written
+# with mode "custom" - llama.cpp is installed, so the user can switch to
+# Built-in later with a GGUF of their own. Option B without a card: an old
+# file is kept, but switched to "custom".
 # What the user changed in the app survives a re-run: the model file they
 # picked in Settings (selected_file, while it still exists) and their
 # conversation memory number for the built-in model (history_budget).
@@ -1011,13 +1017,14 @@ function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $mode
     $cfg = Join-Path $proj "backend\data\local_llm.json"
     $old = $null
     if (Test-Path $cfg) { try { $old = Get-Content $cfg -Raw | ConvertFrom-Json } catch {} }
-    if ($choice.mode -ne "builtin") {
+    if ($choice.mode -ne "builtin" -and -not $choice.model) {
         if ($old) { try { $old.mode = "custom"; Write-Utf8File $cfg ($old | ConvertTo-Json -Depth 4) } catch {} }
         return
     }
     $m = $TierTable.models.($choice.model)
     $data = [ordered]@{
-        mode = "builtin"; model = $choice.model; model_label = $m.label
+        mode = $(if ($choice.mode -eq "builtin") { "builtin" } else { "custom" })
+        model = $choice.model; model_label = $m.label
         model_file = $modelPath; model_ok = [bool]$modelOk
         server_exe = $exe; server_ok = [bool]$serverOk
         llama_release = $TierTable.llama_cpp.release; build = $choice.build
@@ -1032,6 +1039,21 @@ function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $mode
     Log ("  Built-in model settings saved: " + $cfg)
 }
 
+# llama.cpp for this PC's build, falling back to the general Vulkan build
+# when the CUDA one cannot be installed or started. Returns the path to
+# llama-server.exe, or "" (the reason is logged); $choice.build is updated.
+function Install-LlamaWithFallback($choice){
+    try { return (Install-LlamaBuild $choice.build) }
+    catch {
+        Log ("  " + $_.Exception.Message) "Yellow"
+        if ($choice.build -ne "vulkan") {
+            Log "  Trying the general (Vulkan) version of llama.cpp instead..." "Yellow"
+            try { $exe = Install-LlamaBuild "vulkan"; $choice.build = "vulkan"; return $exe } catch { Log ("  " + $_.Exception.Message) "Red" }
+        }
+    }
+    return ""
+}
+
 # The last install step for option A: helper program + model. A
 # failed download never stops the install - the summary says what to do.
 # Returns $true when everything she needs is in place.
@@ -1042,19 +1064,45 @@ function Install-BuiltinLlm($proj, $choice){
     if ($SkipLlmDownload) {
         Log "  (TEST: -SkipLlmDownload - nothing is downloaded; the settings file is written as 'missing'.)" "Magenta"
     } else {
-        try { $exe = Install-LlamaBuild $choice.build; $serverOk = $true }
-        catch {
-            Log ("  " + $_.Exception.Message) "Yellow"
-            if ($choice.build -ne "vulkan") {
-                Log "  Trying the general (Vulkan) version of llama.cpp instead..." "Yellow"
-                try { $exe = Install-LlamaBuild "vulkan"; $serverOk = $true; $choice.build = "vulkan" } catch { Log ("  " + $_.Exception.Message) "Red" }
-            }
-        }
+        $exe = Install-LlamaWithFallback $choice; $serverOk = [bool]$exe
         try { Get-VerifiedFile (Get-HfUrl $m $m.file) $modelPath $m.bytes $m.sha256 $m.label; $modelOk = $true }
         catch { Log ("  " + $_.Exception.Message) "Red" }
     }
     Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk
     return ($serverOk -and $modelOk)
+}
+
+# Option B on a PC with a graphics card (2026-10-18): install llama.cpp
+# too (no model), so the user can run a GGUF of their own later - Settings
+# -> Connection -> Built-in, with this PC's tier settings. Her intro tells
+# DIY users they can. A cloud-only user pays ~0.6 GB (NVIDIA) / 33 MB.
+function Install-LocalModelRunner($proj, $hw){
+    $c = $hw.choice
+    $run = [pscustomobject]@{
+        mode = "custom"; model = $c.model; tier = $c.tier; build = $c.build
+        context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        history_default = $c.history_default; vram_need_gb = $c.vram_need_gb
+        simulated = [bool]$hw.simulated
+    }
+    $m = $TierTable.models.($c.model)
+    $modelPath = Join-Path $ModelsDir $m.file
+    New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+    $exe = ""
+    if ($SkipLlmDownload) { Log "  (TEST: -SkipLlmDownload - llama.cpp is not downloaded.)" "Magenta" }
+    else { $exe = Install-LlamaWithFallback $run }
+    # Her own tier model, if an earlier option-A install left it (checked).
+    $modelOk = (Test-Path -LiteralPath $modelPath) -and (Test-Path -LiteralPath ($modelPath + ".verified"))
+    Write-LocalLlmConfig $proj $run $exe ([bool]$exe) $modelPath $modelOk
+    return [bool]$exe
+}
+
+# The local-model step for whichever option was chosen. Returns $true
+# when option A's model is ready (option B: when llama.cpp is in place).
+function Install-LocalLlm($proj, $choice, $hw){
+    if ($choice.mode -eq "builtin") { return (Install-BuiltinLlm $proj $choice) }
+    if ($hw.choice.offered) { return (Install-LocalModelRunner $proj $hw) }
+    Write-LocalLlmConfig $proj $choice "" $false "" $false   # switches an earlier option-A install off
+    return $false
 }
 
 # The last question: start Amadeus right away? The installer runs as
@@ -1119,7 +1167,7 @@ try {
     $llmChoice = Invoke-LlmChoice $hw
     if ($LlmScreensOnly) {
         $proj = Join-Path $InstallDir "Amadeus-Project"
-        Install-BuiltinLlm $proj $llmChoice | Out-Null
+        Install-LocalLlm $proj $llmChoice $hw | Out-Null
         Log "TEST: -LlmScreensOnly - stopping here (nothing else was installed)." "Magenta"
         exit 0
     }
@@ -1564,12 +1612,12 @@ try {
     # Last on purpose: the biggest download, and a failure here must not
     # block anything else (re-running the installer resumes it).
     $llmReady = $false
-    if ($llmChoice.mode -ne "builtin") {
-        Write-LocalLlmConfig $proj $llmChoice "" $false "" $false "" $false   # switches an earlier option-A install off
-    } else {
+    if ($llmChoice.mode -eq "builtin") {
         Step 10 ("Setting up her built-in local model - " + $TierTable.models.($llmChoice.model).label + " (big download, be patient)")
-        $llmReady = Install-BuiltinLlm $proj $llmChoice
+    } elseif ($hw.choice.offered) {
+        Step 10 "Installing llama.cpp, so you can also run a GGUF model of your own on this PC"
     }
+    $llmReady = Install-LocalLlm $proj $llmChoice $hw
 
     # ---------- DONE ----------
     Step 11 "ALL DONE!"
@@ -1599,10 +1647,14 @@ try {
     Log ("       " + (Join-Path $proj "start_windows.bat"))
     Log "  2) When she opens in your browser, read her introduction message -"
     Log "     it walks you through connecting your model, step by step."
-    Log "  3) (Shortcut) You can also open Settings -> Connection and click"
-    Log "     'Test connection' - the dot turns green when she can reach"
-    Log "     your model. Pick your model from the chips (or type its name)"
-    Log "     and paste its API key, if your provider has one."
+    Log "  3) (Shortcut) You can also open Settings -> Connection, enter the"
+    Log "     server address and API key, press 'Refresh list' and pick your"
+    Log "     model (type to search), then press 'Use this model'."
+    if ($llmReady) {
+        Log "  To run a GGUF model on this PC instead: put the file in"
+        Log ("       " + $ModelsDir)
+        Log "     then choose Built-in in Settings -> Connection and press Refresh list."
+    }
     Log ""
     Log ("(Install log saved to: " + $LogPath + ")")
     Offer-StartAmadeus $proj

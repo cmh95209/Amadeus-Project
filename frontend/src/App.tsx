@@ -1010,9 +1010,11 @@ export default function App() {
         setContextBudgetState(budget.budget);
       }
       setSettingsNotice(
-        mode === "builtin"
-          ? "Switched to her built-in model - it is loading now."
-          : "Switched to your own model. Her built-in model was unloaded (its graphics memory is free)."
+        mode !== "builtin"
+          ? "Switched to your own model. Her built-in model was unloaded (its graphics memory is free)."
+          : next.model_missing
+            ? "Switched to her built-in model. Add a model file (see Model below) and press Load."
+            : "Switched to her built-in model - it is loading now."
       );
       void refreshConnection();
       void refreshBuiltinModel();
@@ -1998,9 +2000,11 @@ export default function App() {
                 <span className="conn-section-title">Server</span>
                 {builtinMode ? (
                   <p className="settings-help">
-                    {brain?.model_missing
-                      ? `This PC - but ${brain.model_label || "her built-in model"} is not installed yet. Run the installer again (it continues the download where it stopped).`
-                      : "This PC. Her built-in model runs privately here - nothing to connect."}
+                    {brain?.runner_missing
+                      ? "This PC - but llama.cpp (the program that runs her model) is not installed yet. Run the installer again (it continues where it stopped)."
+                      : brain?.model_missing
+                        ? "This PC - but there is no model file yet. Put a GGUF file in her models folder and press Refresh list below, or run the installer again and choose A to download hers."
+                        : "This PC. Her built-in model runs privately here - nothing to connect."}
                   </p>
                 ) : (<>
                   <p className="settings-intro">
@@ -2134,7 +2138,7 @@ export default function App() {
 
               <div className="conn-section">
                 <span className="conn-section-title">Status</span>
-                {builtinMode && builtinModel && !brain?.model_missing ? (
+                {builtinMode && builtinModel && !brain?.runner_missing ? (
                   <div className={`conn-status ${
                     builtinModel.state === "loaded" ? "ok" : builtinModel.state === "failed" ? "fail" : "warn"
                   }`} role="status">

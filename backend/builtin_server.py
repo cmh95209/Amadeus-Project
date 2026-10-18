@@ -137,7 +137,8 @@ def load(file: str | None = None) -> dict:
     else:
         target = (cfg.get("model_file") if override_config() else builtin_llm.selected_file())
         if not target or not os.path.isfile(str(target)):
-            raise LookupError("Her model file is not downloaded - run the installer again.")
+            raise LookupError("No model file yet: put a GGUF file in her models folder and press "
+                              "Refresh list (or run the installer again and choose A to download hers).")
     target = str(target)
     port = int(cfg.get("port") or builtin_llm.PORT)
     with _lock:
