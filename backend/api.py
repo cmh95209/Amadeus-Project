@@ -1254,7 +1254,8 @@ def greet():
             kind, new_state = ceremony.decide_builtin(
                 state, bool(ready["ready"]), builtin_llm.model_missing(),
                 bool(memory.load_username().strip()), just_saved=just_saved,
-                server_state=builtin_server.status()["state"])
+                server_state=builtin_server.status()["state"],
+                runner_missing=builtin_llm.runner_missing())
         else:
             kind, new_state = ceremony.decide(
                 state, bool(ready["ready"]), _connection_settings_present(),

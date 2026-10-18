@@ -192,8 +192,26 @@ class RouteTests(_BuiltinApp):
     def test_missing_model_line(self):
         _write(self.cfg_path, _config(self.base, model_file=str(self.base / "gone.gguf")))
         body = self.greet().json
-        self.assertEqual((body["kind"], body["wait"]), ("builtin_missing", True))
+        # llama.cpp is there, only the model file is not (2026-10-19:
+        # say so honestly).
+        self.assertEqual((body["kind"], body["wait"]), ("builtin_no_model", True))
+        self.assertIn("model file isn't downloaded", body["response"])
         self.assertNotIn("kind", self.greet().json)   # once per launch
+
+    def test_missing_program_line(self):
+        _write(self.cfg_path, _config(self.base, server_ok=False))
+        body = self.greet().json
+        self.assertEqual((body["kind"], body["wait"]), ("builtin_missing", True))
+        self.assertIn("Run the installer again", body["response"])
+
+    def test_no_model_line_texts(self):
+        en, ja, spoken = self.ceremony.line("builtin_no_model")
+        self.assertIn("GGUF", en)
+        self.assertIn("マキセ・クリス", ja)
+        self.assertIn("ダウンロードされていない", ja)
+        for latin in ("GGUF", "PC", "AI"):
+            self.assertNotIn(latin, spoken)   # spelled in kana for her voice
+        self.assertIn("ジージーユーエフ", spoken)
 
     def test_custom_mode_keeps_the_old_ceremony(self):
         _write(self.cfg_path, _config(self.base, mode="custom"))

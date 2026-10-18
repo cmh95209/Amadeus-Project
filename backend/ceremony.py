@@ -139,6 +139,28 @@ CEREMONY_LINES.update({
         "それか、設定メニューを開いて、あなた自身のモデルをつないでもいいですよ。\n"
         "それまでは、ここで待ってるわ。",
     ),
+    # llama.cpp is there, but no model file to load (an option-B install, or
+    # her file was removed). 2026-10-19: say it honestly - the model file
+    # is not downloaded (builtin_missing stays for llama.cpp itself missing).
+    "builtin_no_model": (
+        "Hello, I am Amadeus. An AI built on the memories of Makise Kurisu. "
+        "But my model file isn't downloaded on this PC yet. Put a GGUF model "
+        "file in my models folder and load it in the settings menu - or run "
+        "the installer again to download mine. You can also connect a model "
+        "of your own there. Until then, I'll be right here, waiting.",
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたAIよ。"
+        "でも、私のモデルファイルがまだこのPCにダウンロードされていないの。\n"
+        "GGUFのモデルファイルを私のモデルフォルダに入れて、設定メニューから読み込んで。"
+        "インストーラーをもう一度実行して、私のモデルをダウンロードしてもいいわ。"
+        "設定メニューで、あなた自身のモデルをつなぐこともできるわよ。\n"
+        "それまでは、ここで待ってるわ。",
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたエーアイよ。"
+        "でも、私のモデルファイルがまだこのピーシーにダウンロードされていないの。\n"
+        "ジージーユーエフのモデルファイルを私のモデルフォルダに入れて、設定メニューから読み込んで。"
+        "インストーラーをもう一度実行して、私のモデルをダウンロードしてもいいわ。"
+        "設定メニューで、あなた自身のモデルをつなぐこともできるわよ。\n"
+        "それまでは、ここで待ってるわ。",
+    ),
     "builtin_reminder": (
         "Still waking up... this is taking longer than usual. If nothing "
         "changes in a few minutes, try restarting the app.",
@@ -157,7 +179,7 @@ CEREMONY_LINES.update({
 # Every one of them is a WAIT line: spoken, but the chat box stays locked.
 FIXED_KINDS = ("intro", "trying", "reminder",
                "builtin_intro", "builtin_waiting", "builtin_reminder",
-               "builtin_missing")
+               "builtin_missing", "builtin_no_model")
 # Kinds that END the ceremony: the chat box unlocks when one of them lands.
 END_KINDS = ("wake", "fallback")
 
@@ -286,7 +308,8 @@ def decide(state: str, model_ready: bool, settings_present: bool,
 def decide_builtin(state: str, model_ready: bool, model_missing: bool,
                    name_set: bool, just_saved: bool = False,
                    now: Optional[float] = None,
-                   server_state: str = "loading") -> Tuple[Optional[str], str]:
+                   server_state: str = "loading",
+                   runner_missing: bool = True) -> Tuple[Optional[str], str]:
     """The ceremony decision in built-in-model mode (name first).
 
     '' / intro: she has not been told the name yet. The intro is said once
@@ -296,7 +319,10 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
     line and the state becomes "connecting".
     connecting: name saved, model still loading - wake when it answers; a
     reopen re-says "almost awake" once; one reminder after the usual delay.
-    A missing model (download unfinished) gets its own line once per launch.
+    Something missing gets its own line once per launch: llama.cpp itself
+    ("builtin_missing": run the installer again) or only a model file
+    ("builtin_no_model": put a GGUF in the models folder, or run the
+    installer again for hers).
 
     server_state (builtin_server): while her model is NOT loading - the user
     started without it, unloaded it, or it could not load - she never says
@@ -311,7 +337,8 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
 
     if model_missing:
         if not tracker.missing_delivered:
-            return "builtin_missing", (state or store.CEREMONY_INTRO)
+            kind = "builtin_missing" if runner_missing else "builtin_no_model"
+            return kind, (state or store.CEREMONY_INTRO)
         return None, state
 
     if state in ("", store.CEREMONY_INTRO):
@@ -353,7 +380,7 @@ def note(kind: Optional[str], new_state: str) -> None:
         tracker.connecting_since = time.monotonic()
     elif kind in ("reminder", "builtin_reminder"):
         tracker.reminder_delivered = True
-    elif kind == "builtin_missing":
+    elif kind in ("builtin_missing", "builtin_no_model"):
         tracker.missing_delivered = True
     # wake / fallback / normal close the ceremony for good ("done" is
     # written exactly here, when the line that ends it actually ships).
