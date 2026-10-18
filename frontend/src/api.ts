@@ -550,12 +550,21 @@ export async function getContextBudget(): Promise<number> {
   return (await getContextBudgetInfo()).budget;
 }
 
-/** The user's budget plus the built-in model's cap on it (null = no cap). */
-export async function getContextBudgetInfo(): Promise<{ budget: number; builtinCap: number | null }> {
+export type ContextBudgetInfo = {
+  /** The number Settings shows: the built-in model's own, or the custom model's. */
+  budget: number;
+  /** The most the built-in model's context holds (null = custom mode, no cap). */
+  builtinCap: number | null;
+  /** What a fresh install starts with (the built-in model: this PC's tier). */
+  defaultBudget: number;
+};
+
+export async function getContextBudgetInfo(): Promise<ContextBudgetInfo> {
   const data = await parseResponse(await fetch(`${API_BASE}/getContextBudget`, { cache: "no-store" }));
   return {
     budget: typeof data.budget === "number" ? data.budget : 40000,
     builtinCap: typeof data.builtin_cap === "number" ? data.builtin_cap : null,
+    defaultBudget: typeof data.default === "number" ? data.default : 40000,
   };
 }
 

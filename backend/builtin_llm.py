@@ -89,6 +89,12 @@ def save_mode(mode: str) -> None:
                           "installer again and choose option A.")
     cfg = dict(cfg)
     cfg["mode"] = "builtin" if mode == "builtin" else "custom"
+    save_config(cfg)
+
+
+def save_config(cfg: dict) -> None:
+    """Write data/local_llm.json in one step (a crash mid-write never leaves
+    half a file: the launcher and the installer read it too)."""
     path = config_path()
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -128,6 +134,50 @@ def history_budget_cap():
     if context <= 0:
         return None
     return max(MIN_HISTORY_TOKENS, context - PROMPT_OVERHEAD_TOKENS - REPLY_TOKENS)
+
+
+def history_default():
+    """The conversation memory the built-in model starts with: the tier's
+    history_default (installer), else everything its context can hold."""
+    cap = history_budget_cap()
+    if cap is None:
+        return None
+    try:
+        value = int((load_config() or {}).get("history_default") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return min(value, cap) if value > 0 else cap
+
+
+def history_budget():
+    """The built-in model's OWN conversation memory number (Settings), kept
+    apart from the custom model's (data/context_budget.txt): switching
+    between the two never overwrites the other's number. Never more than
+    the context can hold. None when built-in mode is off."""
+    cap = history_budget_cap()
+    if cap is None:
+        return None
+    try:
+        value = int((load_config() or {}).get("history_budget") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        return history_default()
+    return max(min(value, cap), memory.MIN_CONTEXT_BUDGET)
+
+
+def save_history_budget(budget: int):
+    """Save the built-in model's conversation number (clamped to what its
+    context holds) and return what was saved."""
+    cap = history_budget_cap()
+    cfg = load_config()
+    if cap is None or not cfg:
+        raise LookupError("Built-in mode is off.")
+    value = max(memory.MIN_CONTEXT_BUDGET, min(int(budget), cap))
+    cfg = dict(cfg)
+    cfg["history_budget"] = value
+    save_config(cfg)
+    return value
 
 
 # Gemma 4 writes its reasoning between these markers. Thinking is off, but if

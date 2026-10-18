@@ -1825,16 +1825,15 @@ def load_context_budget() -> int:
 
 
 def effective_context_budget() -> int:
-    """The history budget a prompt actually uses: the user's setting, but on
-    the built-in model never more than its context window can hold (the
-    40000 default would overflow a 16K / 32K window as a chat grows)."""
-    budget = load_context_budget()
+    """The history budget a prompt actually uses: the custom model's setting
+    (data/context_budget.txt), or on the built-in model its own number,
+    which never exceeds what its context window can hold."""
     try:
         import builtin_llm   # late import: builtin_llm imports this module
-        cap = builtin_llm.history_budget_cap()
+        own = builtin_llm.history_budget()
     except Exception:
-        cap = None
-    return min(budget, cap) if cap else budget
+        own = None
+    return own if own else load_context_budget()
 
 
 def save_context_budget(budget: int) -> int:

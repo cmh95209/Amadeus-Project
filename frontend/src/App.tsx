@@ -133,6 +133,7 @@ export default function App() {
   const builtinMode = brain?.mode === "builtin";
   // The built-in model's cap on the history budget (null = no cap).
   const [builtinBudgetCap, setBuiltinBudgetCap] = useState<number | null>(null);
+  const [defaultBudget, setDefaultBudget] = useState<number>(40000);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Connecting to Amadeus...");
@@ -623,7 +624,7 @@ export default function App() {
           getDeepThinking().catch(() => false),
           listConversations().catch(() => null),
           getVoiceRetention().catch(() => 100),
-          getContextBudgetInfo().catch(() => ({ budget: 40000, builtinCap: null })),
+          getContextBudgetInfo().catch(() => ({ budget: 40000, builtinCap: null, defaultBudget: 40000 })),
           getLLMServer().catch(() => ""),
           getUsername().catch(() => ({ name: "", reading: "" })),
           getUserProfile().catch(() => ({ pronouns: "", address: "auto" })),
@@ -638,6 +639,7 @@ export default function App() {
       setVoiceRetentionState(voiceCap);
       setContextBudgetState(budgetInfo.budget);
       setBuiltinBudgetCap(budgetInfo.builtinCap);
+      setDefaultBudget(budgetInfo.defaultBudget);
       setBrain(brainInfo);
       setServerAddressState(serverAddr);
       setUserName(savedName.name);
@@ -861,7 +863,7 @@ export default function App() {
       if (!builtinMode) await setModel(nextModel);
       const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
-      await setContextBudget(contextBudget);
+      setContextBudgetState(await setContextBudget(contextBudget));
       if (!builtinMode) await setLLMServer(serverAddress);
       // Saved last and never fatal: a backend older than this WebUI has no
       // /setUserProfile yet, and that must not undo the settings above.
@@ -924,8 +926,13 @@ export default function App() {
     try {
       const next = await setBrainMode(mode);
       setBrain(next);
+      // Each mode keeps its own conversation number: show the new mode's.
       const budget = await getContextBudgetInfo().catch(() => null);
-      if (budget) setBuiltinBudgetCap(budget.builtinCap);
+      if (budget) {
+        setBuiltinBudgetCap(budget.builtinCap);
+        setDefaultBudget(budget.defaultBudget);
+        setContextBudgetState(budget.budget);
+      }
       setSettingsNotice(
         mode === "builtin"
           ? "Switched to her built-in model. Restart Amadeus to start it."
@@ -2123,7 +2130,7 @@ export default function App() {
                 <input
                   type="number"
                   min={500}
-                  max={1000000}
+                  max={builtinBudgetCap ?? 1000000}
                   step={500}
                   value={contextBudget}
                   disabled={settingsBusy}
@@ -2137,15 +2144,20 @@ export default function App() {
                 />
               </label>
               <p className="settings-help" id="context-budget-help">
-                How much recent conversation she keeps in each prompt, in
-                estimated tokens. Lower = remembers less but replies faster and
-                uses less memory — good for small local models. Default is
-                40000. The model's context window should hold this number plus
-                about 6000.
-                {builtinMode && builtinBudgetCap !== null && (
+                How much of your recent conversation she keeps in mind.
+                Amadeus also reserves about 10,000 tokens for her character
+                and her reply. We recommend at least 12,000.
+                {builtinBudgetCap !== null ? (
                   <>
-                    {" "}Her built-in model holds at most {builtinBudgetCap} of
-                    history, so a higher number is used as {builtinBudgetCap}.
+                    {" "}Default on this PC: {defaultBudget.toLocaleString("en-US")}{" "}
+                    (lower if your graphics card has less memory). Her built-in
+                    model has room for up to {builtinBudgetCap.toLocaleString("en-US")}.
+                  </>
+                ) : (
+                  <>
+                    {" "}Default: {defaultBudget.toLocaleString("en-US")}. Your
+                    model's context window must hold this number plus about
+                    10,000.
                   </>
                 )}
               </p>

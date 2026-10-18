@@ -201,18 +201,32 @@ class WakeWordingTests(_BuiltinApp):
 
 
 class SettingsTests(_BuiltinApp):
-    def test_history_budget_is_capped_on_the_builtin_model(self):
-        self.assertEqual(self.memory.load_context_budget(), 40000)      # the user's value
+    def test_builtin_model_has_its_own_conversation_number(self):
+        # No tier default in the file (an older install): all the context holds.
         self.assertEqual(self.memory.effective_context_budget(), 16384 - 6000 - 4096)
         self.assertEqual(self.client.get("/getContextBudget").json,
-                         {"budget": 40000, "builtin_cap": 6288})
-        _write(self.cfg_path, _config(self.base, context=32768, n=1))
-        self.assertEqual(self.memory.effective_context_budget(), 22672)
-        self.memory.save_context_budget(5000)
-        self.assertEqual(self.memory.effective_context_budget(), 5000)   # lower wins
-        _write(self.cfg_path, _config(self.base, mode="custom", n=22))
-        self.memory.save_context_budget(40000)
-        self.assertEqual(self.memory.effective_context_budget(), 40000)  # no cap
+                         {"budget": 6288, "builtin_cap": 6288, "default": 6288, "mode": "builtin"})
+        # The tier's default is where it starts.
+        _write(self.cfg_path, _config(self.base, context=49152, history_default=32000, n=1))
+        self.assertEqual(self.memory.effective_context_budget(), 32000)
+        info = self.client.get("/getContextBudget").json
+        self.assertEqual((info["budget"], info["builtin_cap"], info["default"]), (32000, 39056, 32000))
+        # Settings saves the built-in number - clamped to what the context holds -
+        # and leaves the custom model's number alone.
+        out = self.client.post("/setContextBudget", json={"budget": 99999}).json
+        self.assertEqual(out["budget"], 39056)
+        self.assertEqual(self.client.post("/setContextBudget", json={"budget": 12000}).json["budget"], 12000)
+        self.assertEqual(self.memory.effective_context_budget(), 12000)
+        self.assertEqual(self.memory.load_context_budget(), 40000)
+        # Custom mode: the custom number, untouched; switching back keeps 12000.
+        self.client.post("/setBrainMode", json={"mode": "custom"})
+        self.assertEqual(self.memory.effective_context_budget(), 40000)
+        self.assertEqual(self.client.get("/getContextBudget").json,
+                         {"budget": 40000, "builtin_cap": None, "default": 40000, "mode": "custom"})
+        self.client.post("/setContextBudget", json={"budget": 50000})
+        self.client.post("/setBrainMode", json={"mode": "builtin"})
+        self.assertEqual(self.memory.effective_context_budget(), 12000)
+        self.assertEqual(self.memory.load_context_budget(), 50000)
 
     def test_brain_mode_routes(self):
         info = self.client.get("/brainMode").json

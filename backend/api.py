@@ -640,10 +640,16 @@ def set_voice_retention():
 
 @application.route("/getContextBudget", methods=["GET"])
 def get_context_budget():
-    """The user's conversation-history token budget (estimated tokens), and
-    the built-in model's cap on it (null when built-in mode is off)."""
-    return jsonify({"budget": memory.load_context_budget(),
-                    "builtin_cap": builtin_llm.history_budget_cap()})
+    """The conversation-memory number Settings shows (estimated tokens): the
+    built-in model's own number in built-in mode, else the custom model's.
+    builtin_cap = the most the built-in model's context holds (null when
+    built-in mode is off); default = what a fresh install starts with."""
+    own = builtin_llm.history_budget()
+    if own is not None:
+        return jsonify({"budget": own, "builtin_cap": builtin_llm.history_budget_cap(),
+                        "default": builtin_llm.history_default(), "mode": "builtin"})
+    return jsonify({"budget": memory.load_context_budget(), "builtin_cap": None,
+                    "default": memory.DEFAULT_CONTEXT_BUDGET, "mode": "custom"})
 
 
 # pre: none
@@ -687,7 +693,13 @@ def set_context_budget():
         budget = int(data["budget"])
     except (TypeError, ValueError):
         return jsonify({"message": "'budget' must be a number"}), 400
-    saved = memory.save_context_budget(budget)
+    if builtin_llm.active():
+        try:
+            saved = builtin_llm.save_history_budget(budget)
+        except (LookupError, OSError) as exc:
+            return jsonify({"message": f"Could not save: {exc}"}), 500
+    else:
+        saved = memory.save_context_budget(budget)
     return jsonify({"status": "ok", "budget": saved})
 
 
