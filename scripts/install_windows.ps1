@@ -19,6 +19,9 @@
 #     conda, git, winget, npm), with their result codes - one file to send
 #     if something goes wrong. It is saved as UTF-8.
 #   - At the end it offers to start Amadeus right away.
+#   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is tested
+#     with. Its October 2026 update made her voice take minutes per line;
+#     an install that already got it is moved back on the next run.
 #
 #  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
 #   - Installs and updates the fork's main branch (it used to follow a
@@ -228,6 +231,12 @@ $LogPath    = Join-Path $InstallDir "install_log.txt"
 # (Step 3) when they hold nothing of the user's own.
 $ForkUrl       = "https://github.com/cmh95209/Amadeus-Project.git"
 $LegacyBranch  = "feature/character-memory-spike"
+# The voice engine is PINNED to the version Amadeus is tested with (2026-08-18).
+# Its newest version (October 2026: "V5" + a CUDA-graph rework) made her voice
+# take minutes per line instead of seconds; an upgrade happens only after it
+# is tested here (see the V5 evaluation on the roadmap).
+$GptSovitsUrl    = "https://github.com/RVC-Boss/GPT-SoVITS.git"
+$GptSovitsCommit = "48b1a0169a28582a8984402f82cf438d3bfa6aca"
 # -Source: a local repo stands in for GitHub everywhere (first clone AND the
 # update check on a re-run), so a re-run picks up new local commits.
 if ($Source) { $ForkUrl = (Resolve-Path -LiteralPath $Source -ErrorAction SilentlyContinue).Path }
@@ -441,6 +450,29 @@ function Ensure-Clone($url, $dest, $branch, $markers){
     if ($LASTEXITCODE -ne 0) { throw ("Could not download " + $leaf + ". Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
     if (-not (Test-Complete $dest $markers)) { throw ("Downloaded " + $leaf + " but it looks incomplete. Run the installer again to retry.") }
     Log ("  Downloaded " + $leaf + ".") "Green"
+}
+
+# Put the voice engine copy on the tested version ($GptSovitsCommit) - a
+# fresh download AND an existing install made by an older installer (which
+# took whatever upstream had published that day). The switch discards the
+# copy's changed files: this project's voice patches (re-applied right after,
+# in Step 4) and the engine's own settings file, which goes back to the
+# tested original (a newer engine adds entries the tested one does not
+# know). Downloaded model files are not tracked by git and stay untouched.
+function Set-GptSovitsVersion($dest, $commit){
+    $git = Resolve-Exe "git"
+    $head = (& $git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($head -eq $commit) { Log "  Voice engine is on the tested version." "Green"; return }
+    Log ("  Switching the voice engine to the tested version (" + $commit.Substring(0, 7) + ")...") "Yellow"
+    & $git -C $dest cat-file -e ($commit + "^{commit}") 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-Tool "Fetching the tested voice engine version" $git @("-C", $dest, "fetch", "--progress", "origin", $commit)
+        if ($LASTEXITCODE -ne 0) { throw ("Could not download the tested voice engine version. Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
+    }
+    Invoke-Tool "Switching the voice engine version" $git @("-C", $dest, "checkout", "--force", "--quiet", $commit)
+    $now = (& $git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $now -ne $commit) { throw ("Could not switch the voice engine to its tested version.`n" + (Get-ToolTail)) }
+    Log ("  Voice engine switched to the tested version (was " + $(if ($head) { $head.Substring(0, [Math]::Min(7, $head.Length)) } else { "unknown" }) + ").") "Green"
 }
 
 # Create a conda environment only if it does not already exist (safe to re-run).
@@ -1249,7 +1281,8 @@ try {
     # ---------- STEP 4: voice engine ----------
     Step 4 "Downloading the voice engine (GPT-SoVITS)"
     $gpt = Join-Path $proj "GPT-SoVITS"
-    Ensure-Clone "https://github.com/RVC-Boss/GPT-SoVITS.git" $gpt $null @("requirements.txt","extra-req.txt")
+    Ensure-Clone $GptSovitsUrl $gpt $null @("requirements.txt","extra-req.txt")
+    Set-GptSovitsVersion $gpt $GptSovitsCommit
     # Apply this project's voice patches to the GPT-SoVITS copy. The files
     # are committed in this project's repo and mirror the exact setup that is
     # proven in daily use: a prebuilt/optional Japanese text helper and pure

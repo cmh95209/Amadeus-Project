@@ -543,6 +543,26 @@ step 4 "Setting up the voice engine"
 
 GPT="$PROJ/GPT-SoVITS"
 clone_or_update "$GPT_REPO_URL" "$GPT" ""
+# Pin the voice engine to the version Amadeus is tested with (2026-08-18):
+# GPT-SoVITS's October 2026 update ("V5" + a CUDA-graph rework) made her
+# voice take minutes per line on Windows. Fresh downloads AND older installs
+# are put on it; the switch resets the copy's changed files (the voice
+# patches, re-applied right below, and the engine's own settings file, back
+# to the tested original). Downloaded model files are untracked and stay.
+GPT_SOVITS_COMMIT="48b1a0169a28582a8984402f82cf438d3bfa6aca"
+if [ "$(git -C "$GPT" rev-parse HEAD 2>/dev/null)" != "$GPT_SOVITS_COMMIT" ]; then
+    log "  Switching the voice engine to the tested version (${GPT_SOVITS_COMMIT:0:7})..."
+    git -C "$GPT" cat-file -e "${GPT_SOVITS_COMMIT}^{commit}" 2>/dev/null \
+        || git -C "$GPT" fetch --quiet origin "$GPT_SOVITS_COMMIT" \
+        || die "Could not download the tested voice engine version." \
+               "Check your internet connection, then re-run the installer."
+    git -C "$GPT" checkout --force --quiet "$GPT_SOVITS_COMMIT" \
+        || die "Could not switch the voice engine to its tested version." \
+               "Re-run the installer, or report this."
+fi
+[ "$(git -C "$GPT" rev-parse HEAD 2>/dev/null)" = "$GPT_SOVITS_COMMIT" ] \
+    || die "The voice engine is not on its tested version." "Re-run the installer, or report this."
+log "  Voice engine is on the tested version."
 
 VOICE_PATCH="$PROJ/scripts/voice-patch"
 if [ -d "$VOICE_PATCH" ]; then
