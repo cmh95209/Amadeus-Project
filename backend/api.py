@@ -23,6 +23,7 @@ from chat import (
 )
 
 import builtin_llm
+import builtin_server
 import ceremony
 import llm
 import memory
@@ -150,8 +151,15 @@ def _llm_error_message(exc: Exception) -> str:
                 if builtin_llm.model_missing():
                     return ("Her built-in model is not installed yet. Run the installer "
                             "again - it continues the download where it stopped.")
-                return ("Can't reach her built-in model. It may still be starting - "
-                        "if this keeps happening, restart Amadeus.")
+                state = builtin_server.status()["state"]
+                if state == "unloaded":
+                    return ("Her built-in model is not loaded. Load it in Settings -> "
+                            "Connection.")
+                if state == "failed":
+                    return ("Her built-in model could not load - see Settings -> "
+                            "Connection for why.")
+                return ("Can't reach her built-in model. It may still be loading - "
+                        "Settings -> Connection shows how it is doing.")
             return f"Can't reach the model server at {llm._server_url()}. Is it running?"
         if isinstance(exc, openai.APITimeoutError):
             return "The model server took too long to respond. Is it busy or overloaded?"
@@ -662,9 +670,9 @@ def get_brain_mode():
 
 
 # pre: body {"mode": "builtin" | "custom"}; "builtin" only when available
-# post: the choice is saved in data/local_llm.json. The launcher starts (or
-#       stops) her built-in model only when Amadeus starts, so the reply
-#       says a restart is needed for the switch to fully apply.
+# post: the choice is saved in data/local_llm.json and applied at once:
+#       "builtin" loads her model (in the background), "custom" unloads it
+#       and frees its graphics memory.
 @application.route("/setBrainMode", methods=["POST"])
 def set_brain_mode():
     data = request.get_json(silent=True)
@@ -678,9 +686,60 @@ def set_brain_mode():
     except OSError as exc:
         return jsonify({"message": f"Could not save the choice: {exc}"}), 500
     reset_llm()   # rebuild the model clients for the new server
+    if mode == "builtin":
+        try:
+            if builtin_server.status()["state"] not in ("loading", "loaded"):
+                builtin_server.load()
+        except (LookupError, ValueError) as exc:
+            print(f"[Flask] /setBrainMode: her model was not loaded: {exc}")
+    else:
+        builtin_server.unload()
     info = builtin_llm.describe()
-    info["restart_needed"] = True
+    info["restart_needed"] = False
+    info["server"] = builtin_server.status()
     return jsonify(info)
+
+
+# pre: none
+# post: her built-in model's server: state ("unloaded" | "loading" |
+#       "loaded" | "failed"), the file it runs (or tried), why it failed,
+#       and every chat-model GGUF in the models folder (Settings' dropdown;
+#       asking again = "Refresh list").
+@application.route("/builtinModel", methods=["GET"])
+def get_builtin_model():
+    info = builtin_llm.describe()
+    info["server"] = builtin_server.status()
+    info["files"] = builtin_llm.list_models()
+    info["selected"] = builtin_llm.selected_file()
+    folder = builtin_llm.models_dir()
+    info["folder"] = str(folder) if folder else ""
+    return jsonify(info)
+
+
+# pre: body {"file": "<a GGUF name from /builtinModel's files>"} (optional:
+#      default = the saved choice); built-in mode on
+# post: her model (re)loads in the background; a file that loads fine is
+#       the one she starts with next time
+@application.route("/builtinModel/load", methods=["POST"])
+def load_builtin_model():
+    data = request.get_json(silent=True)
+    file = data.get("file") if isinstance(data, dict) else None
+    if file is not None and not isinstance(file, str):
+        return jsonify({"message": "'file' must be a file name"}), 400
+    try:
+        status = builtin_server.load(file or None)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 409
+    return jsonify({"status": "ok", "server": status})
+
+
+# post: her model stops and its graphics memory is free; she cannot answer
+#       until it is loaded again
+@application.route("/builtinModel/unload", methods=["POST"])
+def unload_builtin_model():
+    return jsonify({"status": "ok", "server": builtin_server.unload()})
 
 
 @application.route("/setContextBudget", methods=["POST"])
@@ -916,6 +975,7 @@ def test_connection():
         "voice_reachable": _voice_engine_reachable(),
         "builtin": builtin,
         "builtin_model_missing": builtin and builtin_llm.model_missing(),
+        "builtin_state": builtin_server.status()["state"] if builtin else None,
     })
 
 

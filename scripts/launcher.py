@@ -209,47 +209,113 @@ def load_builtin_config() -> dict | None:
     return data
 
 
+# The one name her model is served under (llama-server --alias); the same
+# value as backend/builtin_llm.py's ALIAS (a test keeps them equal). The
+# backend runs the server itself (backend/builtin_server.py), so Settings
+# can unload, load and switch it while Amadeus runs.
+BUILTIN_ALIAS = "amadeus-builtin"
+
+
 def builtin_model_name(cfg: dict) -> str:
-    """The name the model is served under (--alias). backend/builtin_llm.py
-    derives the same name from the same file."""
-    return Path(str(cfg.get("model_file") or "")).stem or "builtin-model"
+    """The name the model is served under (--alias)."""
+    return BUILTIN_ALIAS
+
+
+def selected_model_file(cfg: dict) -> str:
+    """The GGUF she loads: the one picked in Settings (while it exists),
+    else the installer's (backend/builtin_llm.py selected_file)."""
+    chosen = str(cfg.get("selected_file") or "")
+    if chosen and Path(chosen).is_file():
+        return chosen
+    return str(cfg.get("model_file") or "")
 
 
 def builtin_files_ready(cfg: dict) -> tuple[bool, str]:
     """(True, "") when llama-server and the model are on disk, else
     (False, plain-English reason)."""
     exe = str(cfg.get("server_exe") or "")
-    model = str(cfg.get("model_file") or "")
+    model = selected_model_file(cfg)
     if not cfg.get("server_ok") or not Path(exe).is_file():
         return False, "her model's helper program (llama.cpp) is not installed"
-    if not cfg.get("model_ok") or not Path(model).is_file():
+    own = model != str(cfg.get("model_file") or "")
+    if not Path(model).is_file() or (not own and not cfg.get("model_ok")):
         return False, f"her model file is not downloaded ({Path(model).name or 'unknown'})"
     return True, ""
 
 
-def llama_server_command(cfg: dict) -> list[str]:
-    """llama-server with the tier's settings; sampling = Unsloth's
-    recommendation for Gemma 4 (the Model Sampling panel can override).
-    Thinking is NOT set server-wide: every request already says it (the
-    backend's normal client "off", Deep thinking "on", the memory sidecar
-    "off"), and b11400 deprecates --chat-template-kwargs for this while its
-    replacement (--reasoning off) might also refuse Deep thinking's per-
-    request "on". The backend's thought filter catches any leak."""
-    cmd = [
-        str(cfg["server_exe"]),
-        "-m", str(cfg["model_file"]),
-        "--host", "127.0.0.1",
-        "--port", str(cfg.get("port") or LLM_PORT),
-        "--alias", builtin_model_name(cfg),
-        "-c", str(int(cfg.get("context") or 16384)),
-        "-ngl", str(int(cfg.get("gpu_layers") if cfg.get("gpu_layers") is not None else 999)),
-        "--jinja",
-        "--temp", "1.0", "--top-p", "0.95", "--top-k", "64",
-    ]
-    if cfg.get("kv_cache") == "q8_0":
-        # A compressed conversation memory needs flash attention on.
-        cmd += ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
-    return cmd
+def builtin_vram_need_gb(cfg: dict) -> float | None:
+    """Graphics memory her model needs (the tier's estimate, which includes
+    her voice when it runs on the card), adjusted for a GGUF picked in
+    Settings that is bigger or smaller than the tier's own. None = unknown."""
+    try:
+        need = float(cfg.get("vram_need_gb") or 0)
+    except (TypeError, ValueError):
+        return None
+    if need <= 0:
+        return None
+    chosen, tier_file = selected_model_file(cfg), str(cfg.get("model_file") or "")
+    if chosen != tier_file:
+        try:
+            need += (Path(chosen).stat().st_size - Path(tier_file).stat().st_size) / 1024 ** 3
+        except OSError:
+            pass
+    return round(need, 1)
+
+
+def nvidia_free_vram_gb() -> float | None:
+    """Free graphics memory on the NVIDIA card (the largest, if several), or
+    None when it cannot be read (no NVIDIA card / no nvidia-smi): AMD and
+    Intel cards have no reliable free-memory reading on Windows, so the
+    check is skipped there."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    values = []
+    for line in out.stdout.splitlines():
+        try:
+            values.append(float(line.strip()) / 1024)   # MiB -> GiB
+        except ValueError:
+            pass
+    return round(max(values), 1) if out.returncode == 0 and values else None
+
+
+def ask_about_graphics_memory(need: float, read_free=None, ask=input) -> bool:
+    """When the card is too full for her model: ask the user. True = load
+    her model, False = start without it. Without a person at the window
+    (no console input) she starts anyway, as before. A free card asks
+    nothing."""
+    read_free = read_free or nvidia_free_vram_gb
+    free = read_free()
+    if free is None or free >= need:
+        note(f"Graphics memory: {free} GB free, her model needs about {need} GB.")
+        return True
+    if not sys.stdin or not sys.stdin.isatty():
+        note(f"Graphics memory low ({free} of {need} GB) - no one to ask, loading anyway.")
+        return True
+    while True:
+        say(f"\n  Your graphics card has {free} GB free; her model needs about {need} GB.")
+        say("  Close games or other programs that use a lot of graphics memory, then")
+        say("  press Enter to check again. Or type S to start her model anyway (it may")
+        say("  be slow or fail), or N to start without it (load it later in")
+        say("  Settings -> Connection).")
+        try:
+            answer = ask("  Your choice [Enter / S / N]: ").strip().upper()
+        except EOFError:
+            answer = "S"
+        note(f"  (answer: {answer or 'Enter'})")
+        if answer == "S":
+            return True
+        if answer == "N":
+            return False
+        free = read_free()
+        if free is None or free >= need:
+            say(f"  Now {free} GB free - starting her model.")
+            return True
 
 
 def apply_simulated_vram(cfg: dict, vram_gb: int) -> dict | None:
@@ -930,7 +996,8 @@ def _secs(started: float) -> str:
     return f"{int(time.monotonic() - started)} s"
 
 
-def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
+def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
+        no_model: bool = False) -> None:
     conda = find_conda()
     npm = find_npm()
     builtin = load_builtin_config()
@@ -956,23 +1023,31 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
     clear_stale_amadeus_processes({"built-in model": LLM_PORT} if builtin else None)
     ensure_frontend_dependencies(npm)
 
-    # The built-in model starts FIRST: loading 4-17 GB takes the longest, so
-    # it overlaps the other services' start-up. A missing model never stops
-    # the app - the backend reports it (and the WebUI shows it).
-    llm_proc = None
+    # Her built-in model: the app's backend loads it (backend/builtin_server.py,
+    # so Settings can unload / load / switch it). The launcher only decides
+    # WHETHER it loads at start: not with "start without her model", and the
+    # user is asked first when the graphics card is too full for it (games).
+    # A missing model never stops the app - the backend reports it.
+    load_model = False
     if builtin:
         ready, why = builtin_files_ready(builtin)
-        label = builtin.get('model_label', builtin_model_name(builtin))
-        if ready:
-            note(f"Built-in model: {label}, {builtin.get('context')} context, "
-                 f"{builtin.get('kv_cache')} memory, voice on the "
-                 f"{'processor' if builtin.get('voice_device') == 'cpu' else 'graphics card'}.")
-            begin(f"Her built-in model ({label})")
-            llm_proc = start_process("llm", llama_server_command(builtin), PROJECT_ROOT)
-            end("loading in the background")
-        else:
-            say(f"  WARNING: her built-in model was not started - {why}. "
+        note(f"Built-in model: {Path(selected_model_file(builtin)).name}, "
+             f"{builtin.get('context')} context, {builtin.get('kv_cache')} memory, "
+             f"voice on the {'processor' if builtin.get('voice_device') == 'cpu' else 'graphics card'}.")
+        if no_model:
+            say("  Her built-in model will not be loaded (load it in Settings -> Connection).")
+        elif not ready:
+            say(f"  WARNING: her built-in model cannot start - {why}. "
                 "Run the installer again to finish setting it up.")
+        else:
+            need = builtin_vram_need_gb(builtin)
+            load_model = ask_about_graphics_memory(need) if need else True
+            if not load_model:
+                say("  Starting without her model (load it in Settings -> Connection).")
+    backend_env = {"AMADEUS_LOAD_MODEL": "1" if load_model else "0"}
+    if builtin and builtin.get("simulated"):
+        import json
+        backend_env["AMADEUS_BUILTIN_OVERRIDE"] = json.dumps(builtin)
 
     begin("Her voice")
     started = time.monotonic()
@@ -1017,9 +1092,13 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
         "backend",
         [sys.executable, "main.py"],
         BACKEND_DIR,
+        backend_env,
     )
     wait_for_port("backend", BACKEND_PORT, backend, timeout=45)
     end(f"ready ({_secs(started)})")
+    if load_model:
+        say("  Her built-in model ... loading in the background "
+            "(Settings -> Connection shows how it is doing)")
 
     begin("The web page")
     started = time.monotonic()
@@ -1057,18 +1136,6 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
                         f"{LOG_DIR / 'cm-sidecar.log'}")
                     cm = None
 
-    # llama-server opens its port right away and answers "loading" until the
-    # model is in memory; the WebUI shows that state. Here we only make sure
-    # it did not die on start (e.g. not enough graphics memory).
-    if llm_proc is not None:
-        try:
-            wait_for_port("built-in model", LLM_PORT, llm_proc, timeout=180)
-            note("Built-in model server is up (the WebUI shows when the model has loaded).")
-        except (TimeoutError, RuntimeError) as e:
-            note(f"Built-in model failed: {e}")
-            say("  WARNING: her built-in model did not start. Details: "
-                f"{LOG_DIR / 'llm.log'}")
-
     url = f"http://127.0.0.1:{FRONTEND_PORT}/"
 
     say("\n========================================")
@@ -1081,7 +1148,6 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
         _open_browser(url)
 
     cm_warned = False
-    llm_warned = False
     while True:
         for name, process in (
             ("GPT-SoVITS", gpt),
@@ -1102,12 +1168,6 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
             say(f"  WARNING: her memory stopped (exit {cm.returncode}) - she "
                 "works without long-term memory until the next start. "
                 f"Details: {LOG_DIR / 'cm-sidecar.log'}")
-        # The built-in model stopping does not tear the app down either:
-        # she reports it as unreachable, and a restart brings it back.
-        if llm_proc is not None and not llm_warned and llm_proc.poll() is not None:
-            llm_warned = True
-            say(f"  WARNING: her built-in model stopped (exit {llm_proc.returncode}). "
-                f"Restart Amadeus to bring it back. Details: {LOG_DIR / 'llm.log'}")
 
         time.sleep(1)
 
@@ -1138,6 +1198,12 @@ def main() -> int:
              "much graphics memory would get (its model must be downloaded).",
     )
     parser.add_argument(
+        "--no-model",
+        action="store_true",
+        help="Start without loading her built-in model (load it later in "
+             "Settings -> Connection). The 'without her model' shortcut uses this.",
+    )
+    parser.add_argument(
         "--setup-memory",
         action="store_true",
         help="Only set up her memory (the installer runs this), then exit.",
@@ -1159,7 +1225,8 @@ def main() -> int:
 
     open_launcher_log()
     try:
-        run(no_browser=args.no_browser, simulate_vram_gb=args.simulate_vram_gb)
+        run(no_browser=args.no_browser, simulate_vram_gb=args.simulate_vram_gb,
+            no_model=args.no_model)
         return 0
     except KeyboardInterrupt:
         return 0

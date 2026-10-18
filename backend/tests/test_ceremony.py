@@ -71,6 +71,13 @@ class _FreshAppTests(unittest.TestCase):
         for name in ('api', 'chat', 'memory', 'ceremony', 'chat_interactions'):
             sys.modules.pop(name, None)
         self.api = importlib.import_module('api')
+        # Her built-in model's server log goes to the temp folder, never to
+        # the project's logs/ (a route that loads her model writes it).
+        log = patch.object(self.api.builtin_server, "LOG_FILE",
+                           Path(self.directory.name) / "logs" / "llm.log")
+        log.start()
+        self.addCleanup(log.stop)
+        self.addCleanup(self.api.builtin_server.unload)
         self.chat = importlib.import_module('chat')
         self.memory = importlib.import_module('memory')
         self.ceremony = importlib.import_module('ceremony')

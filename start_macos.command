@@ -46,7 +46,7 @@ CONDA_EXE="$(find_conda)" || {
 "$CONDA_EXE" run \
     -n amadeus \
     --no-capture-output \
-    python "$PROJECT_ROOT/scripts/launcher.py"
+    python "$PROJECT_ROOT/scripts/launcher.py" "$@"
 
 EXIT_CODE=$?
 

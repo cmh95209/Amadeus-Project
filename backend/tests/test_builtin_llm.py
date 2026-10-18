@@ -104,7 +104,7 @@ class ConfigTests(_TempBackendDir):
         _write(self.cfg_path, _config(self.tmp))
         self.assertTrue(self.b.active())
         self.assertEqual(self.b.server_url(), "http://127.0.0.1:8091/v1")
-        self.assertEqual(self.b.model_name(), "gemma-4-12B-it-qat-UD-Q4_K_XL")
+        self.assertEqual(self.b.model_name(), "amadeus-builtin")   # one fixed name
         self.assertFalse(self.b.model_missing())
 
     def test_unreadable_file_means_off(self):
@@ -178,7 +178,7 @@ class LlmClientTests(_TempBackendDir):
         _write(self.cfg_path, _config(self.tmp))
         client = self.llm.get_llm("", "some/cloud-model")
         self.assertIsInstance(client, self.llm._ThoughtFreeChatOpenAI)
-        self.assertEqual(client.model_name, "gemma-4-12B-it-qat-UD-Q4_K_XL")
+        self.assertEqual(client.model_name, "amadeus-builtin")
         self.assertEqual(str(client.openai_api_base), "http://127.0.0.1:8091/v1")
         self.assertEqual(client.extra_body["chat_template_kwargs"], {"enable_thinking": False})
 
@@ -213,7 +213,7 @@ class AppTests(_FreshAppTests):
 
     def test_model_name_comes_from_builtin(self):
         self.builtin_on()
-        self.assertEqual(self.chat.getLLMModel(), "gemma-4-12B-it-qat-UD-Q4_K_XL")
+        self.assertEqual(self.chat.getLLMModel(), "amadeus-builtin")
 
     def test_test_connection_probes_builtin_server(self):
         self.builtin_on()
@@ -221,7 +221,7 @@ class AppTests(_FreshAppTests):
 
         def probe(address, api_key="", timeout=5.0):
             seen.append(address)
-            return {"reachable": True, "models": ["gemma-4-12B-it-qat-UD-Q4_K_XL"],
+            return {"reachable": True, "models": ["amadeus-builtin"],
                     "error": None, "loading": False}
         with patch.object(self.api.llm, "test_server", probe, create=True):
             data = self.client.get("/testConnection").get_json()
@@ -265,15 +265,21 @@ class LauncherTests(unittest.TestCase):
         _write(self.launcher.BUILTIN_CONFIG, _config(self.tmp), bom=True)
         self.assertEqual(self.launcher.load_builtin_config()["mode"], "builtin")
 
+    def command(self, cfg, model_file=None):
+        if str(BACKEND) not in sys.path:
+            sys.path.insert(0, str(BACKEND))
+        import builtin_server
+        return builtin_server.server_command(cfg, model_file or cfg["model_file"])
+
     def test_command_for_a_small_tier(self):
         cfg = _config(self.tmp)
-        cmd = self.launcher.llama_server_command(cfg)
+        cmd = self.command(cfg)
         self.assertEqual(cmd[0], cfg["server_exe"])
         joined = " ".join(cmd)
         for part in ("-m " + cfg["model_file"], "--host 127.0.0.1", "--port 8091",
                      "-c 16384", "-ngl 999", "--jinja", "-fa on -ctk q8_0 -ctv q8_0",
                      "--temp 1.0 --top-p 0.95 --top-k 64",
-                     "--alias gemma-4-12B-it-qat-UD-Q4_K_XL"):
+                     "--alias amadeus-builtin"):
             self.assertIn(part, joined)
         # Thinking is set per request (backend + sidecar), not server-wide:
         # b11400 deprecates --chat-template-kwargs, and --reasoning off might
@@ -283,7 +289,7 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("-md", cmd)
 
     def test_command_for_a_big_tier_keeps_normal_memory(self):
-        cmd = self.launcher.llama_server_command(_config(self.tmp, context=32768, kv_cache="f16"))
+        cmd = self.command(_config(self.tmp, context=32768, kv_cache="f16"))
         self.assertIn("32768", cmd)
         self.assertNotIn("-ctk", cmd)
         self.assertNotIn("-fa", cmd)
@@ -293,7 +299,13 @@ class LauncherTests(unittest.TestCase):
         cfg = _config(self.tmp, use_drafter=True, drafter_ok=True,
                       drafter_file=str(self.tmp / "mtp-gemma-4-12B-it.gguf"))
         Path(cfg["drafter_file"]).write_bytes(b"")
-        self.assertNotIn("-md", self.launcher.llama_server_command(cfg))
+        self.assertNotIn("-md", self.command(cfg))
+
+    def test_users_own_file_keeps_the_fixed_name(self):
+        cfg = _config(self.tmp)
+        cmd = self.command(cfg, str(self.tmp / "my-own-model.gguf"))
+        self.assertIn(str(self.tmp / "my-own-model.gguf"), cmd)
+        self.assertEqual(cmd[cmd.index("--alias") + 1], "amadeus-builtin")
 
     def test_files_ready(self):
         cfg = _config(self.tmp)
@@ -330,7 +342,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(Path(env["CM_SERVER_FILE"]).read_text(encoding="utf-8"),
                          "http://127.0.0.1:8091/v1")
         self.assertEqual(Path(env["CM_MODEL_FILE"]).read_text(encoding="utf-8"),
-                         "gemma-4-12B-it-qat-UD-Q4_K_XL")
+                         "amadeus-builtin")
         self.assertTrue(env["CM_SERVER_FILE"].startswith(str(self.tmp / ".runtime")))
 
     def test_voice_on_processor_only_when_asked(self):

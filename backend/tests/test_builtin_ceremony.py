@@ -232,15 +232,22 @@ class SettingsTests(_BuiltinApp):
         info = self.client.get("/brainMode").json
         self.assertEqual((info["available"], info["mode"], info["model_label"], info["model_missing"]),
                          (True, "builtin", "Gemma 4 12B (QAT)", False))
-        res = self.client.post("/setBrainMode", json={"mode": "custom"})
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual((res.json["mode"], res.json["restart_needed"]), ("custom", True))
-        import builtin_llm
-        self.assertFalse(builtin_llm.active())
-        cfg = builtin_llm.load_config()
-        self.assertTrue(cfg["model_ok"])          # the rest of the file is kept
-        res = self.client.post("/setBrainMode", json={"mode": "builtin"})
-        self.assertEqual(res.json["mode"], "builtin")
+        server = self.api.builtin_server
+        idle = {"state": "unloaded", "file": "", "error": "", "since": 0}
+        with patch.object(server, "load", return_value=idle) as load,              patch.object(server, "unload", return_value=idle) as unload,              patch.object(server, "status", return_value=idle):
+            # Switching applies at once: custom unloads her model ...
+            res = self.client.post("/setBrainMode", json={"mode": "custom"})
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual((res.json["mode"], res.json["restart_needed"]), ("custom", False))
+            unload.assert_called_once()
+            import builtin_llm
+            self.assertFalse(builtin_llm.active())
+            cfg = builtin_llm.load_config()
+            self.assertTrue(cfg["model_ok"])          # the rest of the file is kept
+            # ... and built-in loads it again.
+            res = self.client.post("/setBrainMode", json={"mode": "builtin"})
+            self.assertEqual(res.json["mode"], "builtin")
+            load.assert_called_once()
         self.assertEqual(self.client.post("/setBrainMode", json={"mode": "x"}).status_code, 400)
 
     def test_no_builtin_model_to_switch_to(self):
@@ -256,7 +263,7 @@ class SettingsTests(_BuiltinApp):
             self.assertEqual(self.client.get("/getCurrLLMModel").json["message"],
                              "google/gemini-3.8-flash")
             # (the model actually used is the built-in one)
-            self.assertEqual(self.chat.getLLMModel(), "gemma-4-12B-it-qat-UD-Q4_K_XL")
+            self.assertEqual(self.chat.getLLMModel(), "amadeus-builtin")
 
 
 if __name__ == "__main__":

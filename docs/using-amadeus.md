@@ -72,6 +72,16 @@ frontend: `frontend.log`, built-in model: `llm.log`)
 
 The `logs/` and `.runtime/` folders are ignored by Git.
 
+**Her built-in model and your graphics memory.** With the built-in model
+(installer option A), the launcher first checks that the graphics card has
+room for it (NVIDIA cards). If a game or another program is using the memory,
+it asks: close that program and press Enter, start anyway, or start without
+her model. `Start Amadeus without her model.bat` (macOS:
+`start_macos_no_model.command`) always starts without it. In Settings ->
+Connection -> Built-in you can unload her model (freeing its graphics memory),
+load it again, or pick another GGUF file: put your own model in the `models`
+folder next to the project folder and press "Refresh list".
+
 ### macOS
 
 If you used the installer, simply double-click `start_macos.command` in your

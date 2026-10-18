@@ -19,6 +19,11 @@ from api import application
 import threading as _threading
 import chat as _chat
 _threading.Thread(target=_chat.backfill_japanese_voice, daemon=True, name="ja-backfill").start()
+
+# Her built-in model (option A): loads in the background, unless the
+# launcher said "start without it". Settings can unload / load / switch it.
+import builtin_server as _builtin_server
+_builtin_server.start_at_launch()
 logging.basicConfig(level=logging.ERROR)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module='torch')

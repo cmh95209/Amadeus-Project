@@ -1,10 +1,12 @@
-"""Built-in local model: the llama-server the launcher starts on port 8091.
+"""Built-in local model: the llama-server on port 8091 (run by the app,
+builtin_server.py).
 
 The installer's option A writes data/local_llm.json (model, paths, tier
 settings). While its "mode" is "builtin", Amadeus talks ONLY to that server:
 no auto-probing of other local ports (a user's own Unsloth Desktop on
 8000/8888 must never stand in for it), no API key needed (the server has
-none), and the model name is the one the launcher serves (--alias).
+none), and the model is always served under one fixed name (ALIAS).
+Settings can pick another GGUF file from the models folder (selected_file).
 Without the file, or with "mode": "custom", nothing here changes anything.
 """
 import json
@@ -15,6 +17,10 @@ from pathlib import Path
 import memory
 
 PORT = 8091
+# The one name llama-server serves her model under (--alias), whichever
+# GGUF file is loaded: the backend and the memory sidecar check the server's
+# model list for this name, so switching files never breaks them.
+ALIAS = "amadeus-builtin"
 _CONFIG_NAME = "local_llm.json"
 _cache = {"key": None, "data": None}
 
@@ -59,11 +65,83 @@ def server_url() -> str:
 
 
 def model_name(cfg=None) -> str:
-    """The name llama-server serves the model under (the launcher passes the
-    same value as --alias): the model file's name without .gguf."""
+    """The name llama-server serves her model under (--alias)."""
+    return ALIAS
+
+
+def models_dir(cfg=None):
+    """The folder her models live in (next to the project folder), or None."""
     cfg = cfg if cfg is not None else (load_config() or {})
-    stem = Path(str(cfg.get("model_file") or "")).stem
-    return stem or "builtin-model"
+    model = str(cfg.get("model_file") or "")
+    return Path(model).parent if model else None
+
+
+def _is_main_model(path: Path) -> bool:
+    """A GGUF that is a chat model: not a speed-up (MTP) or vision file."""
+    name = path.name.lower()
+    return (name.endswith(".gguf") and not name.startswith("mtp-")
+            and "mmproj" not in name)
+
+
+def list_models(cfg=None) -> list:
+    """Every chat-model GGUF in the models folder (the installer's and any
+    the user put there), for Settings: [{"file", "name", "gb"}], by name."""
+    folder = models_dir(cfg)
+    if folder is None or not folder.is_dir():
+        return []
+    out = []
+    for path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
+        if path.is_file() and _is_main_model(path):
+            try:
+                gb = round(path.stat().st_size / 1024 ** 3, 1)
+            except OSError:
+                continue
+            out.append({"file": str(path), "name": path.name, "gb": gb})
+    return out
+
+
+def resolve_model_file(file: str):
+    """The full path of `file` (a name or a path) when it is a chat-model
+    GGUF directly inside the models folder, else None - Settings can never
+    point the server at a file anywhere else on the PC."""
+    folder = models_dir()
+    if folder is None or not file:
+        return None
+    candidate = (folder / Path(str(file)).name).resolve()
+    if candidate.parent != folder.resolve() or not candidate.is_file() or not _is_main_model(candidate):
+        return None
+    return candidate
+
+
+def selected_file(cfg=None) -> str:
+    """The GGUF she loads: the one picked in Settings (while it still
+    exists), else the installer's."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    chosen = str(cfg.get("selected_file") or "")
+    if chosen and os.path.isfile(chosen):
+        return chosen
+    return str(cfg.get("model_file") or "")
+
+
+def model_label(cfg=None) -> str:
+    """What Settings calls the model she loads."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    chosen = selected_file(cfg)
+    if chosen and os.path.normcase(chosen) != os.path.normcase(str(cfg.get("model_file") or "")):
+        return Path(chosen).stem
+    return cfg.get("model_label") or Path(chosen).stem
+
+
+def save_selected_file(path: str) -> None:
+    cfg = load_config()
+    if not cfg:
+        raise LookupError("No built-in model is set up on this install.")
+    cfg = dict(cfg)
+    if os.path.normcase(str(path)) == os.path.normcase(str(cfg.get("model_file") or "")):
+        cfg.pop("selected_file", None)
+    else:
+        cfg["selected_file"] = str(path)
+    save_config(cfg)
 
 
 def describe() -> dict:
@@ -74,7 +152,7 @@ def describe() -> dict:
     return {
         "available": available,
         "mode": "builtin" if active() else "custom",
-        "model_label": (cfg or {}).get("model_label") or "",
+        "model_label": model_label(cfg) if available else "",
         "model_missing": available and model_missing(),
         "context": (cfg or {}).get("context") if available else None,
     }
@@ -106,10 +184,12 @@ def model_missing() -> bool:
     """True when the installer could not finish the downloads (or the files
     were removed since): the launcher then has nothing to start."""
     cfg = load_config() or {}
-    for ok_key, file_key in (("model_ok", "model_file"), ("server_ok", "server_exe")):
-        if not cfg.get(ok_key) or not os.path.isfile(str(cfg.get(file_key) or "")):
-            return True
-    return False
+    if not cfg.get("server_ok") or not os.path.isfile(str(cfg.get("server_exe") or "")):
+        return True
+    chosen = selected_file(cfg)
+    if chosen != str(cfg.get("model_file") or ""):
+        return not os.path.isfile(chosen)   # the user's own file
+    return not cfg.get("model_ok") or not os.path.isfile(chosen)
 
 
 # What one prompt needs besides the chat history (her personality, memories,

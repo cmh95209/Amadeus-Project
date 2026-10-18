@@ -1593,6 +1593,7 @@ try {
         Log "To START Amadeus, double-click this file:" "Green"
         Log ("       " + (Join-Path $proj "start_windows.bat"))
         Log "(You can switch to your own model or a cloud service any time in Settings -> Connection.)"
+        Log "When a game needs the graphics memory, start her with 'Start Amadeus without her model.bat' instead (load her model later in Settings -> Connection, or unload it there any time)."
         Log ""
         Log ("(Install log saved to: " + $LogPath + ")")
         Offer-StartAmadeus $proj
