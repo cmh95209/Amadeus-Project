@@ -33,6 +33,14 @@ class _BuiltinApp(_FreshAppTests):
         self.cfg_path = Path("data") / "local_llm.json"
         self.base = Path(self.directory.name)
         _write(self.cfg_path, _config(self.base))
+        # No real llama-server here: her model counts as "loading" unless a
+        # test says otherwise (server_state).
+        self.server_state = "loading"
+        state = patch.object(self.api.builtin_server, "status",
+                             side_effect=lambda: {"state": self.server_state, "file": "",
+                                                  "error": "", "since": 0})
+        state.start()
+        self.addCleanup(state.stop)
 
     def name(self, value="Alex"):
         self.memory.save_username(value)
@@ -138,6 +146,34 @@ class RouteTests(_BuiltinApp):
         self.assertNotIn("wait", body)
         self.assertEqual(self.state(), "done")
 
+    def test_no_false_waiting_lines_while_her_model_is_stopped(self):
+        # Started without her model / unloaded / could not load: never
+        # "almost awake" or "taking longer than usual" - and she wakes as
+        # soon as it is loaded.
+        with self.model(False, "server loading"):
+            self.greet()                                   # intro
+        self.name()
+        for stopped in ("unloaded", "failed"):
+            with self.subTest(state=stopped):
+                self.server_state = stopped
+                with self.model(False, "unreachable"):
+                    self.assertNotIn("kind", self.greet(just_saved=True).json)
+        self.server_state = "loaded"
+        with self.model(True), self.canned_wake():
+            self.assertEqual(self.greet().json["kind"], "wake")
+
+    def test_hand_placed_standard_file_wakes_her(self):
+        # 2026-10-18 test install: option B (model_ok false) + her standard
+        # 12B downloaded by hand -> was "missing" forever, never woke.
+        _write(self.cfg_path, _config(self.base, model_ok=False))
+        import builtin_llm
+        self.assertFalse(builtin_llm.model_missing())
+        with self.model(False, "server loading"):
+            self.assertEqual(self.greet().json["kind"], "builtin_intro")
+        self.name()
+        with self.model(True), self.canned_wake():
+            self.assertEqual(self.greet(just_saved=True).json["kind"], "wake")
+
     def test_model_ready_at_first_probe_still_introduces(self):
         with self.model(True), self.canned_wake() as gen:
             body = self.greet().json
@@ -154,7 +190,7 @@ class RouteTests(_BuiltinApp):
         self.assertEqual(body["response"], self.ceremony.line("builtin_fallback")[0])
 
     def test_missing_model_line(self):
-        _write(self.cfg_path, _config(self.base, model_ok=False))
+        _write(self.cfg_path, _config(self.base, model_file=str(self.base / "gone.gguf")))
         body = self.greet().json
         self.assertEqual((body["kind"], body["wait"]), ("builtin_missing", True))
         self.assertNotIn("kind", self.greet().json)   # once per launch

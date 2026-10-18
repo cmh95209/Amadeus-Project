@@ -105,6 +105,22 @@ def _log_tail(lines: int = 6) -> str:
     return "\n".join(t for t in text[-lines:] if t.strip())
 
 
+def _port_taken(port: int, wait_s: float = 3.0) -> bool:
+    """Is something listening on the port? Waits a moment first, so a
+    server we just stopped has time to let go of it."""
+    import socket
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+                taken = True
+        except OSError:
+            taken = False
+        if not taken or time.monotonic() >= deadline:
+            return taken
+        time.sleep(0.25)
+
+
 def _health(port: int, timeout: float = 2.0) -> int:
     """llama-server's /health: 200 = model loaded, 503 = still loading,
     0 = not answering."""
@@ -143,6 +159,13 @@ def load(file: str | None = None) -> dict:
     port = int(cfg.get("port") or builtin_llm.PORT)
     with _lock:
         unload()
+        if _port_taken(port):
+            # Another program answers on her port (e.g. the user's own
+            # llama-server): starting ours would fail to bind, and the
+            # readiness check would see THEIR server as hers.
+            _set("failed", target, f"port {port} is used by another program - close it "
+                                   "(or restart Amadeus, which frees the port), then load again.")
+            return dict(_state)
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         log = open(LOG_FILE, "w", encoding="utf-8")
         kwargs: dict = {"stdout": log, "stderr": subprocess.STDOUT, "cwd": str(PROJECT_ROOT)}

@@ -236,11 +236,20 @@ def selected_model_file(cfg: dict) -> str:
         others = sorted((p for p in folder.iterdir()
                          if p.is_file() and p.name.lower().endswith(".gguf")
                          and not p.name.lower().startswith("mtp-")
-                         and "mmproj" not in p.name.lower()),
+                         and "mmproj" not in p.name.lower()
+                         and not _re_split_part(p.name.lower())),
                         key=lambda p: p.name.lower())
     except OSError:
         others = []
     return str(others[0]) if others else tier_file
+
+
+def _re_split_part(name: str) -> bool:
+    """A later part of a split model ("-00002-of-00003.gguf"): llama.cpp
+    loads it from part 1 (the same rule as backend/builtin_llm.py)."""
+    import re
+    m = re.search(r"-(\d{5})-of-\d{5}\.gguf$", name)
+    return bool(m) and m.group(1) != "00001"
 
 
 def builtin_files_ready(cfg: dict) -> tuple[bool, str]:
@@ -250,8 +259,10 @@ def builtin_files_ready(cfg: dict) -> tuple[bool, str]:
     model = selected_model_file(cfg)
     if not cfg.get("server_ok") or not Path(exe).is_file():
         return False, "her model's helper program (llama.cpp) is not installed"
-    own = model != str(cfg.get("model_file") or "")
-    if not Path(model).is_file() or (not own and not cfg.get("model_ok")):
+    # Present under its final name = usable (the same rule as
+    # backend/builtin_llm.py model_missing): the installer names a download
+    # only after its checksum passed, and a hand-placed file is the user's.
+    if not model or not Path(model).is_file():
         return False, f"her model file is not downloaded ({Path(model).name or 'unknown'})"
     return True, ""
 
@@ -268,11 +279,30 @@ def builtin_vram_need_gb(cfg: dict) -> float | None:
         return None
     chosen, tier_file = selected_model_file(cfg), str(cfg.get("model_file") or "")
     if chosen != tier_file:
+        # The estimate is for the tier's model; adjust by the size difference.
+        # Its size comes from the tier table, so this also works when that
+        # file was never downloaded (an option-B install with a GGUF of the
+        # user's own).
         try:
-            need += (Path(chosen).stat().st_size - Path(tier_file).stat().st_size) / 1024 ** 3
+            tier_bytes = Path(tier_file).stat().st_size
+        except OSError:
+            tier_bytes = _tier_model_bytes(cfg)
+        try:
+            if tier_bytes:
+                need += (Path(chosen).stat().st_size - tier_bytes) / 1024 ** 3
         except OSError:
             pass
     return round(need, 1)
+
+
+def _tier_model_bytes(cfg: dict) -> int | None:
+    """The size of the tier's model file, from scripts/local_llm_tiers.json."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import llm_tiers
+        return int(llm_tiers.load_table()["models"][str(cfg.get("model"))]["bytes"])
+    except Exception:
+        return None
 
 
 def nvidia_free_vram_gb() -> float | None:
@@ -1097,8 +1127,13 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
         if no_model:
             say("  Her built-in model will not be loaded (load it in Settings -> Connection).")
         elif not ready:
-            say(f"  WARNING: her built-in model cannot start - {why}. "
-                "Run the installer again to finish setting it up.")
+            if "llama.cpp" in why:
+                say(f"  WARNING: her built-in model cannot start - {why}. "
+                    "Run the installer again to finish setting it up.")
+            else:
+                say("  Her built-in model has no model file yet - put a GGUF file in "
+                    f"{Path(str(builtin.get('model_file') or '')).parent} and load it in "
+                    "Settings -> Connection (or run the installer again and choose A).")
         else:
             need = builtin_vram_need_gb(builtin)
             load_model = ask_about_graphics_memory(need) if need else True

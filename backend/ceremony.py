@@ -285,7 +285,8 @@ def decide(state: str, model_ready: bool, settings_present: bool,
 
 def decide_builtin(state: str, model_ready: bool, model_missing: bool,
                    name_set: bool, just_saved: bool = False,
-                   now: Optional[float] = None) -> Tuple[Optional[str], str]:
+                   now: Optional[float] = None,
+                   server_state: str = "loading") -> Tuple[Optional[str], str]:
     """The ceremony decision in built-in-model mode (name first).
 
     '' / intro: she has not been told the name yet. The intro is said once
@@ -296,7 +297,13 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
     connecting: name saved, model still loading - wake when it answers; a
     reopen re-says "almost awake" once; one reminder after the usual delay.
     A missing model (download unfinished) gets its own line once per launch.
+
+    server_state (builtin_server): while her model is NOT loading - the user
+    started without it, unloaded it, or it could not load - she never says
+    "almost awake" or "taking longer than usual" (both would be untrue); the
+    footer and Settings say what to do. She wakes once it is loaded.
     """
+    stopped = server_state in ("unloaded", "failed")
     tracker = _tracker()
 
     if state == store.CEREMONY_DONE:
@@ -314,11 +321,15 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
             return None, state or store.CEREMONY_INTRO
         if model_ready:
             return "wake", store.CEREMONY_INTRO
+        if stopped:
+            return None, state or store.CEREMONY_INTRO
         return "builtin_waiting", store.CEREMONY_CONNECTING
 
     # state == connecting (the name was saved, the model is loading)
     if model_ready:
         return "wake", store.CEREMONY_CONNECTING
+    if stopped:
+        return None, store.CEREMONY_CONNECTING
     if just_saved or not tracker.trying_delivered:
         return "builtin_waiting", store.CEREMONY_CONNECTING
     if reminder_due(now):

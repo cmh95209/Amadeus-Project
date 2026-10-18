@@ -1253,7 +1253,8 @@ def greet():
             # Built-in model: nothing to connect, NAME FIRST (ceremony.py).
             kind, new_state = ceremony.decide_builtin(
                 state, bool(ready["ready"]), builtin_llm.model_missing(),
-                bool(memory.load_username().strip()), just_saved=just_saved)
+                bool(memory.load_username().strip()), just_saved=just_saved,
+                server_state=builtin_server.status()["state"])
         else:
             kind, new_state = ceremony.decide(
                 state, bool(ready["ready"]), _connection_settings_present(),

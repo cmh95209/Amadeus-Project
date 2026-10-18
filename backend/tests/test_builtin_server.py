@@ -105,10 +105,15 @@ class _ServerBase(unittest.TestCase):
 class ModelListTests(_ServerBase):
     def test_list_has_chat_models_only(self):
         for name in ("my-own-model.gguf", "mtp-gemma-4-12B-it.gguf",
-                     "mmproj-gemma-4.gguf", "half.gguf.part", "notes.txt"):
+                     "mmproj-gemma-4.gguf", "half.gguf.part", "notes.txt",
+                     "browser.gguf.crdownload",
+                     "big-model-00001-of-00002.gguf", "big-model-00002-of-00002.gguf"):
             (self.models / name).write_bytes(b"x")
         names = [m["name"] for m in self.b.list_models()]
-        self.assertEqual(names, ["gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", "my-own-model.gguf"])
+        # A split model shows once (its first part - llama.cpp loads the rest).
+        self.assertEqual(names, ["big-model-00001-of-00002.gguf",
+                                 "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", "my-own-model.gguf"])
+        self.assertIsNone(self.b.resolve_model_file("big-model-00002-of-00002.gguf"))
 
     def test_only_files_inside_the_models_folder(self):
         (self.models / "my-own-model.gguf").write_bytes(b"x")
@@ -213,6 +218,21 @@ class LoadTests(_ServerBase):
         self.assertIn("out of graphics memory", st["error"])   # the log's last lines
         self.assertEqual(self.b.load_config().get("selected_file"), None)
 
+    def test_port_used_by_another_program(self):
+        # The user's own server on her port: refuse instead of mistaking
+        # THEIR server for hers.
+        self.use_fake()
+        import socket
+        other = socket.socket()
+        other.bind(("127.0.0.1", self.port))
+        other.listen(1)
+        self.addCleanup(other.close)
+        with patch.object(self.s, "_port_taken", side_effect=lambda port, wait_s=3.0: True):
+            st = self.s.load()
+        self.assertEqual(st["state"], "failed")
+        self.assertIn(f"port {self.port} is used by another program", st["error"])
+        self.assertIsNone(self.s._proc)
+
     def test_no_load_when_off_or_missing(self):
         _write(self.cfg_path, _config(self.tmp, mode="custom", port=self.port))
         with self.assertRaises(LookupError):
@@ -295,6 +315,7 @@ class LauncherModelTests(unittest.TestCase):
         cfg = _config(self.tmp, model_ok=False)
         Path(cfg["model_file"]).unlink()
         (self.tmp / "models" / "mtp-x.gguf").write_bytes(b"x")       # never a speed-up file
+        (self.tmp / "models" / "a-00002-of-00002.gguf").write_bytes(b"x")   # nor a later part
         own = self.tmp / "models" / "b-own.gguf"
         own.write_bytes(b"x")
         self.assertEqual(self.launcher.selected_model_file(cfg), str(own))
@@ -302,11 +323,25 @@ class LauncherModelTests(unittest.TestCase):
 
     def test_files_ready_with_an_own_file(self):
         cfg = _config(self.tmp, model_ok=False)
+        # Her standard file placed by hand (model_ok false) is usable.
+        self.assertEqual(self.launcher.builtin_files_ready(cfg), (True, ""))
+        Path(cfg["model_file"]).unlink()
+        self.assertFalse(self.launcher.builtin_files_ready(cfg)[0])
         own = self.tmp / "models" / "mine.gguf"
         own.write_bytes(b"x")
-        self.assertFalse(self.launcher.builtin_files_ready(cfg)[0])
         cfg["selected_file"] = str(own)
         self.assertEqual(self.launcher.builtin_files_ready(cfg), (True, ""))
+
+    def test_memory_need_when_her_file_was_never_downloaded(self):
+        # Option B + a big GGUF of the user's own: the tier model's size
+        # comes from the tier table (its file is not there to measure).
+        cfg = _config(self.tmp, vram_need_gb=11.0, model="12B")
+        Path(cfg["model_file"]).unlink()
+        own = self.tmp / "models" / "big-own.gguf"
+        with open(own, "wb") as f:
+            f.truncate(6716356800 + 10 * 1024 ** 3)   # the 12B's size + 10 GB (sparse)
+        cfg["selected_file"] = str(own)
+        self.assertEqual(self.launcher.builtin_vram_need_gb(cfg), 21.0)
 
     def ask(self, free_values, answers, tty=True):
         frees = iter(free_values)

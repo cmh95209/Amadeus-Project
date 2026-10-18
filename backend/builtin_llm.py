@@ -76,11 +76,17 @@ def models_dir(cfg=None):
     return Path(model).parent if model else None
 
 
+_SPLIT_PART = re.compile(r"-(\d{5})-of-\d{5}\.gguf$")
+
+
 def _is_main_model(path: Path) -> bool:
-    """A GGUF that is a chat model: not a speed-up (MTP) or vision file."""
+    """A GGUF that is a chat model: not a speed-up (MTP) or vision file,
+    and of a model split into parts ("-00001-of-00003.gguf") only the first
+    part - llama.cpp loads the others from it."""
     name = path.name.lower()
+    split = _SPLIT_PART.search(name)
     return (name.endswith(".gguf") and not name.startswith("mtp-")
-            and "mmproj" not in name)
+            and "mmproj" not in name and (split is None or split.group(1) == "00001"))
 
 
 # Settings -> "Get more models" (2026-10-18 - option B: links, no
@@ -266,15 +272,19 @@ def runner_missing() -> bool:
 
 
 def model_missing() -> bool:
-    """True when the installer could not finish the downloads (or the files
-    were removed since): the launcher then has nothing to start."""
+    """True when llama.cpp or a model file to load is missing: the
+    installer could not finish, the files were removed, or an option-B
+    install has no GGUF yet. A model file counts as present whenever it is
+    there under its final name - the installer only gives a download that
+    name after its checksum passed (".part" before), and a file the user
+    put in the folder by hand is theirs to choose (2026-10-18: her standard
+    12B, downloaded by hand on an option-B install, was "missing" because
+    model_ok said the installer had not fetched it - she never woke)."""
     cfg = load_config() or {}
     if not cfg.get("server_ok") or not os.path.isfile(str(cfg.get("server_exe") or "")):
         return True
     chosen = selected_file(cfg)
-    if chosen != str(cfg.get("model_file") or ""):
-        return not os.path.isfile(chosen)   # the user's own file
-    return not cfg.get("model_ok") or not os.path.isfile(chosen)
+    return not chosen or not os.path.isfile(chosen)
 
 
 # What one prompt needs besides the chat history (her personality, memories,
@@ -348,12 +358,14 @@ def save_history_budget(budget: int):
 # Gemma 4 writes its reasoning between these markers. Thinking is off, but if
 # a thought block still comes back inline it must never reach her text or
 # voice. An opener without its closer means the rest of the reply is thought.
-_THOUGHT_BLOCK = re.compile(r"<\|channel>thought.*?<channel\|>", re.S)
-_THOUGHT_OPEN = re.compile(r"<\|channel>thought.*\Z", re.S)
+# <think>...</think> is the same for the "thinking" GGUFs a user may load
+# from the models folder (Qwen, DeepSeek and similar).
+_THOUGHT_BLOCK = re.compile(r"<\|channel>thought.*?<channel\|>|<think>.*?</think>", re.S)
+_THOUGHT_OPEN = re.compile(r"(?:<\|channel>thought|<think>).*\Z", re.S)
 
 
 def strip_thoughts(text):
-    if not isinstance(text, str) or "<|channel>" not in text:
+    if not isinstance(text, str) or ("<|channel>" not in text and "<think>" not in text):
         return text
     cleaned = _THOUGHT_OPEN.sub("", _THOUGHT_BLOCK.sub("", text))
     return cleaned.strip()

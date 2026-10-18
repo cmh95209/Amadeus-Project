@@ -125,7 +125,6 @@ class ConfigTests(_TempBackendDir):
 
     def test_missing_model_or_program(self):
         cases = [
-            {"model_ok": False},
             {"server_ok": False},
             {"model_file": str(self.tmp / "gone.gguf")},
             {"server_exe": str(self.tmp / "gone.exe")},
@@ -148,6 +147,11 @@ class ThoughtFilterTests(_TempBackendDir):
     def test_several_blocks(self):
         text = "<|channel>thought a<channel|>A<|channel>thought b<channel|>B"
         self.assertEqual(self.b.strip_thoughts(text), "AB")
+
+    def test_think_tags_of_other_models(self):
+        # A "thinking" GGUF the user loaded from the models folder.
+        self.assertEqual(self.b.strip_thoughts("<think>\nplan it</think>\nこんにちは。"), "こんにちは。")
+        self.assertEqual(self.b.strip_thoughts("Hi<think> still thinking"), "Hi")
 
     def test_plain_text_is_untouched(self):
         for text in ("  plain reply  ", "", "a < b | c > d", None, 5):
@@ -233,7 +237,9 @@ class AppTests(_FreshAppTests):
             self.assertEqual(self.api.model_ready(), {"ready": True, "reason": ""})
 
     def test_missing_model_is_reported(self):
-        self.builtin_on(model_ok=False)
+        self.builtin_on(model_file=str(self.base / "models" / "gone.gguf"))
+        # (no other GGUF in the folder either - one would be used instead)
+        (self.base / "models" / "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf").unlink()
         with patch.object(self.api.llm, "test_server",
                           lambda *a, **k: {"reachable": False, "models": [], "error": "x"},
                           create=True):
