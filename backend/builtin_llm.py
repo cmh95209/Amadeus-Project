@@ -83,6 +83,77 @@ def _is_main_model(path: Path) -> bool:
             and "mmproj" not in name)
 
 
+# Settings -> "Get more models" (2026-10-18 - option B: links, no
+# in-app downloader): the official Gemma 4 QAT files, pinned to the same
+# Hugging Face revisions the installer uses (E4B / 12B must match
+# scripts/local_llm_tiers.json - a test keeps them equal). The download
+# runs in the user's browser; they move the file into the models folder
+# and press Refresh list. 26B-A4B and 31B are offered here only: the
+# installer no longer picks them (31B ~31 GB and 26B-A4B 31.5 GB at peak on
+# a 32 GB card with this app's settings).
+MODEL_CATALOG = [
+    {"key": "E4B", "label": "Gemma 4 E4B (QAT)", "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
+     "revision": "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265",
+     "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", "bytes": 4215695776},
+    {"key": "12B", "label": "Gemma 4 12B (QAT)", "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
+     "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
+     "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", "bytes": 6716356800},
+    {"key": "26B-A4B", "label": "Gemma 4 26B-A4B (QAT)", "repo": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+     "revision": "7b92b5b28818151e8669af2e45e88d6086f490dd",
+     "file": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf", "bytes": 14249047104},
+    {"key": "31B", "label": "Gemma 4 31B (QAT)", "repo": "unsloth/gemma-4-31B-it-qat-GGUF",
+     "revision": "43cc1aeb31adf47ec06a854507ce552cd9862e6f",
+     "file": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf", "bytes": 17287670048},
+]
+
+
+def catalog(cfg=None) -> list:
+    """The "Get more models" list for Settings: each model's size, its
+    official download link, whether it is already in the models folder, and
+    how it compares with the model the installer picked for this PC
+    ("recommended" / "smaller" / "bigger" - bigger ones may be slow or not
+    fit this graphics card)."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    folder = models_dir(cfg)
+    tier_key = str(cfg.get("model") or "")
+    tier_bytes = next((m["bytes"] for m in MODEL_CATALOG if m["key"] == tier_key), None)
+    out = []
+    for m in MODEL_CATALOG:
+        if tier_bytes is None:
+            fit = ""
+        elif m["key"] == tier_key:
+            fit = "recommended"
+        else:
+            fit = "smaller" if m["bytes"] < tier_bytes else "bigger"
+        out.append({
+            "key": m["key"], "label": m["label"], "file": m["file"],
+            "gb": round(m["bytes"] / 1024 ** 3, 1),
+            "url": (f"https://huggingface.co/{m['repo']}/resolve/{m['revision']}/"
+                    f"{m['file']}?download=true"),
+            "installed": bool(folder) and (folder / m["file"]).is_file(),
+            "fit": fit,
+        })
+    return out
+
+
+def open_models_folder() -> str:
+    """Open the models folder in Explorer / Finder (created if missing).
+    Returns its path; LookupError when no built-in model is set up."""
+    folder = models_dir()
+    if folder is None:
+        raise LookupError("No built-in model is set up on this install.")
+    folder.mkdir(parents=True, exist_ok=True)
+    import subprocess
+    import sys
+    if sys.platform == "win32":
+        os.startfile(str(folder))   # noqa: S606 - the user's own folder
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(folder)])
+    else:
+        subprocess.Popen(["xdg-open", str(folder)])
+    return str(folder)
+
+
 def list_models(cfg=None) -> list:
     """Every chat-model GGUF in the models folder (the installer's and any
     the user put there), for Settings: [{"file", "name", "gb"}], by name."""

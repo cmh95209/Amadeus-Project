@@ -713,6 +713,7 @@ def get_builtin_model():
     info["selected"] = builtin_llm.selected_file()
     folder = builtin_llm.models_dir()
     info["folder"] = str(folder) if folder else ""
+    info["catalog"] = builtin_llm.catalog()
     return jsonify(info)
 
 
@@ -733,6 +734,18 @@ def load_builtin_model():
     except LookupError as exc:
         return jsonify({"message": str(exc)}), 409
     return jsonify({"status": "ok", "server": status})
+
+
+# post: her models folder opens in Explorer / Finder (Settings' "Open
+#       models folder", for putting a downloaded GGUF in place)
+@application.route("/builtinModel/openFolder", methods=["POST"])
+def open_builtin_models_folder():
+    try:
+        return jsonify({"status": "ok", "folder": builtin_llm.open_models_folder()})
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 409
+    except OSError as exc:
+        return jsonify({"message": f"Could not open the folder: {exc}"}), 500
 
 
 # post: her model stops and its graphics memory is free; she cannot answer

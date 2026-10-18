@@ -693,6 +693,19 @@ export type BuiltinModel = {
   /** The file she loads by default (the one last loaded fine). */
   selected: string;
   folder: string;
+  /** "Get more models": the official files, with browser download links. */
+  catalog: CatalogModel[];
+};
+
+export type CatalogModel = {
+  key: string;
+  label: string;
+  file: string;
+  gb: number;
+  url: string;
+  installed: boolean;
+  /** Compared with the model the installer picked for this PC. */
+  fit: "recommended" | "smaller" | "bigger" | "";
 };
 
 function toBuiltinModel(data: Record<string, unknown>): BuiltinModel {
@@ -709,6 +722,19 @@ function toBuiltinModel(data: Record<string, unknown>): BuiltinModel {
       : [],
     selected: typeof data.selected === "string" ? data.selected : "",
     folder: typeof data.folder === "string" ? data.folder : "",
+    catalog: Array.isArray(data.catalog)
+      ? (data.catalog as Record<string, unknown>[])
+          .filter((m) => typeof m.file === "string" && typeof m.url === "string")
+          .map((m) => ({
+            key: String(m.key ?? ""),
+            label: String(m.label ?? m.file),
+            file: String(m.file),
+            gb: Number(m.gb) || 0,
+            url: String(m.url),
+            installed: m.installed === true,
+            fit: m.fit === "recommended" || m.fit === "smaller" || m.fit === "bigger" ? m.fit : "",
+          }))
+      : [],
   };
 }
 
@@ -725,6 +751,11 @@ export async function loadBuiltinModel(name: string): Promise<void> {
       body: JSON.stringify({ file: name }),
     })
   );
+}
+
+/** Open her models folder in Explorer / Finder. */
+export async function openModelsFolder(): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/builtinModel/openFolder`, { method: "POST" }));
 }
 
 /** Stop her model and free its graphics memory. */

@@ -152,6 +152,45 @@ class ModelListTests(_ServerBase):
         self.assertEqual(self.b.selected_file(), self.b.load_config()["model_file"])
 
 
+class CatalogTests(_ServerBase):
+    """Settings -> "Get more models" (option B: browser download links)."""
+
+    def test_pinned_like_the_installer(self):
+        table = json.loads((SCRIPTS / "local_llm_tiers.json").read_text(encoding="utf-8"))
+        by_key = {m["key"]: m for m in self.b.MODEL_CATALOG}
+        self.assertEqual(list(by_key), ["E4B", "12B", "26B-A4B", "31B"])
+        for key, model in table["models"].items():
+            with self.subTest(model=key):
+                for field in ("label", "repo", "revision", "file", "bytes"):
+                    self.assertEqual(by_key[key][field], model[field])
+        for m in self.b.MODEL_CATALOG:
+            with self.subTest(model=m["key"]):
+                self.assertTrue(m["repo"].startswith("unsloth/gemma-4-"))
+                self.assertRegex(m["revision"], r"^[0-9a-f]{40}$")
+
+    def test_links_sizes_and_fit(self):
+        _write(self.cfg_path, _config(self.tmp, port=self.port, model="12B", n=1))
+        items = {m["key"]: m for m in self.b.catalog()}
+        self.assertEqual(items["12B"]["fit"], "recommended")
+        self.assertEqual(items["E4B"]["fit"], "smaller")
+        self.assertEqual((items["26B-A4B"]["fit"], items["31B"]["fit"]), ("bigger", "bigger"))
+        self.assertTrue(items["12B"]["installed"])        # the test config's file exists
+        self.assertFalse(items["31B"]["installed"])
+        self.assertEqual(items["31B"]["gb"], 16.1)
+        self.assertEqual(
+            items["31B"]["url"],
+            "https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF/resolve/"
+            "43cc1aeb31adf47ec06a854507ce552cd9862e6f/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf?download=true")
+
+    @unittest.skipUnless(sys.platform == "win32", "Explorer opens the folder on Windows")
+    def test_open_folder(self):
+        with patch.object(self.b.os, "startfile", create=True) as start:
+            self.assertEqual(self.b.open_models_folder(), str(self.models))
+        start.assert_called_once_with(str(self.models))
+        _write(self.cfg_path, _config(self.tmp, mode="custom", port=self.port, n=1))
+        self.assertEqual(self.b.models_dir(), self.models)   # works in custom mode too
+
+
 class LoadTests(_ServerBase):
     def test_load_then_unload(self):
         self.use_fake(delay=0.6)

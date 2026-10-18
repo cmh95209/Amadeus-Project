@@ -953,6 +953,24 @@ button {
 .conn-row { display: flex; gap: 8px; align-items: center; }
 .conn-row .model-picker { flex: 1; min-width: 0; }
 
+/* Settings -> Connection -> Model: "Get more models" (browser download links) */
+.model-catalog summary { cursor: pointer; color: #c9d2df; font-size: 13px; }
+.model-catalog ul { display: grid; gap: 6px; margin: 10px 0; padding: 0; list-style: none; }
+.model-catalog li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 7px;
+}
+.model-catalog-text { display: grid; gap: 2px; min-width: 0; }
+.model-catalog-name { color: #dbe3ee; font-size: 13px; }
+.model-catalog-note { color: #8b98ab; font-size: 12px; }
+.model-catalog-installed { flex: none; color: #3fc27a; font-size: 12px; }
+.model-catalog a.ghost-button { flex: none; text-decoration: none; }
+
 /* The searchable model dropdown (components/ModelPicker.tsx) */
 .model-picker { position: relative; }
 .model-picker input { width: 100%; }

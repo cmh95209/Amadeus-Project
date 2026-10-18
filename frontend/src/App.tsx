@@ -40,6 +40,7 @@ import {
   getBuiltinModel,
   loadBuiltinModel,
   unloadBuiltinModel,
+  openModelsFolder,
   setContextBudget,
   getLLMServer,
   setLLMServer,
@@ -2104,6 +2105,50 @@ export default function App() {
                     settings{brain?.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
                     a model too big for your graphics card will not load.
                   </p>
+                  {builtinModel && builtinModel.catalog.length > 0 && (
+                    <details className="model-catalog">
+                      <summary>Get more models</summary>
+                      <ul>
+                        {builtinModel.catalog.map((m) => (
+                          <li key={m.key}>
+                            <div className="model-catalog-text">
+                              <span className="model-catalog-name">{m.label}</span>
+                              <span className="model-catalog-note">
+                                {m.gb.toLocaleString("en-US")} GB
+                                {m.fit === "recommended" && " - recommended for this PC"}
+                                {m.fit === "smaller" && " - smaller: faster, less capable"}
+                                {m.fit === "bigger" && " - bigger than this PC's recommended model: may be slow or not fit your graphics card"}
+                              </span>
+                            </div>
+                            {m.installed ? (
+                              <span className="model-catalog-installed">In the folder</span>
+                            ) : (
+                              <a className="ghost-button" href={m.url} target="_blank" rel="noopener noreferrer">
+                                Download
+                              </a>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="conn-row">
+                        <button type="button" className="ghost-button"
+                          onClick={() => void openModelsFolder().catch((error) =>
+                            setSettingsError(error instanceof Error ? error.message : "Could not open the folder."))}>
+                          Open models folder
+                        </button>
+                        <button type="button" className="ghost-button" disabled={modelBusy}
+                          onClick={() => void refreshBuiltinModel()}>
+                          Refresh list
+                        </button>
+                      </div>
+                      <p className="settings-help">
+                        Download opens in your browser and saves the file to your
+                        Downloads folder. Move it into her models folder, then press
+                        Refresh list - it appears in the model list above. The files
+                        come from Unsloth's official Gemma 4 pages on Hugging Face.
+                      </p>
+                    </details>
+                  )}
                 </>) : (<>
                   <div className="conn-row">
                     <ModelPicker
