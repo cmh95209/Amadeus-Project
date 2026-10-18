@@ -15,6 +15,7 @@ try {
   // First: it does not depend on the Live2D core, and the pre-existing
   // motions.test.ts failure stops the run.
   await server.ssrLoadModule("/tests/greeting.test.ts");
+  await server.ssrLoadModule("/tests/modelPicker.test.ts");
   await server.ssrLoadModule("/tests/motions.test.ts");
   await server.ssrLoadModule("/tests/speech.test.ts");
 } finally {

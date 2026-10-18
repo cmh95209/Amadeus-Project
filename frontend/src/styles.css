@@ -932,43 +932,61 @@ button {
 .conn-status.fail { border-color: rgba(224, 86, 79, 0.5); }
 .conn-status.fail .conn-dot { background: #e0564f; box-shadow: 0 0 7px rgba(224, 86, 79, 0.55); }
 
-.model-chips {
+/* Settings -> Connection: Server / Model / Status rows (both modes) */
+.conn-section {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 18px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.conn-section-title {
+  color: #c9d2df;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+.conn-section .settings-help,
+.conn-section .settings-intro { margin: 0; }
+.conn-section .conn-status { margin: 0; }
+.conn-row { display: flex; gap: 8px; align-items: center; }
+.conn-row .model-picker { flex: 1; min-width: 0; }
+
+/* The searchable model dropdown (components/ModelPicker.tsx) */
+.model-picker { position: relative; }
+.model-picker input { width: 100%; }
+.model-picker-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #0f151e;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.model-picker-list li {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.model-chips-label {
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  color: #8b98ab;
-}
-
-.model-chips button {
-  font-size: 11px;
-  color: #9aa7b8;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
   border-radius: 6px;
-  padding: 3px 9px;
+  color: #cbd4df;
+  font-size: 13px;
   cursor: pointer;
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-
-.model-chips button:hover {
-  color: #e6edf6;
-  border-color: rgba(255, 255, 255, 0.3);
-}
-
-.model-chips button.active {
-  color: #3fc27a;
-  border-color: rgba(63, 194, 122, 0.5);
-}
+.model-picker-list li.is-highlighted { background: #202c3b; color: #edf1f7; }
+.model-picker-list li.is-current { color: #3fc27a; }
+.model-picker-label { overflow-wrap: anywhere; }
+.model-picker-hint { flex: none; color: #7f8ca0; font-size: 12px; }
+.model-picker-list li.model-picker-empty { color: #8b98ab; cursor: default; }
 
 /* ---- Version navigation: prev / count / next ---- */
 .version-nav {
@@ -1387,23 +1405,4 @@ button {
   opacity: 1;
 }
 
-/* Settings -> Connection -> Built-in: her model's state and the file picker */
-.builtin-model { margin-top: 14px; }
-.builtin-model-state {
-  margin: 0 0 12px;
-  padding: 9px 12px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background: #0b1017;
-  color: #c9d2df;
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-line;
-  overflow-wrap: anywhere;
-}
-.builtin-model-state.is-loaded { border-color: rgba(120, 190, 140, 0.35); }
-.builtin-model-state.is-loading { border-color: rgba(216, 185, 123, 0.35); }
-.builtin-model-state.is-failed { border-color: rgba(192, 110, 110, 0.5); color: #e3b5b5; }
-.builtin-model-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
-.builtin-model-row select { flex: 1; min-width: 0; margin-top: 0; }
 .settings-path { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }

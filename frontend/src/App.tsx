@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
+import { ModelPicker } from "./components/ModelPicker";
 import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
@@ -332,9 +333,12 @@ export default function App() {
 
   // Her built-in model's panel: fresh state whenever Settings opens, and a
   // light poll while it loads (Loading... -> Loaded / Could not load).
+  // Custom mode: the server's model list is there when Settings opens (no
+  // "Test connection" needed), plus whether her built-in model is stopped.
   useEffect(() => {
-    if (!settingsOpen || !builtinMode) return;
-    void refreshBuiltinModel();
+    if (!settingsOpen) return;
+    if (builtinMode || brain?.available) void refreshBuiltinModel();
+    if (!builtinMode) void testConnection().then(setConnStatus).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsOpen, builtinMode]);
 
@@ -632,6 +636,43 @@ export default function App() {
     return () => window.clearTimeout(id);
   }, [status]);
 
+  // Custom model, "Refresh list": apply the address (and a newly typed key)
+  // first, so the list is the one the server gives with those settings.
+  async function refreshServerModels() {
+    if (connTesting) return;
+    setConnTesting(true);
+    setSettingsError("");
+    try {
+      await setLLMServer(serverAddress);
+      if (apiKey.trim()) {
+        await setApiKey(apiKey.trim());
+        setHasApiKey(true);
+        setApiKeyInput("");
+      }
+      setConnStatus(await testConnection());
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not reach the server.");
+    } finally {
+      setConnTesting(false);
+    }
+  }
+
+  // Custom model, "Use this model": save the picked model at once.
+  async function applyCustomModel() {
+    const next = model.trim();
+    if (!next) return;
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      await setModel(next);
+      setStatus(`Model set to ${next}`);
+      setSettingsNotice(`She now uses ${next}.`);
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not save the model.");
+    }
+  }
+
   async function handleTestConnection() {
     if (connTesting) return;
     setConnTesting(true);
@@ -880,7 +921,7 @@ export default function App() {
     // Save stores only the rest (name, pronouns, ...) and never touches the
     // user's own model settings (kept for when they switch back).
     if (!nextModel && !builtinMode) {
-      setSettingsError("Enter an LLM model.");
+      setSettingsError("Choose a model in the Model row.");
       return;
     }
 
@@ -1949,141 +1990,200 @@ export default function App() {
                       choose option A to give her a model that runs on this PC.
                     </p>
                   )}
-                  {builtinMode && (
-                    <p className="settings-help">
-                      {brain.model_missing
-                        ? `${brain.model_label || "Her built-in model"} is not installed yet - run the installer again (it continues the download where it stopped).`
-                        : `She thinks with ${brain.model_label || "her built-in model"}, privately on this PC. Nothing to connect.`}
-                    </p>
-                  )}
-                  {builtinMode && builtinModel && (
-                    <div className="builtin-model">
-                      <p className={`builtin-model-state is-${builtinModel.state}`} role="status">
-                        {builtinModel.state === "loaded"
-                          ? `Loaded: ${baseName(builtinModel.file)}`
-                          : builtinModel.state === "loading"
-                            ? `Loading ${baseName(builtinModel.file)}...`
-                            : builtinModel.state === "failed"
-                              ? `Could not load ${baseName(builtinModel.file)}: ${builtinModel.error}`
-                              : "Not loaded - she can't answer until her model is loaded."}
-                      </p>
-                      <label>
-                        Her model
-                        <div className="builtin-model-row">
-                          <select
-                            value={modelChoice}
-                            disabled={modelBusy || builtinModel.files.length === 0}
-                            onChange={(event) => setModelChoice(event.target.value)}
-                          >
-                            {builtinModel.files.length === 0 && <option value="">No model files found</option>}
-                            {builtinModel.files.map((f) => (
-                              <option key={f.name} value={f.name}>
-                                {f.name} ({f.gb.toLocaleString("en-US")} GB)
-                              </option>
-                            ))}
-                          </select>
-                          <button type="button" className="ghost-button" disabled={modelBusy}
-                            onClick={() => void refreshBuiltinModel()}>
-                            Refresh list
-                          </button>
-                        </div>
-                      </label>
-                      <div className="builtin-model-row">
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          disabled={modelBusy || !modelChoice || builtinModel.state === "loading" ||
-                            (builtinModel.state === "loaded" && baseName(builtinModel.file) === modelChoice)}
-                          onClick={() => void loadChosenModel()}
-                        >
-                          {builtinModel.state === "loaded" && baseName(builtinModel.file) !== modelChoice
-                            ? "Switch to this model"
-                            : "Load"}
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          disabled={modelBusy || builtinModel.state === "unloaded"}
-                          onClick={() => void unloadModel()}
-                        >
-                          Unload
-                        </button>
-                      </div>
-                      <p className="settings-help">
-                        Unload frees her graphics memory (for a game, for example); she
-                        can't answer until you load her model again. To use your own GGUF
-                        model, put the file in{" "}
-                        <span className="settings-path">{builtinModel.folder || "her models folder"}</span>{" "}
-                        and press Refresh list. Your own model runs with this PC's
-                        settings{brain.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
-                        a model too big for your graphics card will not load.
-                      </p>
-                    </div>
-                  )}
                 </div>
               )}
 
-              {!builtinMode && (<>
-              <p className="settings-intro">
-                Amadeus works with any OpenAI-compatible model server - local (Unsloth
-                Desktop, Ollama, llama.cpp, LM Studio, vLLM) or cloud (OpenRouter,
-                OpenAI, and similar). For a local server, leave the address blank to
-                auto-detect it, or type the address your app shows (usually
-                http://localhost:8888/v1). For a cloud server, paste its API base URL
-                and your key below.
-              </p>
+              {/* Server / Model / Status - the same three rows in both modes. */}
+              <div className="conn-section">
+                <span className="conn-section-title">Server</span>
+                {builtinMode ? (
+                  <p className="settings-help">
+                    {brain?.model_missing
+                      ? `This PC - but ${brain.model_label || "her built-in model"} is not installed yet. Run the installer again (it continues the download where it stopped).`
+                      : "This PC. Her built-in model runs privately here - nothing to connect."}
+                  </p>
+                ) : (<>
+                  <p className="settings-intro">
+                    Any OpenAI-compatible model server - local (Unsloth Desktop, Ollama,
+                    llama.cpp, LM Studio, vLLM) or cloud (OpenRouter, OpenAI, and similar).
+                    For a local server, leave the address blank to auto-detect it, or type
+                    the address your app shows (usually http://localhost:8888/v1). For a
+                    cloud server, paste its API base URL and your key.
+                  </p>
+                  <label>
+                    Model server address
+                    <input
+                      value={serverAddress}
+                      disabled={settingsBusy}
+                      onChange={(event) => setServerAddressState(event.target.value)}
+                      placeholder="http://localhost:8888/v1  (blank = auto-detect)"
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-describedby="server-address-help"
+                    />
+                  </label>
+                  <p className="settings-help" id="server-address-help">
+                    {serverAddress
+                      ? "Requests go to this address."
+                      : "Blank = auto-detect local servers on ports 8888 / 8000."}
+                  </p>
+                  <label>
+                    API key
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={(event) => setApiKeyInput(event.target.value)}
+                      placeholder={hasApiKey ? "Enter a replacement key" : "Enter your API key"}
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      disabled={settingsBusy}
+                      aria-describedby="api-key-help"
+                    />
+                  </label>
+                  <p className="settings-help" id="api-key-help">
+                    {hasApiKey ? "A key is saved. Leave blank to keep it." : "No API key is saved."}
+                    {" "}Local servers usually accept any value; cloud providers (OpenRouter,
+                    OpenAI) require your real key.
+                  </p>
+                </>)}
+              </div>
 
-              <label>
-                Model server address
-                <input
-                  value={serverAddress}
-                  disabled={settingsBusy}
-                  onChange={(event) => setServerAddressState(event.target.value)}
-                  placeholder="http://localhost:8888/v1  (blank = auto-detect)"
-                  spellCheck={false}
-                  autoComplete="off"
-                  aria-describedby="server-address-help"
-                />
-              </label>
-              <p className="settings-help" id="server-address-help">
-                {serverAddress
-                  ? "Requests go to this address."
-                  : "Blank = auto-detect local servers on ports 8888 / 8000."}
-                {" "}Press "Save connection" to apply a change.
-              </p>
+              <div className="conn-section">
+                <span className="conn-section-title">Model</span>
+                {builtinMode ? (<>
+                  <div className="conn-row">
+                    <ModelPicker
+                      ariaLabel="Her model"
+                      options={(builtinModel?.files ?? []).map((f) => ({
+                        value: f.name,
+                        hint: `${f.gb.toLocaleString("en-US")} GB`,
+                      }))}
+                      value={modelChoice}
+                      onChange={setModelChoice}
+                      disabled={modelBusy || !builtinModel}
+                      emptyText="No model files in her models folder"
+                    />
+                    <button type="button" className="ghost-button" disabled={modelBusy}
+                      onClick={() => void refreshBuiltinModel()}>
+                      Refresh list
+                    </button>
+                  </div>
+                  {builtinModel && (
+                    <div className="conn-row">
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={modelBusy || !modelChoice || builtinModel.state === "loading" ||
+                          (builtinModel.state === "loaded" && baseName(builtinModel.file) === modelChoice)}
+                        onClick={() => void loadChosenModel()}
+                      >
+                        {builtinModel.state === "loaded" && baseName(builtinModel.file) !== modelChoice
+                          ? "Switch to this model"
+                          : "Load"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={modelBusy || builtinModel.state === "unloaded"}
+                        onClick={() => void unloadModel()}
+                      >
+                        Unload
+                      </button>
+                    </div>
+                  )}
+                  <p className="settings-help">
+                    Unload frees her graphics memory (for a game, for example); she
+                    can't answer until you load her model again. To use your own GGUF
+                    model, put the file in{" "}
+                    <span className="settings-path">{builtinModel?.folder || "her models folder"}</span>{" "}
+                    and press Refresh list. Your own model runs with this PC's
+                    settings{brain?.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
+                    a model too big for your graphics card will not load.
+                  </p>
+                </>) : (<>
+                  <div className="conn-row">
+                    <ModelPicker
+                      ariaLabel="Model"
+                      options={(connStatus?.reachable ? connStatus.models : []).map((name) => ({ value: name }))}
+                      value={model}
+                      onChange={setModelName}
+                      allowCustom
+                      disabled={settingsBusy}
+                      emptyText="Press Refresh list to see the server's models"
+                    />
+                    <button type="button" className="ghost-button" disabled={connTesting || settingsBusy}
+                      onClick={() => void refreshServerModels()}>
+                      {connTesting ? "Refreshing..." : "Refresh list"}
+                    </button>
+                  </div>
+                  <div className="conn-row">
+                    <button type="button" className="ghost-button"
+                      disabled={settingsBusy || !model.trim()}
+                      onClick={() => void applyCustomModel()}>
+                      Use this model
+                    </button>
+                  </div>
+                  <p className="settings-help">
+                    Type to search the server's models, or type a name it does not
+                    list. Refresh list uses the address and key above. The app talks
+                    to the model you choose; it cannot load or unload models on another
+                    program's server.
+                  </p>
+                </>)}
+              </div>
 
-              <label>
-                API key
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => setApiKeyInput(event.target.value)}
-                  placeholder={hasApiKey ? "Enter a replacement key" : "Enter your API key"}
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  disabled={settingsBusy}
-                  aria-describedby="api-key-help"
-                />
-              </label>
-              <p className="settings-help" id="api-key-help">
-                {hasApiKey ? "A key is saved. Leave blank to keep it." : "No API key is saved."}
-                {" "}Local servers usually accept any value; cloud providers (OpenRouter,
-                OpenAI) require your real key.
-              </p>
-
-              <label>
-                LLM model
-
-                <input
-                  value={model}
-                  disabled={settingsBusy}
-                  onChange={(event) => {
-                    setModelName(event.target.value);
-                  }}
-                  placeholder="your model name"
-                />
-              </label>
-              </>)}
+              <div className="conn-section">
+                <span className="conn-section-title">Status</span>
+                {builtinMode && builtinModel && !brain?.model_missing ? (
+                  <div className={`conn-status ${
+                    builtinModel.state === "loaded" ? "ok" : builtinModel.state === "failed" ? "fail" : "warn"
+                  }`} role="status">
+                    <span className="conn-dot" aria-hidden="true" />
+                    <span className="conn-text">
+                      {builtinModel.state === "loaded"
+                        ? `Loaded: ${baseName(builtinModel.file)}`
+                        : builtinModel.state === "loading"
+                          ? `Loading ${baseName(builtinModel.file)}...`
+                          : builtinModel.state === "failed"
+                            ? `Could not load ${baseName(builtinModel.file)}: ${builtinModel.error}`
+                            : "Not loaded - she can't answer until her model is loaded."}
+                    </span>
+                  </div>
+                ) : (
+                  <div
+                    className={`conn-status${
+                      !connStatus
+                        ? ""
+                        : !connStatus.reachable
+                          ? " fail"
+                          : connStatus.model_configured && !connStatus.model_found
+                            ? " warn"
+                            : " ok"
+                    }`}
+                    role="status"
+                  >
+                    <span className="conn-dot" aria-hidden="true" />
+                    <span className="conn-text">{connStatusText}</span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => void handleTestConnection()}
+                      disabled={connTesting || settingsBusy}
+                    >
+                      {connTesting ? "Testing..." : "Test connection"}
+                    </button>
+                  </div>
+                )}
+                {!builtinMode && brain?.available && builtinModel && (
+                  <p className="settings-help">
+                    {builtinModel.state === "unloaded"
+                      ? "Her built-in model: not loaded (its program is stopped)."
+                      : builtinModel.state === "failed"
+                        ? "Her built-in model: not loaded (it could not start)."
+                        : `Her built-in model: still ${builtinModel.state} - switch to Built-in and press Unload to stop it.`}
+                  </p>
+                )}
+              </div>
 
               <label>
                 Your name
@@ -2208,48 +2308,6 @@ export default function App() {
                 trust grows, taking your pronouns into account. The ending also
                 shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
               </p>
-
-              {!builtinMode && connStatus && connStatus.reachable && connStatus.models.length > 0 && (
-                <div className="model-chips">
-                  <span className="model-chips-label">Models on the server:</span>
-                  {connStatus.models.map((name) => (
-                    <button
-                      key={name}
-                      type="button"
-                      className={baseModelName(model) === baseModelName(name) ? "active" : ""}
-                      disabled={settingsBusy}
-                      title="Use this model"
-                      onClick={() => setModelName(name)}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              <div
-                className={`conn-status${
-                  !connStatus
-                    ? ""
-                    : !connStatus.reachable
-                      ? " fail"
-                      : connStatus.model_configured && !connStatus.model_found
-                        ? " warn"
-                        : " ok"
-                }`}
-                role="status"
-              >
-                <span className="conn-dot" aria-hidden="true" />
-                <span className="conn-text">{connStatusText}</span>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => void handleTestConnection()}
-                  disabled={connTesting || settingsBusy}
-                >
-                  {connTesting ? "Testing..." : "Test connection"}
-                </button>
-              </div>
 
               <label>
                 Keep last voice recordings
