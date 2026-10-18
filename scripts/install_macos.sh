@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.3.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.4  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -39,6 +39,12 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.4 (October 2026):
+#   - Her memory (about 1.3 GB) is set up during the install, in step 5 -
+#     her first start no longer begins with that download.
+#   - The app's logs are in a normal "logs" folder inside the project
+#     folder (Finder hides the old .runtime folder).
 #
 #  WHAT'S NEW IN v1.3.1 (October 2026, app v2.1.1):
 #   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
@@ -244,7 +250,7 @@ clone_or_update() {
 #  BANNER
 # ----------------------------------------------------------------------------
 printf '%s%s%s\n' "$C_BOLD" "============================================================" "$C_RESET" | tee_to
-printf '%s AMADEUS INSTALLER for MAC OS  v1.3.1%s\n' "$C_BOLD" "$C_RESET" | tee_to
+printf '%s AMADEUS INSTALLER for MAC OS  v1.4%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s This installs everything Amadeus needs on this Mac:%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s\n' "   - the app (into: $INSTALL_DIR)" | tee_to
 printf '%s\n' "   - three Python toolboxes: the app, her memory, her voice" | tee_to
@@ -589,8 +595,8 @@ step 5 "Setting up Amadeus's Python toolboxes"
 
 ensure_env "amadeus"
 # The memory sidecar's package list needs a newer Python (3.12+) than the
-# app environment (3.10), so it gets its own toolbox. The launcher finds it
-# on first start and builds the sidecar from it.
+# app environment (3.10), so it gets its own toolbox; the sidecar's venv is
+# built from it at the end of this step.
 ensure_env "amadeus-cm" "3.13"
 
 pip_in_env "amadeus" install --quiet --upgrade pip >/dev/null 2>&1 || true
@@ -612,6 +618,31 @@ if [ "${smoke}" = "SMOKE_OK" ]; then
 else
     log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log."
     printf '%s%s%s\n' "$C_DIM" "$smoke" "$C_RESET" | tee_to
+fi
+
+# Her memory (the CharacterMemory sidecar: its venv + about 1.3 GB of
+# packages), set up HERE rather than on her first start - by the launcher's
+# own setup code, so install and launch can never do it two different ways
+# (the launcher still repairs it at start if this could not finish). Not
+# fatal: she works without it.
+log "  Setting up her memory (about 1.3 GB, a few minutes)..."
+cm_py="$CONDA_HOME/envs/amadeus-cm/bin/python"
+setup_args=("$PROJ/scripts/launcher.py" --setup-memory)
+[ -x "$cm_py" ] && setup_args+=(--cm-python "$cm_py")
+app_py="$CONDA_HOME/envs/amadeus/bin/python"
+if [ -x "$app_py" ]; then
+    "$app_py" "${setup_args[@]}" 2>&1 | grep -v '^Progress [0-9]* of [0-9]*$' | tee_to >/dev/null
+    rc=${PIPESTATUS[0]}
+else
+    "$CONDA" run -n amadeus --no-capture-output python "${setup_args[@]}" 2>&1 \
+        | grep -v '^Progress [0-9]* of [0-9]*$' | tee_to >/dev/null
+    rc=${PIPESTATUS[0]}
+fi
+if [ "$rc" -eq 0 ]; then
+    log "  Her memory is set up."
+else
+    log "  Her memory could not be set up right now - Amadeus finishes it when she starts."
+    log "  (Details: $PROJ/logs/memory-setup.log)"
 fi
 
 # ----------------------------------------------------------------------------

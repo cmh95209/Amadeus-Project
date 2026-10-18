@@ -19,6 +19,10 @@
 #     conda, git, winget, npm), with their result codes - one file to send
 #     if something goes wrong. It is saved as UTF-8.
 #   - At the end it offers to start Amadeus right away.
+#   - Her memory (about 1.3 GB) is set up during the install, in step 5 -
+#     her first start no longer begins with that download.
+#   - The app's logs are in a normal, visible "logs" folder inside the
+#     project folder (they used to be in the hidden-looking .runtime\logs).
 #
 #  WHAT'S NEW IN v4.12.1 (October 2026, app v2.1.1):
 #   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
@@ -1308,8 +1312,8 @@ try {
     Step 5 "Setting up the Amadeus Python environments"
     Ensure-Env $EnvApp
     # The memory sidecar's package list needs a newer Python (3.12+) than the
-    # app environment (3.10), so it gets its own environment. The launcher
-    # finds it on first start and builds the sidecar from it.
+    # app environment (3.10), so it gets its own environment; the sidecar's
+    # venv is built from it at the end of this step.
     Ensure-Env $EnvCm "3.13"
     Invoke-PipInEnv $EnvApp @("install", "--upgrade", "pip") "Updating pip (app)"
     # ddgs: the DuckDuckGo search library behind her web search (weather is
@@ -1338,6 +1342,22 @@ try {
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
+
+    # Her memory (the CharacterMemory sidecar: its venv + about 1.3 GB of
+    # packages). Set up HERE, not on her first start (v4.13): a first launch
+    # used to begin with this download, as a wall of text after the user
+    # thought installing was done. The launcher's own setup code does the
+    # work (launcher.py --setup-memory), so install and launch can never set
+    # it up two different ways; the launcher still repairs it at start if
+    # this step could not finish. Not fatal: she works without it.
+    $cmPy = Env-Python $EnvCm
+    $launcherPy = Join-Path $proj "scripts\launcher.py"
+    $setupArgs = @($launcherPy, "--setup-memory")
+    if ($cmPy) { $setupArgs += @("--cm-python", $cmPy) }
+    if ($amPy) { Invoke-Tool "Setting up her memory (about 1.3 GB)" $amPy $setupArgs }
+    else { Invoke-Tool "Setting up her memory (about 1.3 GB)" $conda (@("run", "-n", $EnvApp, "--no-capture-output", "python") + $setupArgs) }
+    if ($LASTEXITCODE -eq 0) { Log "  Her memory is set up." "Green" }
+    else { Log ("  Her memory could not be set up right now - Amadeus finishes it when she starts. The last lines were:`n" + (Get-ToolTail)) "Yellow" }
 
     # ---------- STEP 6: voice env (PyTorch first, then the rest) ----------
     Step 6 "Setting up the voice engine environment (big download, be patient)"
