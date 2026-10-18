@@ -17,6 +17,7 @@ launcher's own setup code). Covers:
   8. both installers run the launcher's setup step with their memory Python.
 """
 import contextlib
+import json
 import importlib.util
 import io
 import os
@@ -211,6 +212,60 @@ class ShutdownTests(unittest.TestCase):
         self.assertTrue(kernel32.IsProcessInJob(int(proc._handle), self.launcher._job_handle,
                                                 ctypes.byref(inside)))
         self.assertTrue(inside.value)
+
+
+class ModelEventTests(unittest.TestCase):
+    """The launcher window says when her built-in model loads, unloads or
+    stops (2026-10-19)."""
+
+    def setUp(self):
+        self.launcher = _load_launcher()
+
+    def state(self, state, mode="builtin", file="gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", error=""):
+        return {"mode": mode, "state": state, "file": file, "error": error}
+
+    def test_first_look(self):
+        say = self.launcher.describe_model_change
+        self.assertIsNone(say(None, self.state("loading")))      # start-up already said so
+        self.assertIsNone(say(None, self.state("unloaded")))     # started without it / custom
+        self.assertIn("loaded (gemma-4-12B", say(None, self.state("loaded")))
+        self.assertIn("could not load", say(None, self.state("failed", error="out of memory\nmore")))
+
+    def test_changes(self):
+        say = self.launcher.describe_model_change
+        loading, loaded = self.state("loading"), self.state("loaded")
+        self.assertEqual(say(loading, loaded),
+                         "  Her built-in model: loaded (gemma-4-12B-it-qat-UD-Q4_K_XL.gguf) - ready to talk.")
+        self.assertIsNone(say(loaded, loaded))                   # no change, no line
+        self.assertIn("unloaded - its graphics memory is free", say(loaded, self.state("unloaded")))
+        self.assertIn("stopped - she now uses your own model",
+                      say(loaded, self.state("unloaded", mode="custom")))
+        self.assertIn("loading my-own.gguf",
+                      say(self.state("unloaded"), self.state("loading", file="my-own.gguf")))
+        self.assertIn("ready to talk", say(loaded, self.state("loaded", file="my-own.gguf")))   # switched
+        failed = say(loading, self.state("failed", error="port 8091 is used by another program\nx"))
+        self.assertEqual(failed, "  WARNING: her built-in model could not load "
+                                 "(gemma-4-12B-it-qat-UD-Q4_K_XL.gguf): port 8091 is used by another program")
+
+    def test_status_read_from_the_backend(self):
+        body = json.dumps({"available": True, "mode": "builtin",
+                           "server": {"state": "loaded", "file": "C:\\\\m\\\\a.gguf", "error": ""}})
+
+        class Reply(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        import urllib.request
+        with patch.object(urllib.request, "urlopen", return_value=Reply(body.encode())):
+            self.assertEqual(self.launcher.builtin_model_status(),
+                             {"mode": "builtin", "state": "loaded", "file": "a.gguf", "error": ""})
+        with patch.object(urllib.request, "urlopen", side_effect=OSError("refused")):
+            self.assertIsNone(self.launcher.builtin_model_status())
+        no_model = json.dumps({"available": False}).encode()
+        with patch.object(urllib.request, "urlopen", return_value=Reply(no_model)):
+            self.assertIsNone(self.launcher.builtin_model_status())
 
 
 class AppWindowTests(unittest.TestCase):

@@ -28,6 +28,18 @@ logging.basicConfig(level=logging.ERROR)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module='torch')
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _QuietStatusPolls(logging.Filter):
+    """The launcher asks GET /builtinModel every few seconds (to print her
+    model's load / unload in its window) - one log line each would bury
+    backend.log. Every other request is still logged."""
+
+    def filter(self, record):
+        return '"GET /builtinModel ' not in record.getMessage()
+
+
+logging.getLogger("werkzeug").addFilter(_QuietStatusPolls())
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 from tqdm import tqdm

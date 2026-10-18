@@ -1353,7 +1353,7 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
     end(f"ready ({_secs(started)})")
     if load_model:
         say("  Her built-in model ... loading in the background "
-            "(Settings -> Connection shows how it is doing)")
+            "(this window says when it is ready)")
 
     begin("The web page")
     started = time.monotonic()
@@ -1403,6 +1403,9 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
         _open_browser(url)
 
     cm_warned = False
+    model_seen: dict | None = None
+    watch_model = BUILTIN_CONFIG.is_file()   # a built-in model is set up (either mode)
+    next_model_check = 0.0
     while True:
         for name, process in (
             ("GPT-SoVITS", gpt),
@@ -1423,8 +1426,70 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
             say(f"  WARNING: her memory stopped (exit {cm.returncode}) - she "
                 "works without long-term memory until the next start. "
                 f"Details: {LOG_DIR / 'cm-sidecar.log'}")
+        # Her built-in model: say each load / unload / stop in this window.
+        if watch_model and time.monotonic() >= next_model_check:
+            next_model_check = time.monotonic() + MODEL_WATCH_SECONDS
+            now = builtin_model_status()
+            if now is not None:
+                line = describe_model_change(model_seen, now)
+                if line:
+                    say(line)
+                model_seen = now
 
         time.sleep(1)
+
+
+# ---------------------------------------------------------------------------
+# Her built-in model in the launcher window (2026-10-19): the backend
+# runs it, so Settings' Load / Unload / Switch and a switch to a custom model
+# happen there - the launcher asks the backend every few seconds and prints
+# each change, so the window always says whether her model is running.
+# ---------------------------------------------------------------------------
+MODEL_WATCH_SECONDS = 2
+
+
+def builtin_model_status(timeout: float = 2.0) -> dict | None:
+    """The backend's /builtinModel answer (mode + server state), or None
+    when it does not answer (still starting, busy) - then nothing is said."""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{BACKEND_PORT}/builtinModel",
+                                    timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    server = data.get("server") if isinstance(data.get("server"), dict) else {}
+    return {"mode": data.get("mode"), "state": server.get("state"),
+            "file": Path(str(server.get("file") or "")).name,
+            "error": str(server.get("error") or "")}
+
+
+def describe_model_change(prev: dict | None, now: dict) -> str | None:
+    """The launcher-window line for a change of her model's state, or None.
+    prev None = the first look after start-up: only a finished load or a
+    failure is news then (the start-up lines already said what began)."""
+    key = (now["mode"], now["state"], now["file"])
+    if prev is not None and key == (prev["mode"], prev["state"], prev["file"]):
+        return None
+    name = now["file"] or "her model"
+    state = now["state"]
+    if state == "loading":
+        return None if prev is None else f"  Her built-in model: loading {name}..."
+    if state == "loaded":
+        return f"  Her built-in model: loaded ({name}) - ready to talk."
+    if state == "failed":
+        reason = now["error"].splitlines()[0] if now["error"] else "see logs/llm.log"
+        return f"  WARNING: her built-in model could not load ({name}): {reason}"
+    # unloaded
+    if prev is None or prev["state"] == "unloaded" and prev["mode"] == now["mode"]:
+        return None
+    if now["mode"] != "builtin":
+        return ("  Her built-in model: stopped - she now uses your own model "
+                "(Settings -> Connection). Its graphics memory is free.")
+    return "  Her built-in model: unloaded - its graphics memory is free."
 
 
 def setup_memory(cm_python: str | None) -> int:
