@@ -325,7 +325,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.launcher.builtin_model_name(cfg), builtin_llm.model_name(cfg))
 
     def test_pretend_vram_uses_that_tiers_settings(self):
-        cfg = _config(self.tmp, model="26B-A4B", tier="32-plus", context=49152,
+        cfg = _config(self.tmp, model="12B", tier="24-plus", context=49152,
                       kv_cache="f16", voice_device="cuda")
         sim = self.launcher.apply_simulated_vram(cfg, 12)
         self.assertEqual((sim["model"], sim["tier"], sim["context"], sim["kv_cache"],
