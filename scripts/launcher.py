@@ -17,7 +17,11 @@ BACKEND_DIR = PROJECT_ROOT / "backend"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 GPT_DIR = PROJECT_ROOT / "GPT-SoVITS"
 RUNTIME_DIR = PROJECT_ROOT / ".runtime"
-LOG_DIR = RUNTIME_DIR / "logs"
+# Every log in a plain, visible folder: macOS Finder hides dot-folders, so
+# logs under .runtime/ were invisible to Mac users until they turned on
+# hidden files (2026-10-18). .runtime/ keeps only internal files.
+LOG_DIR = PROJECT_ROOT / "logs"
+LAUNCHER_LOG = LOG_DIR / "launcher.log"
 
 GPT_PORT = 9880
 BACKEND_PORT = 5050
@@ -40,6 +44,130 @@ CM_DIR = PROJECT_ROOT / "memory_sidecar"
 # environments (e.g. "GPTSoVits-test"); the installer records the suffix
 # here (start_windows.bat reads the same file for the app environment).
 ENV_SUFFIX_FILE = RUNTIME_DIR / "env_suffix.txt"
+
+
+# ---------------------------------------------------------------------------
+# The console: a few plain status lines for the user; every detail (paths,
+# each step, the full output of one-time setups) goes to logs/launcher.log.
+# ---------------------------------------------------------------------------
+_launcher_log: IO[str] | None = None
+_line_open = False   # a "Starting ...:" line waits for its result
+_last_tail: list[str] = []   # run_tool: the last lines the program printed
+
+
+def open_launcher_log() -> None:
+    global _launcher_log
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _launcher_log = LAUNCHER_LOG.open("w", encoding="utf-8")
+    except OSError:
+        _launcher_log = None   # no log file is never a reason not to start
+
+
+def note(text: str) -> None:
+    """A detail for logs/launcher.log only."""
+    if _launcher_log is not None:
+        try:
+            _launcher_log.write(time.strftime("%H:%M:%S  ") + text + "\n")
+            _launcher_log.flush()
+        except (OSError, ValueError):
+            pass
+
+
+def _close_line() -> None:
+    global _line_open
+    if _line_open:
+        print(flush=True)
+        _line_open = False
+
+
+def say(text: str = "", file=None) -> None:
+    """A line for the user (and the log)."""
+    _close_line()
+    print(text, file=file or sys.stdout, flush=True)
+    if text.strip():
+        note(text.strip())
+
+
+def begin(text: str) -> None:
+    """Start a status line ("  Her voice ..."); end() finishes it."""
+    global _line_open
+    _close_line()
+    print(f"  {text} ...", end="", flush=True)
+    _line_open = True
+    note(text + " ...")
+
+
+def end(result: str) -> None:
+    global _line_open
+    if _line_open:
+        print(f" {result}", flush=True)
+        _line_open = False
+    else:
+        print(f"  {result}", flush=True)
+    note("  -> " + result)
+
+
+def _short(text: str, width: int) -> str:
+    return text if len(text) <= width else text[:max(0, width - 3)] + "..."
+
+
+def run_tool(label: str, command: list[str], cwd: Path | None = None,
+             passthrough: bool = False) -> int:
+    """Run a one-time setup program (pip, venv, npm). Its full output goes
+    to logs/launcher.log; the console gets ONE line that updates in place
+    (the package being fetched and its download percentage). passthrough:
+    print the output as it is instead (the installer runs the memory setup
+    this way and draws its own progress bar from it). Returns the exit code
+    (127 = could not start)."""
+    note(f">>> {label}: {' '.join(command)}")
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(command, cwd=str(cwd) if cwd else None,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace",
+                                env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except OSError as e:
+        note(f"<<< {label}: could not start ({e})")
+        return 127
+    width = max(40, shutil.get_terminal_size((80, 20)).columns - 1)
+    count, current, pct, last = 0, "", -1, 0.0
+    tail: list[str] = []
+    import re
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.rstrip()
+        if not line:
+            continue
+        if passthrough:
+            print(line, flush=True)
+        m = re.match(r"^Progress (\d+) of (\d+)$", line)
+        if m:
+            total = int(m.group(2))
+            pct = int(100 * int(m.group(1)) / total) if total else -1
+        else:
+            note("    | " + line)
+            tail = (tail + [line])[-15:]
+            m = re.match(r"^Collecting (\S+)", line)
+            if m:
+                count, current, pct = count + 1, m.group(1), -1
+            elif line.startswith("Installing collected packages"):
+                current, pct = "installing", -1
+        now = time.monotonic()
+        if not passthrough and now - last >= 0.25:
+            last = now
+            status = f"package {count}: {current}" if count else "working"
+            if pct >= 0:
+                status += f" {pct}%"
+            print("\r" + _short(f"  {label}: {status}", width).ljust(width),
+                  end="", flush=True)
+    code = proc.wait()
+    proc.stdout.close()
+    _last_tail[:] = tail
+    if not passthrough:
+        print("\r" + " " * width + "\r", end="", flush=True)
+    note(f"<<< {label}: exit {code} ({int(time.monotonic() - started)} s)")
+    return code
 
 
 def env_suffix() -> str:
@@ -188,19 +316,28 @@ def _cm_marker() -> Path:
     return CM_DIR / ".venv_installed"
 
 
-def _pip_install_sidecar() -> bool:
+CM_SETUP_LABEL = "Setting up her memory (one time, about 1.3 GB)"
+
+
+def _pip_install_sidecar(passthrough: bool = False) -> bool:
     """pip-install the sidecar's pinned requirements into its venv.
-    Returns True on success (the marker is written by the caller only then)."""
+    Returns True on success (the marker is written by the caller only then).
+    pip's "raw" progress mode feeds the progress line; a pip too old to know
+    it is asked again without it."""
     req = CM_DIR / "requirements.txt"
-    try:
-        subprocess.run([str(_cm_python()), "-m", "pip", "install",
-                        "--no-cache-dir", "-r", str(req)], check=True)
-        return True
-    except (subprocess.CalledProcessError, OSError) as e:
-        print(f"[Launcher] WARNING: memory sidecar install failed ({e}) - "
-              "the app runs without long-term memory (retried at next "
-              "start).")
+    base = [str(_cm_python()), "-m", "pip", "install"]
+    rest = ["--no-cache-dir", "-r", str(req)]
+    code = run_tool(CM_SETUP_LABEL, base + ["--progress-bar", "raw"] + rest,
+                    passthrough=passthrough)
+    if code not in (0, 127) and any(
+            "no such option" in t or "invalid choice" in t for t in _last_tail):
+        code = run_tool(CM_SETUP_LABEL, base + rest, passthrough=passthrough)
+    if code != 0:
+        say("  WARNING: her memory could not be set up (details: "
+            f"{LAUNCHER_LOG}). She works without long-term memory for now; "
+            "Amadeus tries again at the next start.")
         return False
+    return True
 
 
 def _cm_base_python() -> Path | None:
@@ -260,15 +397,18 @@ def _cm_venv_python_ok() -> bool:
     return (int(m.group(1)), int(m.group(2))) >= CM_MIN_PYTHON
 
 
-def ensure_cm_sidecar() -> bool:
-    """First-run install of the memory sidecar (mirrors the npm-install
-    pattern): create its venv and pip-install its pinned requirements.
-    An interrupted first run (crash or PC off mid-download) can never
-    masquerade as a complete install: the .venv_installed marker is written
-    only after a fully successful pip run, so the next launch re-runs the
-    missing part instead of starting a broken service. Returns True when
-    the sidecar can start. Never raises - the sidecar is optional and its
-    absence must not block the app."""
+def ensure_cm_sidecar(base_python: Path | None = None,
+                      passthrough: bool = False) -> bool:
+    """Install the memory sidecar if it is not installed yet: create its
+    venv and pip-install its pinned requirements. The installer runs this
+    (`launcher.py --setup-memory`, base_python = its 'amadeus-cm'
+    environment); at launch it only repairs a missing or unfinished install.
+    An interrupted run (crash or PC off mid-download) can never masquerade
+    as a complete install: the .venv_installed marker is written only after
+    a fully successful pip run, so the next run redoes the missing part
+    instead of starting a broken service. Returns True when the sidecar can
+    start. Never raises - the sidecar is optional and its absence must not
+    block the app."""
     if not (CM_DIR / "cm_sidecar.py").exists():
         return False
     req = CM_DIR / "requirements.txt"
@@ -280,43 +420,37 @@ def ensure_cm_sidecar() -> bool:
         # An unfinished venv built from a Python too old for the pinned
         # packages (numpy 2.5 needs 3.12+) would fail on every start: start
         # it over from the right interpreter instead of retrying forever.
-        print("[Launcher] Memory sidecar venv was built from a Python older "
-              f"than {CM_MIN_PYTHON[0]}.{CM_MIN_PYTHON[1]} - rebuilding it...")
+        note("Memory sidecar venv was built from a Python older than "
+             f"{CM_MIN_PYTHON[0]}.{CM_MIN_PYTHON[1]} - rebuilding it.")
         shutil.rmtree(CM_DIR / "venv", ignore_errors=True)
     if _cm_python().exists():
-        print("[Launcher] Memory sidecar venv exists but its install is "
-              "unverified (an earlier run was interrupted?) - re-running "
-              "its pip install...")
-        if not _pip_install_sidecar():
+        note("Memory sidecar venv exists but its install is unverified (an "
+             "earlier run was interrupted?) - re-running its pip install.")
+        if not _pip_install_sidecar(passthrough):
             return False
     else:
-        base = _cm_base_python()
+        base = base_python if base_python is not None else _cm_base_python()
         if base is None and sys.version_info[:2] < CM_MIN_PYTHON:
-            print("[Launcher] WARNING: the memory sidecar needs Python "
-                  f"{CM_MIN_PYTHON[0]}.{CM_MIN_PYTHON[1]}+, and its own "
-                  f"'{env_name('amadeus-cm')}' environment was not found - "
-                  "the app runs without long-term memory. Re-running the "
-                  "installer creates that environment.")
+            say(f"  WARNING: her memory needs Python {CM_MIN_PYTHON[0]}."
+                f"{CM_MIN_PYTHON[1]}+, and its own '{env_name('amadeus-cm')}' "
+                "environment was not found. She works without long-term "
+                "memory; running the installer again fixes this.")
             return False
-        source = ("the dedicated 'amadeus-cm' environment"
-                  if base is not None else "the app environment")
-        print("[Launcher] Memory sidecar not installed yet - one-time setup "
-              f"(creates its venv from {source} and downloads packages, "
-              "a few minutes)...")
-        try:
-            interpreter = str(base) if base is not None else sys.executable
-            subprocess.run([interpreter, "-m", "venv", str(CM_DIR / "venv")],
-                           check=True)
-        except (subprocess.CalledProcessError, OSError) as e:
-            print(f"[Launcher] WARNING: memory sidecar venv creation "
-                  f"failed ({e}) - the app runs without long-term memory.")
+        interpreter = str(base) if base is not None else sys.executable
+        note(f"Memory sidecar not installed yet - building its venv from {interpreter}.")
+        code = run_tool("Preparing her memory", [interpreter, "-m", "venv",
+                                                 str(CM_DIR / "venv")],
+                        passthrough=passthrough)
+        if code != 0:
+            say(f"  WARNING: her memory could not be set up (details: {LAUNCHER_LOG}). "
+                "She works without long-term memory for now.")
             return False
-        if not _pip_install_sidecar():
+        if not _pip_install_sidecar(passthrough):
             return False
     _cm_marker().write_text(
         "installed " + time.strftime("%Y-%m-%dT%H:%M:%S") + "\n",
         encoding="utf-8")
-    print("[Launcher] Memory sidecar installed.")
+    note("Memory sidecar installed.")
     return True
 
 processes: list[subprocess.Popen] = []
@@ -461,7 +595,7 @@ def clear_port(name: str, port: int) -> None:
     if not port_open(port):
         return
 
-    print(f"[Launcher] Clearing stale {name} process on port {port}...")
+    note(f"Clearing stale {name} process on port {port}...")
 
     if os.name == "nt":
         _kill_port_windows(port)
@@ -471,7 +605,7 @@ def clear_port(name: str, port: int) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if not port_open(port):
-            print(f"[Launcher] Port {port} is free.")
+            note(f"Port {port} is free.")
             return
         time.sleep(0.25)
 
@@ -482,34 +616,36 @@ def clear_port(name: str, port: int) -> None:
 
 
 def clear_stale_amadeus_processes(extra: dict | None = None) -> None:
-    print("[Launcher] Cleaning stale Amadeus processes...")
-
-    for name, port in {**AMADEUS_PORTS, **(extra or {})}.items():
+    note("Cleaning stale Amadeus processes...")
+    ports = {**AMADEUS_PORTS, **(extra or {})}
+    if any(port_open(port) for port in ports.values()):
+        say("  (Closing an earlier Amadeus that was still running.)")
+    for name, port in ports.items():
         clear_port(name, port)
 
-    print("[Launcher] Cleanup complete.")
+    note("Cleanup complete.")
 
 
 def wait_for_port(name: str, port: int, process: subprocess.Popen, timeout: int) -> None:
-    print(f"[Launcher] Waiting for {name} on port {port}...")
+    note(f"Waiting for {name} on port {port}...")
 
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
         if port_open(port):
-            print(f"[Launcher] {name} is ready.")
+            note(f"{name} is ready.")
             return
 
         if process.poll() is not None:
             raise RuntimeError(
-                f"{name} exited during startup. Check .runtime/logs for details."
+                f"{name} exited during startup. Details: {LOG_DIR}"
             )
 
         time.sleep(1)
 
     raise TimeoutError(
         f"{name} did not become ready within {timeout} seconds. "
-        "Check .runtime/logs for details."
+        f"Details: {LOG_DIR}"
     )
 
 
@@ -576,7 +712,7 @@ def terminate_process_tree(process: subprocess.Popen) -> None:
 
 def cleanup() -> None:
     if processes:
-        print("\n[Launcher] Shutting down Amadeus...")
+        say("\nShutting down Amadeus...")
 
     for process in reversed(processes):
         terminate_process_tree(process)
@@ -609,27 +745,25 @@ def ensure_frontend_dependencies(npm: str) -> None:
     if node_modules.exists():
         return
 
-    print("[Launcher] Frontend dependencies are not installed.")
-    print("[Launcher] Running npm install...")
+    note("Frontend dependencies are not installed - running npm install.")
+    code = run_tool("Setting up the web page (one time)",
+                    [npm, "install", "--no-audit", "--no-fund"], FRONTEND_DIR)
+    if code != 0:
+        raise RuntimeError(f"Setting up the web page failed. Details: {LAUNCHER_LOG}")
 
-    result = subprocess.run([npm, "install"], cwd=str(FRONTEND_DIR))
-
-    if result.returncode != 0:
-        raise RuntimeError("npm install failed.")
-
-    print("[Launcher] Frontend dependencies installed.")
+    note("Frontend dependencies installed.")
 
 
 def preflight(conda: str, npm: str) -> None:
     check_required_paths()
 
-    print("[Launcher] Preflight")
-    print(f"  Project : {PROJECT_ROOT}")
-    print(f"  Conda   : {conda}")
-    print(f"  npm     : {npm}")
-    print(f"  Python  : {sys.executable}")
+    note("Preflight")
+    note(f"  Project : {PROJECT_ROOT}")
+    note(f"  Conda   : {conda}")
+    note(f"  npm     : {npm}")
+    note(f"  Python  : {sys.executable}")
     if env_suffix():
-        print(f"  Envs    : this install's own (suffix '{env_suffix()}')")
+        note(f"  Envs    : this install's own (suffix '{env_suffix()}')")
 
 
 # Browsers that accept Chromium's autoplay flag (matched on the executable's
@@ -677,11 +811,11 @@ def _open_browser_windows(url: str) -> bool:
         else:
             args = [exe, url]
         subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-        print(f"[Launcher] Opening WebUI with the default browser ({Path(exe).name}).")
+        note(f"Opening WebUI with the default browser ({Path(exe).name}).")
         return True
     except Exception as exc:
-        print(f"[Launcher] Could not resolve the default browser ({exc}); "
-              "falling back to webbrowser.open().")
+        note(f"Could not resolve the default browser ({exc}); "
+             "falling back to webbrowser.open().")
         return False
 
 
@@ -713,16 +847,16 @@ def _open_browser_macos(url: str) -> bool:
             # Default browser is not a known Chromium app - open plainly
             # (the in-app one-time gesture unlock covers audio there).
             subprocess.Popen(["open", url])
-            print("[Launcher] Default browser is not Chromium; opening plainly.")
+            note("Default browser is not Chromium; opening plainly.")
             return True
         app = bundle_to_app[bundle]
         subprocess.Popen(["open", "-a", app, "--args",
                           "--autoplay-policy=no-user-gesture-required", url])
-        print(f"[Launcher] Opening WebUI with the default browser ({app}).")
+        note(f"Opening WebUI with the default browser ({app}).")
         return True
     except Exception as exc:
-        print(f"[Launcher] Could not resolve the default browser ({exc}); "
-              "falling back to webbrowser.open().")
+        note(f"Could not resolve the default browser ({exc}); "
+             "falling back to webbrowser.open().")
         return False
 
 
@@ -758,11 +892,11 @@ def _open_browser_linux(url: str) -> bool:
             parts.append("--autoplay-policy=no-user-gesture-required")
         parts.append(url)
         subprocess.Popen(parts, start_new_session=True)
-        print(f"[Launcher] Opening WebUI with the default browser ({Path(parts[0]).name}).")
+        note(f"Opening WebUI with the default browser ({Path(parts[0]).name}).")
         return True
     except Exception as exc:
-        print(f"[Launcher] Could not resolve the default browser ({exc}); "
-              "falling back to webbrowser.open().")
+        note(f"Could not resolve the default browser ({exc}); "
+             "falling back to webbrowser.open().")
         return False
 
 
@@ -796,15 +930,21 @@ def gptsovits_command(conda: str) -> list[str]:
     ]
 
 
+def _secs(started: float) -> str:
+    return f"{int(time.monotonic() - started)} s"
+
+
 def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
     conda = find_conda()
     npm = find_npm()
     builtin = load_builtin_config()
+    say(f"Amadeus is starting. (Details: {LAUNCHER_LOG})")
+    say()
     if builtin and simulate_vram_gb is not None:
-        print(f"[Launcher] TEST: pretending the graphics card has {simulate_vram_gb} GB.")
+        say(f"  TEST: pretending the graphics card has {simulate_vram_gb} GB.")
         builtin = apply_simulated_vram(builtin, simulate_vram_gb)
         if builtin is None:
-            print("[Launcher] TEST: such a card gets no local model - starting without it.")
+            say("  TEST: such a card gets no local model - starting without it.")
 
     if not conda:
         raise RuntimeError(
@@ -826,19 +966,24 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
     llm_proc = None
     if builtin:
         ready, why = builtin_files_ready(builtin)
+        label = builtin.get('model_label', builtin_model_name(builtin))
         if ready:
-            print(f"\n[Launcher] Starting her built-in model ({builtin.get('model_label', builtin_model_name(builtin))}, "
-                  f"{builtin.get('context')} context, {builtin.get('kv_cache')} memory, "
-                  f"voice on the {'processor' if builtin.get('voice_device') == 'cpu' else 'graphics card'})...")
+            note(f"Built-in model: {label}, {builtin.get('context')} context, "
+                 f"{builtin.get('kv_cache')} memory, voice on the "
+                 f"{'processor' if builtin.get('voice_device') == 'cpu' else 'graphics card'}.")
+            begin(f"Her built-in model ({label})")
             llm_proc = start_process("llm", llama_server_command(builtin), PROJECT_ROOT)
+            end("loading in the background")
         else:
-            print(f"\n[Launcher] WARNING: built-in model not started - {why}. "
-                  "Run the installer again to finish setting it up.")
+            say(f"  WARNING: her built-in model was not started - {why}. "
+                "Run the installer again to finish setting it up.")
 
-    print("\n[Launcher] Starting GPT-SoVITS...")
+    begin("Her voice")
+    started = time.monotonic()
     gpt = start_process("gptsovits", gptsovits_command(conda), PROJECT_ROOT,
                         voice_env(builtin))
     wait_for_port("GPT-SoVITS", GPT_PORT, gpt, timeout=180)
+    end(f"ready ({_secs(started)})")
 
     # CharacterMemory sidecar: the slowest starter (CPU embedder + lore
     # index, ~30-60s with the shipped seed; a one-time cold lore build can
@@ -848,49 +993,60 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
     # to the no-memory baseline). On a RAM-constrained machine its first
     # start can die mid-load (2026-10-07: the 18 GB test box, sharing RAM
     # with a local 27 B model, failed a 55 MB allocation), so the launcher
-    # retries twice more before giving up.
+    # retries twice more before giving up. The installer sets it up; here
+    # ensure_cm_sidecar() only repairs a missing or unfinished install.
     cm = None
     cm_available = False
     cm_env = sidecar_builtin_env(builtin) if builtin else None
+    if not (_cm_python().exists() and _cm_marker().exists()) and \
+            (CM_DIR / "cm_sidecar.py").exists():
+        say("  Her memory needs a one-time setup first (a few minutes).")
     if ensure_cm_sidecar():
-        print("[Launcher] Starting CharacterMemory sidecar...")
+        begin("Her memory")
+        cm_started = time.monotonic()
         cm = start_process(
             "cm-sidecar",
             [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
             CM_DIR,
             cm_env,
         )
+        end("starting in the background")
         cm_available = True
     else:
-        print("[Launcher] CharacterMemory sidecar not available - "
-              "continuing without long-term memory.")
+        say("  Her memory is not available - she works without long-term memory.")
 
-    print("[Launcher] Starting Amadeus backend...")
+    begin("The app")
+    started = time.monotonic()
     backend = start_process(
         "backend",
         [sys.executable, "main.py"],
         BACKEND_DIR,
     )
     wait_for_port("backend", BACKEND_PORT, backend, timeout=45)
+    end(f"ready ({_secs(started)})")
 
-    print("[Launcher] Starting WebUI...")
+    begin("The web page")
+    started = time.monotonic()
     frontend = start_process(
         "frontend",
         [npm, "run", "dev", "--", "--host", "127.0.0.1"],
         FRONTEND_DIR,
     )
     wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
+    end(f"ready ({_secs(started)})")
 
     if cm_available:
+        begin("Her memory")
         for attempt in range(1, 4):
             try:
                 wait_for_port("cm-sidecar", CM_PORT, cm, timeout=600)
+                end(f"ready ({_secs(cm_started)})")
                 break
             except (TimeoutError, RuntimeError) as e:
                 terminate_process_tree(cm)
                 if attempt < 3:
-                    print("[Launcher] The memory sidecar did not come up on "
-                          f"attempt {attempt} ({e}) - trying again in 30 s...")
+                    note(f"The memory sidecar did not come up on attempt {attempt} "
+                         f"({e}) - trying again in 30 s.")
                     time.sleep(30)
                     cm = start_process(
                         "cm-sidecar",
@@ -899,9 +1055,10 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
                         cm_env,
                     )
                 else:
-                    print("[Launcher] WARNING: cm-sidecar not ready after 3 "
-                          "attempts - the app runs without long-term memory. "
-                          "Check .runtime/logs/cm-sidecar.log for details.")
+                    end("did not start")
+                    say("  WARNING: her memory did not start after 3 tries - she "
+                        "works without long-term memory. Details: "
+                        f"{LOG_DIR / 'cm-sidecar.log'}")
                     cm = None
 
     # llama-server opens its port right away and answers "loading" until the
@@ -910,18 +1067,19 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
     if llm_proc is not None:
         try:
             wait_for_port("built-in model", LLM_PORT, llm_proc, timeout=180)
+            note("Built-in model server is up (the WebUI shows when the model has loaded).")
         except (TimeoutError, RuntimeError) as e:
-            print(f"[Launcher] WARNING: her built-in model did not start ({e}). "
-                  "Check .runtime/logs/llm.log for details.")
+            note(f"Built-in model failed: {e}")
+            say("  WARNING: her built-in model did not start. Details: "
+                f"{LOG_DIR / 'llm.log'}")
 
     url = f"http://127.0.0.1:{FRONTEND_PORT}/"
 
-    print("\n========================================")
-    print(" Amadeus is online")
-    print(f" {url}")
-    print(" Press Ctrl+C to shut everything down.")
-    print(" Relaunching Amadeus will clean stale processes automatically.")
-    print("========================================\n")
+    say("\n========================================")
+    say(" Amadeus is online")
+    say(f" {url}")
+    say(" Press Ctrl+C to shut everything down.")
+    say("========================================\n")
 
     if not no_browser:
         _open_browser(url)
@@ -938,25 +1096,35 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None) -> None:
             if return_code is not None:
                 raise RuntimeError(
                     f"{name} stopped unexpectedly with exit code {return_code}. "
-                    "Check .runtime/logs for details."
+                    f"Details: {LOG_DIR}"
                 )
         # The memory sidecar is OPTIONAL: if it dies the app keeps working
         # (the bridge degrades to the no-memory baseline), so a dead sidecar
         # warns once instead of tearing the whole stack down.
         if cm is not None and not cm_warned and cm.poll() is not None:
             cm_warned = True
-            print("[Launcher] WARNING: cm-sidecar stopped (exit "
-                  f"{cm.returncode}) - continuing without long-term memory. "
-                  "Check .runtime/logs/cm-sidecar.log for details.")
+            say(f"  WARNING: her memory stopped (exit {cm.returncode}) - she "
+                "works without long-term memory until the next start. "
+                f"Details: {LOG_DIR / 'cm-sidecar.log'}")
         # The built-in model stopping does not tear the app down either:
         # she reports it as unreachable, and a restart brings it back.
         if llm_proc is not None and not llm_warned and llm_proc.poll() is not None:
             llm_warned = True
-            print("[Launcher] WARNING: her built-in model stopped (exit "
-                  f"{llm_proc.returncode}). Restart Amadeus to bring it back; "
-                  "details in .runtime/logs/llm.log.")
+            say(f"  WARNING: her built-in model stopped (exit {llm_proc.returncode}). "
+                f"Restart Amadeus to bring it back. Details: {LOG_DIR / 'llm.log'}")
 
         time.sleep(1)
+
+
+def setup_memory(cm_python: str | None) -> int:
+    """`launcher.py --setup-memory`: the installer's memory step. Prints
+    pip's own output (the installer logs it and draws its progress bar from
+    it); exit 0 when her memory is ready to start."""
+    base = Path(cm_python) if cm_python else None
+    if base is not None and not base.is_file():
+        say(f"The memory environment's Python was not found: {base}")
+        return 1
+    return 0 if ensure_cm_sidecar(base_python=base, passthrough=True) else 1
 
 
 def main() -> int:
@@ -973,15 +1141,34 @@ def main() -> int:
         help="TEST: run the built-in model with the settings a card with this "
              "much graphics memory would get (its model must be downloaded).",
     )
+    parser.add_argument(
+        "--setup-memory",
+        action="store_true",
+        help="Only set up her memory (the installer runs this), then exit.",
+    )
+    parser.add_argument(
+        "--cm-python",
+        default=None,
+        help="With --setup-memory: the Python to build the memory venv from "
+             "(the installer passes its 'amadeus-cm' environment).",
+    )
     args = parser.parse_args()
 
+    if args.setup_memory:
+        # Its own log file: the next start's launcher.log must not erase it.
+        global LAUNCHER_LOG
+        LAUNCHER_LOG = LOG_DIR / "memory-setup.log"
+        open_launcher_log()
+        return setup_memory(args.cm_python)
+
+    open_launcher_log()
     try:
         run(no_browser=args.no_browser, simulate_vram_gb=args.simulate_vram_gb)
         return 0
     except KeyboardInterrupt:
         return 0
     except Exception as error:
-        print(f"\n[Launcher] ERROR: {error}", file=sys.stderr)
+        say(f"\nERROR: {error}", file=sys.stderr)
         return 1
     finally:
         cleanup()

@@ -53,7 +53,7 @@ EXIT_CODE=$?
 if [[ $EXIT_CODE -ne 0 ]]; then
     echo
     echo "Amadeus launcher exited with an error."
-    echo "Check .runtime/logs for service logs."
+    echo "The details are in the logs folder: $PROJECT_ROOT/logs"
     read "?Press Enter to close..."
 fi
 

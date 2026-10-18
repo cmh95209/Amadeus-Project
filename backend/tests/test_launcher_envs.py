@@ -131,7 +131,7 @@ class EnvSuffixTests(unittest.TestCase):
         good = self.tmp / "py313" / "python.exe"
         calls = []
         with patch.object(self.launcher, "_cm_base_python", return_value=good), \
-             patch.object(self.launcher.subprocess, "run", side_effect=lambda cmd, **k: calls.append(cmd)), \
+             patch.object(self.launcher, "run_tool", side_effect=lambda label, cmd, **k: calls.append(cmd) or 0), \
              patch.object(self.launcher, "_pip_install_sidecar", return_value=True):
             self.assertTrue(self.launcher.ensure_cm_sidecar())
         self.assertEqual(calls[0][:3], [str(good), "-m", "venv"])   # rebuilt from the right Python
@@ -144,7 +144,7 @@ class EnvSuffixTests(unittest.TestCase):
         self.launcher.CM_DIR = sc
         with patch.object(self.launcher, "_cm_base_python", return_value=None), \
              patch.object(self.launcher.sys, "version_info", (3, 10, 22)), \
-             patch.object(self.launcher.subprocess, "run") as run:
+             patch.object(self.launcher, "run_tool") as run:
             self.assertFalse(self.launcher.ensure_cm_sidecar())
             run.assert_not_called()
         self.assertFalse((sc / "venv").exists())

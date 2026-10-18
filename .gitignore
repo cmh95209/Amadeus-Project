@@ -86,6 +86,8 @@ Thumbs.db
 # =====================
 UsefulInfo/
 .runtime/
+# The launcher's and services' logs (scripts/launcher.py)
+/logs/
 # Manual .bak_* snapshots made while editing (never commit these)
 *.bak_*
 ```

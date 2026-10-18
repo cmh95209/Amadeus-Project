@@ -58,16 +58,19 @@ the right order and waits for each service:
 10. Opens Amadeus automatically in the default browser.
 11. Shuts down launcher-owned processes when the launcher exits.
 
-Runtime logs are written locally to:
+The launcher window shows a few status lines; every detail is in the
+`logs` folder inside the project folder (a normal, visible folder - send it
+when asking for help):
 
 ```text
-.runtime/logs/
+logs/
 ```
 
-(voice: `gptsovits.log`, backend: `backend.log`, sidecar: `cm-sidecar.log`,
-frontend: `frontend.log`)
+(launcher: `launcher.log`, voice: `gptsovits.log`, backend: `backend.log`,
+sidecar: `cm-sidecar.log` and its one-time setup `memory-setup.log`,
+frontend: `frontend.log`, built-in model: `llm.log`)
 
-The `.runtime/` directory is ignored by Git.
+The `logs/` and `.runtime/` folders are ignored by Git.
 
 ### macOS
 
