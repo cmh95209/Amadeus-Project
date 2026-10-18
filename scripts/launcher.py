@@ -249,10 +249,6 @@ def llama_server_command(cfg: dict) -> list[str]:
     if cfg.get("kv_cache") == "q8_0":
         # A compressed conversation memory needs flash attention on.
         cmd += ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
-    drafter = str(cfg.get("drafter_file") or "")
-    if cfg.get("use_drafter") and cfg.get("drafter_ok") and Path(drafter).is_file():
-        # Gemma 4's own speed-up drafter (Unsloth's recommended settings).
-        cmd += ["-md", drafter, "--spec-type", "draft-mtp", "--spec-draft-n-max", "4"]
     return cmd
 
 
@@ -275,10 +271,10 @@ def apply_simulated_vram(cfg: dict, vram_gb: int) -> dict | None:
         "model": choice["model"], "model_label": model["label"], "tier": choice["tier"],
         "context": choice["context"], "kv_cache": choice["kv_cache"],
         "voice_device": choice["voice_device"],
+        "history_default": choice["history_default"],
+        "vram_need_gb": choice["vram_need_gb"],
         "model_file": str(models_dir / model["file"]),
         "model_ok": (models_dir / model["file"]).is_file(),
-        "drafter_file": str(models_dir / model["drafter"]["file"]),
-        "drafter_ok": (models_dir / model["drafter"]["file"]).is_file(),
         "simulated": True,
     })
     return out

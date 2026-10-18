@@ -62,17 +62,18 @@ class ScreenTests(unittest.TestCase):
         out = self.screens(["A", "Y"], "-SimulateVramGB", "12", "-SimulateRamGB", "32")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         c = self.choice()
-        self.assertEqual((c["mode"], c["model"], c["tier"]), ("builtin", "12B", "8-15"))
+        self.assertEqual((c["mode"], c["model"], c["tier"]), ("builtin", "12B", "12-15"))
         s = self.settings()
         self.assertEqual(s["mode"], "builtin")
         self.assertEqual((s["context"], s["kv_cache"], s["voice_device"], s["port"]),
-                         (16384, "q8_0", "cpu", 8091))
+                         (24576, "q8_0", "cpu", 8091))
+        self.assertEqual((s["history_default"], s["vram_need_gb"]), (14000, 8.0))
         # Screens-only mode downloads nothing, so the model is recorded missing.
         self.assertFalse(s["model_ok"])
         self.assertFalse(s["server_ok"])
         self.assertTrue(s["model_file"].endswith("gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"))
         self.assertTrue(s["simulated"])
-        self.assertFalse(s["use_drafter"])
+        self.assertNotIn("drafter_file", s)
         # The model lives next to the project folder, never inside it.
         self.assertEqual(Path(s["model_file"]).parent, self.dir / "models")
 
@@ -84,6 +85,19 @@ class ScreenTests(unittest.TestCase):
         out = self.screens(["N", "B"])
         self.assertEqual(self.choice()["mode"], "custom")
         self.assertEqual(self.settings()["mode"], "custom")
+
+    def test_kept_choice_takes_the_new_tier_settings(self):
+        # A choice saved by an older tier table (here: the old 16K context)
+        # is refreshed for the same model when the user keeps it.
+        self.screens(["A", "Y"], "-SimulateVramGB", "12", "-SimulateRamGB", "32")
+        c = self.choice()
+        c["context"] = 16384
+        c["tier"] = "8-15"
+        (self.dir / "models" / "local_llm_choice.json").write_text(json.dumps(c), encoding="utf-8")
+        out = self.screens(["Y"], "-SimulateVramGB", "12", "-SimulateRamGB", "32")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((self.choice()["tier"], self.choice()["context"]), ("12-15", 24576))
+        self.assertEqual(self.settings()["context"], 24576)
 
     def test_option_b_writes_no_settings(self):
         out = self.screens(["B"])

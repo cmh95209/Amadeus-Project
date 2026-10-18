@@ -57,28 +57,49 @@ class TableDecisionTests(unittest.TestCase):
         return next(t for t in TABLE["tiers"] if t["id"] == tier_id)
 
     def test_one_model_per_tier(self):
-        expected = {"under-8": "E4B", "8-15": "12B", "16-23": "12B",
-                    "24-31": "26B-A4B", "32-plus": "31B"}
+        # 2026-10-18: the 31B was too heavy even on 32 GB cards (~31 GB
+        # at peak) -> 26B-A4B there; 24-31 GB cards run the 12B with a
+        # longer conversation instead.
+        expected = {"under-8": "E4B", "8-11": "12B", "12-15": "12B", "16-23": "12B",
+                    "24-31": "12B", "32-plus": "26B-A4B"}
         self.assertEqual({t["id"]: t["model"] for t in TABLE["tiers"]}, expected)
-        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [2, 8, 16, 24, 32])
+        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [2, 8, 12, 16, 24, 32])
 
-    def test_below_16_gb_share_one_setup_voice_on_processor(self):
-        for tier_id in ("under-8", "8-15"):
-            t = self.tier(tier_id)
-            self.assertEqual((t["context"], t["kv_cache"], t["voice_device"]),
-                             (16384, "q8_0", "cpu"))
+    def test_tier_settings(self):
+        expected = {   # context, kv cache, voice, conversation memory default
+            "under-8": (16384, "q8_0", "cpu", 6000),
+            "8-11": (16384, "q8_0", "cpu", 6000),
+            "12-15": (24576, "q8_0", "cpu", 14000),
+            "16-23": (32768, "f16", "cuda", 22000),
+            "24-31": (49152, "f16", "cuda", 32000),
+            "32-plus": (49152, "f16", "cuda", 32000),
+        }
+        for tier_id, settings in expected.items():
+            with self.subTest(tier=tier_id):
+                t = self.tier(tier_id)
+                self.assertEqual((t["context"], t["kv_cache"], t["voice_device"],
+                                  t["history_default"]), settings)
 
-    def test_16_gb_and_up_voice_on_card(self):
-        for tier_id in ("16-23", "24-31", "32-plus"):
-            t = self.tier(tier_id)
-            self.assertEqual((t["context"], t["kv_cache"], t["voice_device"]),
-                             (32768, "f16", "cuda"))
+    def test_conversation_default_fits_the_context(self):
+        # The context holds the conversation + ~6,000 (her character) +
+        # 4,096 (her reply) - backend/builtin_llm.py's cap.
+        for t in TABLE["tiers"]:
+            with self.subTest(tier=t["id"]):
+                self.assertLessEqual(t["history_default"] + 6000 + 4096, t["context"])
+
+    def test_graphics_memory_estimates(self):
+        needs = [t["vram_need_gb"] for t in TABLE["tiers"]]
+        self.assertEqual(needs, sorted(needs))
+        for t in TABLE["tiers"]:
+            if t["id"] != "under-8":
+                with self.subTest(tier=t["id"]):
+                    self.assertLessEqual(t["vram_need_gb"], t["min_vram_gb"])
 
     def test_only_the_smallest_tier_warns(self):
         self.assertEqual([t["id"] for t in TABLE["tiers"] if t["warning"]], ["under-8"])
 
     def test_official_unsloth_qat_files_only(self):
-        self.assertEqual(set(TABLE["models"]), {"E4B", "12B", "26B-A4B", "31B"})
+        self.assertEqual(set(TABLE["models"]), {"E4B", "12B", "26B-A4B"})
         for key, model in TABLE["models"].items():
             with self.subTest(model=key):
                 self.assertTrue(model["repo"].startswith("unsloth/gemma-4-"))
@@ -87,8 +108,9 @@ class TableDecisionTests(unittest.TestCase):
                 self.assertGreater(model["bytes"], 0)
                 self.assertRegex(model["sha256"], r"^[0-9a-f]{64}$")
                 self.assertRegex(model["revision"], r"^[0-9a-f]{40}$")
-                self.assertRegex(model["drafter"]["sha256"], r"^[0-9a-f]{64}$")
-                self.assertTrue(model["drafter"]["file"].startswith("mtp-gemma-4-"))
+                # The speed-up (MTP drafter) files were downloaded but never
+                # used (2026-10-18) - no longer part of the table.
+                self.assertNotIn("drafter", model)
 
     def test_memory_rule(self):
         self.assertEqual(TABLE["voice_on_cpu_min_ram_gb"], 16)
@@ -115,13 +137,13 @@ GRID = [
     ("nvidia", 8, 8, (False, "low_ram")),
     ("nvidia", 12, 32, (True, "12B", "cpu", "cuda-13.4", False)),
     ("nvidia", 16, 8, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 24, 32, (True, "26B-A4B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 32, 32, (True, "31B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 48, 64, (True, "31B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 24, 32, (True, "12B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 32, 32, (True, "26B-A4B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 48, 64, (True, "26B-A4B", "cuda", "cuda-13.4", False)),
     ("amd", 16, 8, (False, "low_ram")),
-    ("amd", 24, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
+    ("amd", 32, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
     ("intel", 12, 16, (True, "12B", "cpu", "vulkan", False)),
-    ("nvidia-unverified", 24, 32, (True, "26B-A4B", "cpu", "vulkan", False)),
+    ("nvidia-unverified", 24, 32, (True, "12B", "cpu", "vulkan", False)),
     ("nvidia", 8, -1, (True, "12B", "cpu", "cuda-13.4", False)),   # memory unknown
 ]
 
@@ -140,7 +162,8 @@ class PythonRuleTests(unittest.TestCase):
 
     def test_offered_choice_carries_tier_settings(self):
         c = tiers.choose(TABLE, "nvidia", 32, 32, "610.88")
-        self.assertEqual((c["tier"], c["context"], c["kv_cache"]), ("32-plus", 32768, "f16"))
+        self.assertEqual((c["tier"], c["context"], c["kv_cache"], c["history_default"], c["vram_need_gb"]),
+                         ("32-plus", 49152, "f16", 32000, 19.5))
 
 
 class BuildTests(unittest.TestCase):
@@ -166,10 +189,10 @@ class BuildTests(unittest.TestCase):
                     self.assertGreater(f["bytes"], 0)
 
     def test_download_size_counts_everything(self):
-        m = TABLE["models"]["31B"]
+        m = TABLE["models"]["26B-A4B"]
         files = TABLE["llama_cpp"]["builds"]["cuda-13.4"]["files"]
-        self.assertEqual(tiers.download_bytes(TABLE, "31B", "cuda-13.4"),
-                         m["bytes"] + m["drafter"]["bytes"] + sum(f["bytes"] for f in files))
+        self.assertEqual(tiers.download_bytes(TABLE, "26B-A4B", "cuda-13.4"),
+                         m["bytes"] + sum(f["bytes"] for f in files))
 
 
 _POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
@@ -202,6 +225,8 @@ class PowerShellAgreesTests(unittest.TestCase):
                     self.assertEqual(hw["choice"]["tier"], expected["tier"])
                     self.assertEqual(hw["choice"]["context"], expected["context"])
                     self.assertEqual(hw["choice"]["kv_cache"], expected["kv_cache"])
+                    self.assertEqual(hw["choice"]["history_default"], expected["history_default"])
+                    self.assertEqual(hw["choice"]["vram_need_gb"], expected["vram_need_gb"])
                     self.assertEqual(hw["model"], TABLE["models"][expected["model"]])
 
 

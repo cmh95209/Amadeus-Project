@@ -537,8 +537,8 @@ function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
 # >>> TIER TABLE (copy of scripts/local_llm_tiers.json)
 $TierTableJson = @'
 {
-  "version": 2,
-  "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical.",
+  "version": 3,
+  "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card) - an estimate, used by the launcher's free-memory check.",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
   "disk_headroom_gb": 2,
@@ -549,8 +549,7 @@ $TierTableJson = @'
       "revision": "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265",
       "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
       "bytes": 4215695776,
-      "sha256": "df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3",
-      "drafter": {"file": "mtp-gemma-4-E4B-it.gguf", "bytes": 59678016, "sha256": "423074e537504b4f9ec5eafed5c639fac82c96631626efccacdd3c4039b20605"}
+      "sha256": "df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3"
     },
     "12B": {
       "label": "Gemma 4 12B (QAT)",
@@ -558,8 +557,7 @@ $TierTableJson = @'
       "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
       "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
       "bytes": 6716356800,
-      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
-      "drafter": {"file": "mtp-gemma-4-12B-it.gguf", "bytes": 253708800, "sha256": "fcb35dea42c71333db904cee11baac525c9ef872818ee3753f6cb156f3c6f4f6"}
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370"
     },
     "26B-A4B": {
       "label": "Gemma 4 26B-A4B (QAT)",
@@ -567,17 +565,7 @@ $TierTableJson = @'
       "revision": "7b92b5b28818151e8669af2e45e88d6086f490dd",
       "file": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
       "bytes": 14249047104,
-      "sha256": "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891",
-      "drafter": {"file": "mtp-gemma-4-26B-A4B-it.gguf", "bytes": 251939328, "sha256": "7272d97595f0d4c74bd7b623492b7dbdaafd8b7c72f329a8270ba4eca68f768a"}
-    },
-    "31B": {
-      "label": "Gemma 4 31B (QAT)",
-      "repo": "unsloth/gemma-4-31B-it-qat-GGUF",
-      "revision": "43cc1aeb31adf47ec06a854507ce552cd9862e6f",
-      "file": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
-      "bytes": 17287670048,
-      "sha256": "00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71",
-      "drafter": {"file": "mtp-gemma-4-31B-it.gguf", "bytes": 279955968, "sha256": "3a5e99fd8d0b23afb1fccd1ee0c9ebd1f571d00399c2dae2292d217feeec0f6b"}
+      "sha256": "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891"
     }
   },
   "llama_cpp": {
@@ -605,11 +593,12 @@ $TierTableJson = @'
     }
   },
   "tiers": [
-    {"id": "under-8",  "min_vram_gb": 2,  "model": "E4B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "warning": true},
-    {"id": "8-15",     "min_vram_gb": 8,  "model": "12B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "warning": false},
-    {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false},
-    {"id": "24-31",    "min_vram_gb": 24, "model": "26B-A4B", "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false},
-    {"id": "32-plus",  "min_vram_gb": 32, "model": "31B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "warning": false}
+    {"id": "under-8",  "min_vram_gb": 2,  "model": "E4B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 5.0,  "warning": true},
+    {"id": "8-11",     "min_vram_gb": 8,  "model": "12B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 7.5,  "warning": false},
+    {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 14000, "vram_need_gb": 8.0,  "warning": false},
+    {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 22000, "vram_need_gb": 10.5, "warning": false},
+    {"id": "24-31",    "min_vram_gb": 24, "model": "12B",     "context": 49152, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 32000, "vram_need_gb": 11.0, "warning": false},
+    {"id": "32-plus",  "min_vram_gb": 32, "model": "26B-A4B", "context": 49152, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 32000, "vram_need_gb": 19.5, "warning": false}
   ]
 }
 '@
@@ -716,10 +705,10 @@ function Select-LlamaBuild($vendor, $driver){
     return "vulkan"
 }
 
-# Everything option A downloads: model + drafter + llama.cpp files (bytes).
+# Everything option A downloads: model + llama.cpp files (bytes).
 function Get-LlmDownloadBytes($modelKey, $build){
     $m = $TierTable.models.$modelKey
-    $total = [double]$m.bytes + [double]$m.drafter.bytes
+    $total = [double]$m.bytes
     foreach ($f in $TierTable.llama_cpp.builds.$build.files) { $total += [double]$f.bytes }
     return $total
 }
@@ -739,6 +728,8 @@ function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = ""){
     return [pscustomobject]@{
         offered = $true; reason = ""; tier = $tier.id; model = $tier.model
         context = [int]$tier.context; kv_cache = $tier.kv_cache; voice_device = $voice
+        history_default = [int]$tier.history_default
+        vram_need_gb = [double]$tier.vram_need_gb
         warning = [bool]$tier.warning; build = (Select-LlamaBuild $vendor $driver)
     }
 }
@@ -854,7 +845,21 @@ function Confirm-LocalModel($hw){
     return [pscustomobject]@{
         mode = "builtin"; model = $c.model; tier = $c.tier; build = $c.build
         context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        history_default = $c.history_default; vram_need_gb = $c.vram_need_gb
         simulated = [bool]$hw.simulated; chosen = (Get-Date -Format s)
+    }
+}
+
+# A kept option-A choice takes this installer's settings for the same model
+# on this PC (context, memory, ...): a newer tier table can change them.
+function Update-KeptChoice($prev, $hw){
+    if ($prev.mode -ne "builtin" -or -not $hw.choice.offered -or $hw.choice.model -ne $prev.model) { return $prev }
+    $c = $hw.choice
+    return [pscustomobject]@{
+        mode = "builtin"; model = $c.model; tier = $c.tier; build = $c.build
+        context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        history_default = $c.history_default; vram_need_gb = $c.vram_need_gb
+        simulated = [bool]$hw.simulated; chosen = $prev.chosen
     }
 }
 
@@ -869,7 +874,11 @@ function Invoke-LlmChoice($hw){
             if ($prev.mode -eq "builtin") { $desc = "A) her built-in local model - " + $TierTable.models.($prev.model).label }
             else { $desc = "B) you connect a model yourself" }
             Log ("  Last time you chose: " + $desc)
-            if ((Read-Answer "Keep that choice? Type Y (yes) or N (choose again)" @("Y","N")) -eq "Y") { return $prev }
+            if ((Read-Answer "Keep that choice? Type Y (yes) or N (choose again)" @("Y","N")) -eq "Y") {
+                $kept = Update-KeptChoice $prev $hw
+                Write-Utf8File $LlmChoiceFile ($kept | ConvertTo-Json -Depth 4)
+                return $kept
+            }
         }
     }
     Log "  How should Amadeus think?" "Cyan"
@@ -1004,37 +1013,41 @@ function Get-HfUrl($m, $file){ return ("https://huggingface.co/" + $m.repo + "/r
 # even when a download failed (model_ok/server_ok false), so the app knows
 # the model is missing instead of silently falling back to something else.
 # Option B on an install that had A before: kept, but switched to "custom".
-function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $modelOk, $draftPath, $draftOk){
+# What the user changed in the app survives a re-run: the model file they
+# picked in Settings (selected_file, while it still exists) and their
+# conversation memory number for the built-in model (history_budget).
+function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $modelOk){
     $cfg = Join-Path $proj "backend\data\local_llm.json"
+    $old = $null
+    if (Test-Path $cfg) { try { $old = Get-Content $cfg -Raw | ConvertFrom-Json } catch {} }
     if ($choice.mode -ne "builtin") {
-        if (Test-Path $cfg) {
-            try { $old = Get-Content $cfg -Raw | ConvertFrom-Json; $old.mode = "custom"; Write-Utf8File $cfg ($old | ConvertTo-Json -Depth 4) } catch {}
-        }
+        if ($old) { try { $old.mode = "custom"; Write-Utf8File $cfg ($old | ConvertTo-Json -Depth 4) } catch {} }
         return
     }
     $m = $TierTable.models.($choice.model)
     $data = [ordered]@{
         mode = "builtin"; model = $choice.model; model_label = $m.label
         model_file = $modelPath; model_ok = [bool]$modelOk
-        drafter_file = $draftPath; drafter_ok = [bool]$draftOk; use_drafter = $false
         server_exe = $exe; server_ok = [bool]$serverOk
         llama_release = $TierTable.llama_cpp.release; build = $choice.build
         tier = $choice.tier; context = [int]$choice.context; kv_cache = $choice.kv_cache
         voice_device = $choice.voice_device; gpu_layers = 999; port = 8091
+        history_default = [int]$choice.history_default; vram_need_gb = [double]$choice.vram_need_gb
         simulated = [bool]$choice.simulated; written = (Get-Date -Format s); installer = $InstallerVersion
     }
+    if ($old -and $old.selected_file -and (Test-Path -LiteralPath ([string]$old.selected_file))) { $data.selected_file = [string]$old.selected_file }
+    if ($old -and $old.history_budget) { $data.history_budget = [int]$old.history_budget }
     Write-Utf8File $cfg ($data | ConvertTo-Json -Depth 4)
     Log ("  Built-in model settings saved: " + $cfg)
 }
 
-# The last install step for option A: helper program, model, drafter. A
+# The last install step for option A: helper program + model. A
 # failed download never stops the install - the summary says what to do.
 # Returns $true when everything she needs is in place.
 function Install-BuiltinLlm($proj, $choice){
     $m = $TierTable.models.($choice.model)
     $modelPath = Join-Path $ModelsDir $m.file
-    $draftPath = Join-Path $ModelsDir $m.drafter.file
-    $exe = ""; $serverOk = $false; $modelOk = $false; $draftOk = $false
+    $exe = ""; $serverOk = $false; $modelOk = $false
     if ($SkipLlmDownload) {
         Log "  (TEST: -SkipLlmDownload - nothing is downloaded; the settings file is written as 'missing'.)" "Magenta"
     } else {
@@ -1048,10 +1061,8 @@ function Install-BuiltinLlm($proj, $choice){
         }
         try { Get-VerifiedFile (Get-HfUrl $m $m.file) $modelPath $m.bytes $m.sha256 $m.label; $modelOk = $true }
         catch { Log ("  " + $_.Exception.Message) "Red" }
-        try { Get-VerifiedFile (Get-HfUrl $m $m.drafter.file) $draftPath $m.drafter.bytes $m.drafter.sha256 ($m.label + " speed-up file"); $draftOk = $true }
-        catch { Log ("  (optional) " + $_.Exception.Message) "Yellow" }
     }
-    Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk $draftPath $draftOk
+    Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk
     return ($serverOk -and $modelOk)
 }
 

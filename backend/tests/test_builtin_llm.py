@@ -47,9 +47,8 @@ def _config(base: Path, **over) -> dict:
     cfg = {
         "mode": "builtin", "model": "12B", "model_label": "Gemma 4 12B (QAT)",
         "model_file": str(model), "model_ok": True,
-        "drafter_file": str(models / "mtp-gemma-4-12B-it.gguf"), "drafter_ok": False,
-        "use_drafter": False, "server_exe": str(exe), "server_ok": True,
-        "llama_release": "b11400", "build": "cuda-13.4", "tier": "8-15",
+        "server_exe": str(exe), "server_ok": True,
+        "llama_release": "b11400", "build": "cuda-13.4", "tier": "8-11",
         "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",
         "gpu_layers": 999, "port": 8091, "simulated": False,
     }
@@ -289,15 +288,11 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("-ctk", cmd)
         self.assertNotIn("-fa", cmd)
 
-    def test_drafter_only_when_switched_on_and_present(self):
-        cfg = _config(self.tmp, use_drafter=True)
-        self.assertNotIn("-md", self.launcher.llama_server_command(cfg))   # not downloaded
+    def test_no_speed_up_drafter(self):
+        # Never used (2026-10-18), so never passed - even from an old settings file.
+        cfg = _config(self.tmp, use_drafter=True, drafter_ok=True,
+                      drafter_file=str(self.tmp / "mtp-gemma-4-12B-it.gguf"))
         Path(cfg["drafter_file"]).write_bytes(b"")
-        cfg["drafter_ok"] = True
-        cmd = self.launcher.llama_server_command(cfg)
-        self.assertIn("-md", cmd)
-        self.assertIn("draft-mtp", cmd)
-        cfg["use_drafter"] = False
         self.assertNotIn("-md", self.launcher.llama_server_command(cfg))
 
     def test_files_ready(self):
@@ -318,11 +313,11 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.launcher.builtin_model_name(cfg), builtin_llm.model_name(cfg))
 
     def test_pretend_vram_uses_that_tiers_settings(self):
-        cfg = _config(self.tmp, model="31B", tier="32-plus", context=32768,
+        cfg = _config(self.tmp, model="26B-A4B", tier="32-plus", context=49152,
                       kv_cache="f16", voice_device="cuda")
         sim = self.launcher.apply_simulated_vram(cfg, 12)
         self.assertEqual((sim["model"], sim["tier"], sim["context"], sim["kv_cache"],
-                          sim["voice_device"]), ("12B", "8-15", 16384, "q8_0", "cpu"))
+                          sim["voice_device"]), ("12B", "12-15", 24576, "q8_0", "cpu"))
         self.assertTrue(sim["model_ok"])   # the 12B file exists in this models folder
         self.assertTrue(sim["simulated"])
         sim = self.launcher.apply_simulated_vram(cfg, 6)

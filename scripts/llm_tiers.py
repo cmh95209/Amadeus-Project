@@ -46,10 +46,10 @@ def pick_build(table: dict, vendor: str | None, driver: str = "") -> str:
 
 
 def download_bytes(table: dict, model_key: str, build: str) -> int:
-    """Everything option A downloads: model + drafter + llama.cpp files."""
+    """Everything option A downloads: model + llama.cpp files."""
     model = table["models"][model_key]
     files = table["llama_cpp"]["builds"][build]["files"]
-    return model["bytes"] + model["drafter"]["bytes"] + sum(f["bytes"] for f in files)
+    return model["bytes"] + sum(f["bytes"] for f in files)
 
 
 def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
@@ -63,7 +63,8 @@ def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
     (then the memory rule is not applied).
     driver: the NVIDIA driver version nvidia-smi reported ("610.88").
     Returns {"offered": bool, "reason": str, and when offered: tier, model,
-    context, kv_cache, voice_device, warning, build}.
+    context, kv_cache, voice_device, history_default, vram_need_gb, warning,
+    build}.
     """
     if not vendor or vram_gb < table["dedicated_card_min_gb"]:
         return {"offered": False, "reason": "no_card"}
@@ -84,6 +85,8 @@ def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
         "context": tier["context"],
         "kv_cache": tier["kv_cache"],
         "voice_device": voice,
+        "history_default": int(tier["history_default"]),
+        "vram_need_gb": float(tier["vram_need_gb"]),
         "warning": bool(tier["warning"]),
         "build": pick_build(table, vendor, driver),
     }
