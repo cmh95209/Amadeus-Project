@@ -161,6 +161,46 @@ class ConsoleTests(unittest.TestCase):
             ensure.assert_called_once_with(base_python=None, passthrough=True)
 
 
+class AppWindowTests(unittest.TestCase):
+    """Her own app window (2026-10-18): a Chromium browser with --app and its
+    own profile, so the autoplay flag applies even with Chrome already open."""
+
+    def setUp(self):
+        self.launcher = _load_launcher()
+        self.tmp = Path(tempfile.mkdtemp(prefix="amadeus_appwin_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.launcher.APP_PROFILE_DIR = self.tmp / "app-window"
+        self.launcher.open_launcher_log = lambda: None
+
+    def test_flags(self):
+        args = self.launcher.app_window_args("http://127.0.0.1:5173/")
+        self.assertIn("--app=http://127.0.0.1:5173/", args)
+        self.assertIn(f"--user-data-dir={self.tmp / 'app-window'}", args)
+        self.assertIn("--autoplay-policy=no-user-gesture-required", args)
+        self.assertTrue((self.tmp / "app-window").is_dir())
+        self.assertIn(".runtime", _load_launcher().APP_PROFILE_DIR.parts)
+
+    @unittest.skipUnless(os.name == "nt", "Windows browser lookup")
+    def test_windows_picks_chromium_then_edge(self):
+        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        firefox = r"C:\Program Files\Mozilla Firefox\firefox.exe"
+        for default, edge_found, expected in ((chrome, edge, chrome), (firefox, edge, edge),
+                                              (firefox, None, None), (None, edge, edge)):
+            with self.subTest(default=default, edge=edge_found), \
+                    patch.object(self.launcher, "_windows_default_browser_exe", return_value=default), \
+                    patch.object(self.launcher, "_windows_edge_exe", return_value=edge_found), \
+                    patch.object(self.launcher.subprocess, "Popen") as popen:
+                opened = self.launcher._open_browser_windows("http://127.0.0.1:5173/")
+                self.assertEqual(opened, expected is not None)
+                if expected:
+                    cmd = popen.call_args[0][0]
+                    self.assertEqual(cmd[0], expected)
+                    self.assertIn("--app=http://127.0.0.1:5173/", cmd)
+                else:
+                    popen.assert_not_called()   # -> plain webbrowser.open()
+
+
 class InstallerMemoryStepTests(unittest.TestCase):
     def test_windows_installer_runs_the_launchers_setup(self):
         text = (_ROOT / "scripts" / "install_windows.ps1").read_text(encoding="utf-8")

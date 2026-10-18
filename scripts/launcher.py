@@ -828,10 +828,19 @@ def preflight(conda: str, npm: str) -> None:
         note(f"  Envs    : this install's own (suffix '{env_suffix()}')")
 
 
-# Browsers that accept Chromium's autoplay flag (matched on the executable's
-# base name, so it works no matter where the user installed the browser).
+# Browsers that accept Chromium's flags (matched on the executable's base
+# name, so it works no matter where the user installed the browser).
 _CHROMIUM_EXE_HINTS = ("chrome", "msedge", "edge", "brave", "chromium",
                        "vivaldi")
+
+# Amadeus opens in her OWN app window: a Chromium browser started with
+# --app (no tabs or address bar) and its own profile folder. The profile
+# makes it a separate browser instance, so the autoplay flag always
+# applies and her first line can speak at once - with the user's normal
+# profile, an already-open Chrome ignored the flag and her voice waited
+# for a click (2026-10-17 / 2026-10-18 test installs). Her UI settings
+# live in this profile (the user's normal browser profile is untouched).
+APP_PROFILE_DIR = RUNTIME_DIR / "app-window"
 
 
 def _is_chromium(exe: str) -> bool:
@@ -839,52 +848,93 @@ def _is_chromium(exe: str) -> bool:
     return any(hint in base for hint in _CHROMIUM_EXE_HINTS)
 
 
-def _open_browser_windows(url: str) -> bool:
-    """Open the URL in the user's DEFAULT browser (Windows' own registry
-    records - the exact exe the browser registered at install time, so no
-    path guessing), adding Chromium's autoplay flag for Chromium-family
-    browsers. Returns False to let the caller fall back."""
+def app_window_args(url: str) -> list[str]:
+    """The Chromium flags for her own app window."""
+    APP_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    return [
+        f"--app={url}",
+        f"--user-data-dir={APP_PROFILE_DIR}",
+        "--autoplay-policy=no-user-gesture-required",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1280,860",
+    ]
+
+
+def _windows_default_browser_exe() -> str | None:
+    """The default browser's program, from Windows' own records (the exe the
+    browser registered at install time - no path guessing)."""
+    import re as _re
     import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                        r"SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice") as k:
+        prog_id, _ = winreg.QueryValueEx(k, "ProgId")
+    command = None
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_CLASSES_ROOT):
+        try:
+            with winreg.OpenKey(root, prog_id + r"\shell\open\command") as k:
+                command, _ = winreg.QueryValueEx(k, None)
+            break
+        except OSError:
+            continue
+    if not command:
+        return None
+    # e.g. "C:\Program Files\...\chrome.exe" --single-argument %1 - the exe
+    # is the leading token and may be quoted (paths with spaces).
+    m = _re.match(r'^"([^"]+)"', command)
+    exe = m.group(1) if m else (command.split()[0] if command.split() else "")
+    return exe if exe and Path(exe).is_file() else None
+
+
+def _windows_edge_exe() -> str | None:
+    """Microsoft Edge (part of every Windows 10/11), from its App Paths entry."""
+    import winreg
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe") as k:
+                exe, _ = winreg.QueryValueEx(k, None)
+            if exe and Path(exe).is_file():
+                return exe
+        except OSError:
+            continue
+    return None
+
+
+def _open_browser_windows(url: str) -> bool:
+    """Her app window in the default browser when it is Chromium-based
+    (Chrome, Edge, Brave, ...), else in Edge; a plain browser tab only
+    when neither works. Returns False to let the caller fall back."""
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice") as k:
-            prog_id, _ = winreg.QueryValueEx(k, "ProgId")
-        command = None
-        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_CLASSES_ROOT):
-            try:
-                with winreg.OpenKey(root, prog_id + r"\shell\open\command") as k:
-                    command, _ = winreg.QueryValueEx(k, None)
-                break
-            except OSError:
-                continue
-        if not command:
-            return False
-        # The command is the launch string the browser registered itself
-        # with, e.g.: "C:\Program Files\...\chrome.exe" --single-argument %1
-        # The exe path is the leading token and may be quoted (paths with
-        # spaces), so pull it out of the leading quoted string when present.
-        import re as _re
-        _m = _re.match(r'^"([^"]+)"', command)
-        exe = _m.group(1) if _m else (command.split()[0] if command.split() else "")
-        if not exe or not Path(exe).is_file():
-            return False
-        if _is_chromium(exe):
-            args = [exe, "--autoplay-policy=no-user-gesture-required", url]
-        else:
-            args = [exe, url]
-        subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-        note(f"Opening WebUI with the default browser ({Path(exe).name}).")
-        return True
+        exe = _windows_default_browser_exe()
     except Exception as exc:
-        note(f"Could not resolve the default browser ({exc}); "
-             "falling back to webbrowser.open().")
+        note(f"Could not read the default browser ({exc}).")
+        exe = None
+    if not exe or not _is_chromium(exe):
+        try:
+            edge = _windows_edge_exe()
+        except Exception:
+            edge = None
+        if edge:
+            note(f"Default browser {Path(exe).name if exe else '(unknown)'} cannot make an "
+                 "app window - using Microsoft Edge.")
+            exe = edge
+    if not exe or not _is_chromium(exe):
         return False
+    try:
+        subprocess.Popen([exe, *app_window_args(url)],
+                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    except OSError as exc:
+        note(f"Could not open her app window ({exc}).")
+        return False
+    note(f"Opening her app window with {Path(exe).name}.")
+    return True
 
 
 def _open_browser_macos(url: str) -> bool:
-    """macOS: ask Launch Services (via plutil + JSON) for the default https
-    handler, then `open -a` that app with the Chromium autoplay flag. The
-    app is resolved by Launch Services by name - no path guessing."""
+    """macOS: her app window in the default browser when it is a known
+    Chromium app (asked from Launch Services via plutil + JSON), else in
+    Google Chrome / Microsoft Edge when installed; else the default
+    browser plainly. `open -na` = a new instance, so the flags apply."""
     import json
     bundle_to_app = {
         "com.google.Chrome": "Google Chrome",
@@ -893,28 +943,26 @@ def _open_browser_macos(url: str) -> bool:
         "org.chromium.Chromium": "Chromium",
     }
     try:
+        app = None
         plist = (Path.home() /
                  "Library/Preferences/com.apple.LaunchServices/"
                  "com.apple.launchservices.secure.plist")
-        if not plist.is_file():
-            return False
-        out = subprocess.run(["plutil", "-convert", "json", "-o", "-", str(plist)],
-                             capture_output=True, text=True, timeout=15).stdout
-        bundle = None
-        for entry in json.loads(out).get("LSHandlers", []):
-            if entry.get("LSHandlerPreferredFamily") == "https":
-                bundle = entry.get("LSHandlerRoleAll")
-                break
-        if not bundle or bundle not in bundle_to_app:
-            # Default browser is not a known Chromium app - open plainly
-            # (the in-app one-time gesture unlock covers audio there).
+        if plist.is_file():
+            out = subprocess.run(["plutil", "-convert", "json", "-o", "-", str(plist)],
+                                 capture_output=True, text=True, timeout=15).stdout
+            for entry in json.loads(out).get("LSHandlers", []):
+                if entry.get("LSHandlerPreferredFamily") == "https":
+                    app = bundle_to_app.get(entry.get("LSHandlerRoleAll"))
+                    break
+        if app is None:
+            app = next((name for name in ("Google Chrome", "Microsoft Edge", "Brave Browser")
+                        if Path(f"/Applications/{name}.app").exists()), None)
+        if app is None:
             subprocess.Popen(["open", url])
-            note("Default browser is not Chromium; opening plainly.")
+            note("No Chromium browser found; opening the default browser plainly.")
             return True
-        app = bundle_to_app[bundle]
-        subprocess.Popen(["open", "-a", app, "--args",
-                          "--autoplay-policy=no-user-gesture-required", url])
-        note(f"Opening WebUI with the default browser ({app}).")
+        subprocess.Popen(["open", "-na", app, "--args", *app_window_args(url)])
+        note(f"Opening her app window with {app}.")
         return True
     except Exception as exc:
         note(f"Could not resolve the default browser ({exc}); "
@@ -924,8 +972,7 @@ def _open_browser_macos(url: str) -> bool:
 
 def _open_browser_linux(url: str) -> bool:
     """Linux: xdg-settings reports the default browser's .desktop file;
-    parse its Exec= line and add the Chromium autoplay flag for
-    Chromium-family browsers."""
+    parse its Exec= line and open her app window when it is Chromium-based."""
     try:
         desktop_name = subprocess.run(
             ["xdg-settings", "get", "default-web-browser"],
@@ -951,10 +998,11 @@ def _open_browser_linux(url: str) -> bool:
         if not parts:
             return False
         if _is_chromium(parts[0]):
-            parts.append("--autoplay-policy=no-user-gesture-required")
-        parts.append(url)
+            parts = [parts[0], *app_window_args(url)]
+        else:
+            parts.append(url)
         subprocess.Popen(parts, start_new_session=True)
-        note(f"Opening WebUI with the default browser ({Path(parts[0]).name}).")
+        note(f"Opening the WebUI with {Path(parts[0]).name}.")
         return True
     except Exception as exc:
         note(f"Could not resolve the default browser ({exc}); "
@@ -963,11 +1011,10 @@ def _open_browser_linux(url: str) -> bool:
 
 
 def _open_browser(url: str) -> None:
-    """Open the WebUI in the user's DEFAULT browser, adding Chromium's
-    autoplay flag when possible so her startup greeting needs no user
-    gesture. Never guesses install paths: each OS resolves the default
-    browser through its own records. Any failure falls back to plain
-    webbrowser.open() - the app can never fail to open."""
+    """Open the WebUI in her own app window (see APP_PROFILE_DIR). Never
+    guesses install paths: each OS resolves the browser through its own
+    records. Any failure falls back to plain webbrowser.open() - the app
+    can never fail to open."""
     if sys.platform == "win32":
         if _open_browser_windows(url):
             return
