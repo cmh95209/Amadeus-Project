@@ -19,9 +19,14 @@
 #     conda, git, winget, npm), with their result codes - one file to send
 #     if something goes wrong. It is saved as UTF-8.
 #   - At the end it offers to start Amadeus right away.
-#   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is tested
-#     with. Its October 2026 update made her voice take minutes per line;
-#     an install that already got it is moved back on the next run.
+#
+#  WHAT'S NEW IN v4.12.1 (October 2026, app v2.1.1):
+#   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
+#     tested with. The installer used to take the voice engine's newest
+#     version, and its October 2026 update made her voice take minutes per
+#     line instead of seconds. An install that already got it is moved back
+#     to the tested version on the next run (Amadeus' own settings,
+#     conversations and the downloaded voice files stay).
 #
 #  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
 #   - Installs and updates the fork's main branch (it used to follow a

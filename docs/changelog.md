@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.1.1 — Her Voice Is Quick Again — October 2026
+
+**Voice fix for fresh installs.** The installers used to download the newest
+version of the voice engine (GPT-SoVITS). Its October 2026 update made her
+voice take minutes per line instead of seconds. Windows v4.12.1 / macOS v1.3.1
+now install the voice engine version Amadeus is tested with - and an install
+that already got the newer version is moved back automatically when the
+installer is re-run (Amadeus' own settings, conversations and the downloaded
+voice files stay).
+If her voice is slow, download the new installer and run it once more.
+
 ## v2.1 — Her Voice Speaks Your World in Japanese, About You — October 2026
 
 **A Japanese voice for everything she says.** Her voice engine used to switch
