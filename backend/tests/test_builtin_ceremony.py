@@ -49,8 +49,13 @@ class LineTests(_BuiltinApp):
         en, ja, spoken = self.ceremony.line("builtin_intro")
         self.assertIn("tell me your name", en)
         self.assertIn("press Save", en)
-        self.assertIn("牧瀬紅莉栖", ja)
-        self.assertIn("まきせくりす", spoken)
+        # Her creator's name in katakana, display and voice (2026-10-18).
+        self.assertIn("マキセ・クリス", ja)
+        self.assertIn("マキセ・クリス", spoken)
+        for kind in ("builtin_intro", "builtin_missing"):
+            for text in self.ceremony.line(kind)[1:]:
+                self.assertNotIn("牧瀬紅莉栖", text)
+                self.assertNotIn("まきせくりす", text)
         self.assertIn("エーアイ", spoken)
         self.assertIn("ピーシー", spoken)
         self.assertNotIn("PC", spoken)

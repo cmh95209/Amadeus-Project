@@ -43,6 +43,9 @@ export function ModelPicker({ options, value, onChange, allowCustom, disabled, e
   const [highlight, setHighlight] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  // Set while a pick from the list closes the box: the blur that follows
+  // must not save the half-typed search text over the picked model.
+  const picking = useRef(false);
   const listId = useId();
 
   const matches = useMemo(() => filterModelOptions(options, query), [options, query]);
@@ -61,10 +64,12 @@ export function ModelPicker({ options, value, onChange, allowCustom, disabled, e
   }, [highlight, open]);
 
   function choose(next: string) {
+    picking.current = true;
     onChange(next);
     setOpen(false);
     setQuery("");
     inputRef.current?.blur();
+    picking.current = false;
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -110,8 +115,12 @@ export function ModelPicker({ options, value, onChange, allowCustom, disabled, e
           setOpen(true);
         }}
         onBlur={() => {
-          // A typed name the list does not have still counts (custom servers).
-          if (allowCustom && query.trim() && query.trim() !== value) onChange(query.trim());
+          // A typed name the list does not have still counts (custom
+          // servers) - but only when the user left the box, not when a
+          // click on the list just picked a model.
+          if (!picking.current && allowCustom && query.trim() && query.trim() !== value) {
+            onChange(query.trim());
+          }
           setOpen(false);
           setQuery("");
         }}

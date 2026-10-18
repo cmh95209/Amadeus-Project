@@ -175,6 +175,20 @@ class DecideTableTests(_FreshAppTests):
         self.assertEqual(self.ceremony.decide("intro", False, False),
                          (None, "intro"))
 
+    def test_name_is_required(self):
+        # A ready model never skips the intro or wakes her without a name.
+        self.assertEqual(self.ceremony.decide("", True, True, name_set=False),
+                         ("intro", "intro"))
+        self.ceremony.note("intro", "intro")
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=False),
+                         (None, "intro"))
+        self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=False),
+                         (None, "connecting"))
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=True),
+                         ("wake", "intro"))
+        self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=True),
+                         ("wake", "connecting"))
+
     def test_first_launch_settings_present(self):
         # Settings saved before the first probe: skip the waiting story.
         self.assertEqual(self.ceremony.decide("", False, True),
@@ -255,19 +269,23 @@ class CeremonyLineTextsTests(_FreshAppTests):
     def test_intro_keeps_phonetic_split(self):
         en, ja_display, ja_voice = self.ceremony.line("intro")
         self.assertNotEqual(ja_display, ja_voice)
-        # Display: the user's original wording (kanji/hiragana names, the
-        # Latin acronyms as the user wrote them).
-        self.assertIn("牧瀬紅莉栖", ja_display)
+        # Display: the user's wording (2026-10-18), the Latin acronyms as
+        # written; her creator's name in KATAKANA in both texts (the voice
+        # engine misreads the kanji, and a replay re-voices the display).
+        self.assertIn("マキセ・クリス", ja_display)
+        self.assertIn("内蔵モデルやローカルモデル", ja_display)
         self.assertIn("LLMサーバー", ja_display)
         self.assertIn("APIキー", ja_display)
-        # Spoken: the v3 phonetics the user A/B-tested (full katakana for
-        # her name, kana for Kurisu, kana for AI / LLM / API).
+        self.assertIn("あなたの名前も必ず入力", ja_display)
+        # Spoken: kana for AI / LLM / API (the v3 phonetics the user A/B-tested).
         self.assertIn("アマデウス", ja_voice)
-        self.assertIn("まきせくりす", ja_voice)
+        self.assertIn("マキセ・クリス", ja_voice)
         self.assertIn("エーアイ", ja_voice)
         self.assertIn("エルエルエムサーバー", ja_voice)
         self.assertIn("エーピーアイキー", ja_voice)
-        self.assertNotIn("牧瀬紅莉栖", ja_voice)
+        for text in (ja_display, ja_voice):
+            self.assertNotIn("牧瀬紅莉栖", text)
+            self.assertNotIn("まきせくりす", text)
 
     def test_fixed_waiting_lines_are_pure_japanese(self):
         for kind in ("trying", "reminder", "fallback"):
@@ -279,9 +297,11 @@ class CeremonyLineTextsTests(_FreshAppTests):
             self.ceremony.line("intro")[0],
             "Hello, I am Amadeus. An AI built on the memories of Makise "
             "Kurisu. To make my thinking work, you first need to connect "
-            "my brain. Open the settings menu, and enter the LLM server "
-            "address and API key. Make sure the model is running. Oh, feel "
-            "free to write your name too, if you want. Until then, I'll be "
+            "my brain. Open the settings menu, and choose whether you want "
+            "to use a built-in or local model (if you have the GGUF model "
+            "file), or enter the LLM server address and API key. Make sure "
+            "the model is running. Also, I need to know who I'm talking to, "
+            "so please make sure to enter your name. Until then, I'll be "
             "right here, waiting. I don't go anywhere.")
         self.assertIn("Settings received", self.ceremony.line("trying")[0])
         self.assertIn("double-check", self.ceremony.line("reminder")[0])
@@ -383,6 +403,7 @@ class GreetRouteTests(_FreshAppTests):
         # is what gets minted for speech.
         self.memory.save_ceremony_state("connecting")
         self.chat.setKey("sk-test")  # a wake requires a key (see the key-gate test)
+        self.memory.save_username("Alex")   # ... and a name (2026-10-18)
         with self.model(True), self._canned_wake():
             res = self.greet()
         body = res.json
@@ -399,6 +420,7 @@ class GreetRouteTests(_FreshAppTests):
     def test_wake_failure_ships_fallback_and_still_ends(self):
         self.memory.save_ceremony_state("connecting")
         self.chat.setKey("sk-test")  # a wake requires a key (see the key-gate test)
+        self.memory.save_username("Alex")
         with self.model(True), patch.object(
                 self.api, "generate_greeting",
                 side_effect=RuntimeError("model rejected the call")):
@@ -413,8 +435,10 @@ class GreetRouteTests(_FreshAppTests):
         self.assertEqual(voice_text, self.ceremony.line("fallback")[2])
 
     def test_first_launch_model_already_running(self):
-        # The brain is on from the start: normal greeting, ceremony done.
+        # The brain is on from the start and she knows the name: normal
+        # greeting, ceremony done.
         self.chat.setKey("sk-test")
+        self.memory.save_username("Alex")
         pack = self.chat.AmadeusPack(
             assistant_reply_ENG="Welcome back.", assistant_reply_JPS="おかえり。")
         with self.model(True), patch.object(
@@ -474,12 +498,30 @@ class GreetRouteTests(_FreshAppTests):
         self.assertEqual(body["reason"], "API key not set yet")
         self.assertNotIn("kind", body)
         # The user adds a key value (keyless servers need one too - the
-        # app requires it even though the server ignores it): she wakes.
+        # app requires it even though the server ignores it) and a name:
+        # she wakes.
         self.chat.setKey("any-value")
+        self.memory.save_username("Alex")
         with self.model(True), \
              patch.object(self.chat, "LLM_Model", "qwen3.8-27b"), \
              self._canned_wake():
             res = self.greet()
+        self.assertEqual(res.json["kind"], "wake")
+        self.assertEqual(self.state(), "done")
+
+    def test_no_wake_without_a_name(self):
+        # 2026-10-18: the name is required on the DIY route too. A
+        # running model with a key but no name: the intro, then quiet - and
+        # the wake comes as soon as the name is saved.
+        self.chat.setKey("sk-test")
+        with self.model(True), self._canned_wake():
+            res = self.greet()
+            self.assertEqual(res.json["kind"], "intro")
+            res = self.greet(just_saved=True)
+            self.assertNotIn("kind", res.json)
+            self.assertNotEqual(self.state(), "done")
+            self.memory.save_username("Alex")
+            res = self.greet(just_saved=True)
         self.assertEqual(res.json["kind"], "wake")
         self.assertEqual(self.state(), "done")
 

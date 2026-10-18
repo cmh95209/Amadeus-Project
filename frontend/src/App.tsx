@@ -2196,15 +2196,15 @@ export default function App() {
                     setUserNameReading("");
                     setReadingNote("");
                   }}
-                  placeholder="what she should call you (optional)"
+                  placeholder="what she should call you"
                   autoComplete="off"
                   spellCheck={false}
                   aria-describedby="your-name-help"
                 />
               </label>
               <p className="settings-help" id="your-name-help">
-                Optional. If you give her a name, she calls you by it. Leave
-                blank to clear it.
+                Required: she needs to know who she is talking to, and she
+                calls you by this name. She waits for it on her first start.
               </p>
 
               <label>

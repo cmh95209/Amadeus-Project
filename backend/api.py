@@ -1244,7 +1244,8 @@ def greet():
         else:
             kind, new_state = ceremony.decide(
                 state, bool(ready["ready"]), _connection_settings_present(),
-                just_saved=just_saved)
+                just_saved=just_saved,
+                name_set=bool(memory.load_username().strip()))
         if kind in ceremony.FIXED_KINDS:
             return _serve_ceremony_line(kind, ready, new_state)
         if kind == "wake":

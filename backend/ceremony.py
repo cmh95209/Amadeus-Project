@@ -51,22 +51,29 @@ import memory as store
 # --- THE FOUR FIXED LINES ---------------------------------------------------
 # kind -> (EN display, JA display, JA spoken (phonetic, TTS-only))
 CEREMONY_LINES = {
+    # the approved wording, 2026-10-18: the DIY route (installer option B) can also
+    # pick the built-in model or a local GGUF, and the name is REQUIRED.
+    # Her creator's name is written in katakana, display AND voice: the
+    # voice engine misreads the kanji (a replay re-voices the display text).
     "intro": (
         "Hello, I am Amadeus. An AI built on the memories of Makise Kurisu. "
-        "To make my thinking work, you first need to connect my brain. "
-        "Open the settings menu, and enter the LLM server address and API "
-        "key. Make sure the model is running. Oh, feel free to write your "
-        "name too, if you want. Until then, I'll be right here, waiting. "
-        "I don't go anywhere.",
-        "こんにちは、私はアマデウス。牧瀬紅莉栖の記憶をもとに作られたAIよ。"
+        "To make my thinking work, you first need to connect my brain. Open "
+        "the settings menu, and choose whether you want to use a built-in or "
+        "local model (if you have the GGUF model file), or enter the LLM "
+        "server address and API key. Make sure the model is running. Also, I "
+        "need to know who I'm talking to, so please make sure to enter your "
+        "name. Until then, I'll be right here, waiting. I don't go anywhere.",
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたAIよ。"
         "私が考えられるようにするには、まず私の頭脳をつないでもらわないといけないの。\n"
-        "設定メニューを開いて、LLMサーバーのアドレスとAPIキーを入力して。"
-        "モデルが起動していることも確認してね。もし良かったら、あなたの名前も書いてくれていいですよ。\n"
+        "設定メニューを開いて、内蔵モデルやローカルモデルを使用するか、"
+        "LLMサーバーのアドレスとAPIキーを入力してね。モデルが起動していることも確認してね。"
+        "それと、誰と話してるのか知りたいから、あなたの名前も必ず入力してちょうだい。\n"
         "それまでは、ここで待ってるわ。どこにも行かないから。",
-        "こんにちは、私はアマデウス。まきせくりすの記憶をもとに作られたエーアイよ。"
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたエーアイよ。"
         "私が考えられるようにするには、まず私の頭脳をつないでもらわないといけないの。\n"
-        "設定メニューを開いて、エルエルエムサーバーのアドレスとエーピーアイキーを入力して。"
-        "モデルが起動していることも確認してね。もし良かったら、あなたの名前も書いてくれていいですよ。\n"
+        "設定メニューを開いて、内蔵モデルやローカルモデルを使用するか、"
+        "エルエルエムサーバーのアドレスとエーピーアイキーを入力してね。モデルが起動していることも確認してね。"
+        "それと、誰と話してるのか知りたいから、あなたの名前も必ず入力してちょうだい。\n"
         "それまでは、ここで待ってるわ。どこにも行かないから。",
     ),
     "trying": (
@@ -101,11 +108,11 @@ CEREMONY_LINES.update({
         "My mind runs right here on your PC, and it's waking up as we speak. "
         "While it does, open the settings menu and tell me your name - write "
         "it in, then press Save. Once I know who you are, we can talk.",
-        "こんにちは、私はアマデウス。牧瀬紅莉栖の記憶をもとに作られたAIよ。"
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたAIよ。"
         "私の頭脳はこのPCの中で動いていて、今まさに起動しているところ。\n"
         "その間に、設定メニューを開いて、あなたの名前を教えて。入力したら、保存を押してね。\n"
         "あなたが誰なのか分かったら、話しましょう。",
-        "こんにちは、私はアマデウス。まきせくりすの記憶をもとに作られたエーアイよ。"
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたエーアイよ。"
         "私の頭脳はこのピーシーの中で動いていて、今まさに起動しているところ。\n"
         "その間に、設定メニューを開いて、あなたの名前を教えて。入力したら、保存を押してね。\n"
         "あなたが誰なのか分かったら、話しましょう。",
@@ -121,12 +128,12 @@ CEREMONY_LINES.update({
         "finish. Run the installer again; it picks up where it stopped. Or, "
         "if you prefer, open the settings menu and connect a model of your "
         "own. Until then, I'll be right here, waiting.",
-        "こんにちは、私はアマデウス。牧瀬紅莉栖の記憶をもとに作られたAIよ。"
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたAIよ。"
         "でも、私の頭脳はまだこのPCに入っていないみたい。ダウンロードが終わらなかったの。\n"
         "インストーラーをもう一度実行して。止まったところから続けてくれるわ。"
         "それか、設定メニューを開いて、あなた自身のモデルをつないでもいいですよ。\n"
         "それまでは、ここで待ってるわ。",
-        "こんにちは、私はアマデウス。まきせくりすの記憶をもとに作られたエーアイよ。"
+        "こんにちは、私はアマデウス。マキセ・クリスの記憶をもとに作られたエーアイよ。"
         "でも、私の頭脳はまだこのピーシーに入っていないみたい。ダウンロードが終わらなかったの。\n"
         "インストーラーをもう一度実行して。止まったところから続けてくれるわ。"
         "それか、設定メニューを開いて、あなた自身のモデルをつないでもいいですよ。\n"
@@ -211,7 +218,8 @@ def reminder_due(now: Optional[float] = None) -> bool:
 
 def decide(state: str, model_ready: bool, settings_present: bool,
            just_saved: bool = False,
-           now: Optional[float] = None) -> Tuple[Optional[str], str]:
+           now: Optional[float] = None,
+           name_set: bool = True) -> Tuple[Optional[str], str]:
     """Pure ceremony decision for one /greet call.
 
     Args: the persisted state ('' / intro / connecting / done), whether the
@@ -226,6 +234,11 @@ def decide(state: str, model_ready: bool, settings_present: bool,
     "normal" means the model is already servable on a brand-new install:
     run the ordinary greeting and mark the ceremony done. State transitions
     are applied by the caller via note() AFTER the line actually ships.
+
+    name_set: the user's name is saved. REQUIRED since 2026-10-18:
+    she never wakes (and a running model never skips her introduction)
+    until she knows who she is talking to - the same rule as the built-in
+    route. Without a name she waits quietly after her intro.
     """
     tracker = _tracker()
 
@@ -233,7 +246,7 @@ def decide(state: str, model_ready: bool, settings_present: bool,
         return None, store.CEREMONY_DONE
 
     if state in ("", store.CEREMONY_INTRO):
-        if model_ready:
+        if model_ready and name_set:
             # Brand-new install whose brain is already running: skip the
             # waiting story entirely - normal greeting, ceremony done.
             # (state "intro" + ready = the brain came online while she was
@@ -241,6 +254,12 @@ def decide(state: str, model_ready: bool, settings_present: bool,
             if state == "":
                 return "normal", store.CEREMONY_DONE
             return "wake", store.CEREMONY_INTRO
+        if model_ready:
+            # Brain ready, name missing: introduce herself (once per
+            # launch), then wait for the name.
+            if not tracker.intro_delivered:
+                return "intro", store.CEREMONY_INTRO
+            return None, store.CEREMONY_INTRO
         if just_saved:
             # The user just saved connection settings: a fresh attempt.
             return "trying", store.CEREMONY_CONNECTING
@@ -251,8 +270,10 @@ def decide(state: str, model_ready: bool, settings_present: bool,
         return None, state
 
     # state == connecting
-    if model_ready:
+    if model_ready and name_set:
         return "wake", store.CEREMONY_CONNECTING
+    if model_ready:
+        return None, store.CEREMONY_CONNECTING   # the line works; waiting for the name
     if just_saved or not tracker.trying_delivered:
         # just_saved = the user re-saved settings (fresh attempt); otherwise
         # this is this launch's first "checking the line" line (a reopen).
