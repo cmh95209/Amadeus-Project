@@ -1,9 +1,17 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12.1  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.12.1 (October 2026, app v2.1.1):
+#   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
+#     tested with. The installer used to take the voice engine's newest
+#     version, and its October 2026 update made her voice take minutes per
+#     line instead of seconds. An install that already got it is moved back
+#     to the tested version on the next run (Amadeus' own settings,
+#     conversations and the downloaded voice files stay).
 #
 #  WHAT'S NEW IN v4.12 (October 2026, app v2.1):
 #   - Installs and updates the fork's main branch (it used to follow a
@@ -185,6 +193,11 @@ $LogPath    = Join-Path $InstallDir "install_log.txt"
 $ForkUrl       = "https://github.com/cmh95209/Amadeus-Project.git"
 $Branch        = "main"
 $LegacyBranch  = "feature/character-memory-spike"
+# The voice engine is PINNED to the version Amadeus is tested with (2026-08-18).
+# Its newest version (October 2026: "V5" + a CUDA-graph rework) made her voice
+# take minutes per line instead of seconds.
+$GptSovitsUrl    = "https://github.com/RVC-Boss/GPT-SoVITS.git"
+$GptSovitsCommit = "48b1a0169a28582a8984402f82cf438d3bfa6aca"
 
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
@@ -249,6 +262,28 @@ function Ensure-Clone($url, $dest, $branch, $markers){
     Log ("  Downloaded " + $leaf + ".") "Green"
 }
 
+# Put the voice engine copy on the tested version ($GptSovitsCommit) - a
+# fresh download AND an existing install made by an older installer (which
+# took whatever upstream had published that day). The switch discards the
+# copy's changed files: this project's voice patches (re-applied right after,
+# in Step 4) and the engine's own settings file, which goes back to the
+# tested original (a newer engine adds entries the tested one does not
+# know). Downloaded model files are not tracked by git and stay untouched.
+function Set-GptSovitsVersion($dest, $commit){
+    $head = (& git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($head -eq $commit) { Log "  Voice engine is on the tested version." "Green"; return }
+    Log ("  Switching the voice engine to the tested version (" + $commit.Substring(0, 7) + ")...") "Yellow"
+    & git -C $dest cat-file -e ($commit + "^{commit}") 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        & git -C $dest fetch origin $commit
+        if ($LASTEXITCODE -ne 0) { throw "Could not download the tested voice engine version. Check your internet connection, then run the installer again." }
+    }
+    & git -C $dest checkout --force --quiet $commit
+    $now = (& git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($now -ne $commit) { throw "Could not switch the voice engine to its tested version. Run the installer again, or send the log." }
+    Log ("  Voice engine switched to the tested version (was " + $(if ($head) { $head.Substring(0, [Math]::Min(7, $head.Length)) } else { "unknown" }) + ").") "Green"
+}
+
 # Create a conda environment only if it does not already exist (safe to re-run).
 function Ensure-Env($name, $py="3.10"){
     $names = & $conda env list | ForEach-Object { ($_ -split '\s+')[0] }
@@ -280,12 +315,12 @@ function Invoke-PipInEnv($name, $pipArgs){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12.1) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.12  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.12.1  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -428,7 +463,8 @@ try {
     # ---------- STEP 4: voice engine ----------
     Step 4 "Downloading the voice engine (GPT-SoVITS)"
     $gpt = Join-Path $proj "GPT-SoVITS"
-    Ensure-Clone "https://github.com/RVC-Boss/GPT-SoVITS.git" $gpt $null @("requirements.txt","extra-req.txt")
+    Ensure-Clone $GptSovitsUrl $gpt $null @("requirements.txt","extra-req.txt")
+    Set-GptSovitsVersion $gpt $GptSovitsCommit
     # Apply this project's voice patches to the GPT-SoVITS copy. The files
     # are committed in this project's repo and mirror the exact setup that is
     # proven in daily use: a prebuilt/optional Japanese text helper and pure

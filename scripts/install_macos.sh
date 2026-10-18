@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.3  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.3.1  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -39,6 +39,11 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.3.1 (October 2026, app v2.1.1):
+#   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
+#     tested with (its October 2026 update made her voice take minutes per
+#     line). An install that already got it is moved back on the next run.
 #
 #  WHAT'S NEW IN v1.3 (October 2026, app v2.1):
 #   - Installs and updates the fork's main branch (it used to follow a
@@ -239,7 +244,7 @@ clone_or_update() {
 #  BANNER
 # ----------------------------------------------------------------------------
 printf '%s%s%s\n' "$C_BOLD" "============================================================" "$C_RESET" | tee_to
-printf '%s AMADEUS INSTALLER for MAC OS  v1.3%s\n' "$C_BOLD" "$C_RESET" | tee_to
+printf '%s AMADEUS INSTALLER for MAC OS  v1.3.1%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s This installs everything Amadeus needs on this Mac:%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s\n' "   - the app (into: $INSTALL_DIR)" | tee_to
 printf '%s\n' "   - three Python toolboxes: the app, her memory, her voice" | tee_to
@@ -543,6 +548,26 @@ step 4 "Setting up the voice engine"
 
 GPT="$PROJ/GPT-SoVITS"
 clone_or_update "$GPT_REPO_URL" "$GPT" ""
+# Pin the voice engine to the version Amadeus is tested with (2026-08-18):
+# GPT-SoVITS's October 2026 update ("V5" + a CUDA-graph rework) made her
+# voice take minutes per line on Windows. Fresh downloads AND older installs
+# are put on it; the switch resets the copy's changed files (the voice
+# patches, re-applied right below, and the engine's own settings file, back
+# to the tested original). Downloaded model files are untracked and stay.
+GPT_SOVITS_COMMIT="48b1a0169a28582a8984402f82cf438d3bfa6aca"
+if [ "$(git -C "$GPT" rev-parse HEAD 2>/dev/null)" != "$GPT_SOVITS_COMMIT" ]; then
+    log "  Switching the voice engine to the tested version (${GPT_SOVITS_COMMIT:0:7})..."
+    git -C "$GPT" cat-file -e "${GPT_SOVITS_COMMIT}^{commit}" 2>/dev/null \
+        || git -C "$GPT" fetch --quiet origin "$GPT_SOVITS_COMMIT" \
+        || die "Could not download the tested voice engine version." \
+               "Check your internet connection, then re-run the installer."
+    git -C "$GPT" checkout --force --quiet "$GPT_SOVITS_COMMIT" \
+        || die "Could not switch the voice engine to its tested version." \
+               "Re-run the installer, or report this."
+fi
+[ "$(git -C "$GPT" rev-parse HEAD 2>/dev/null)" = "$GPT_SOVITS_COMMIT" ] \
+    || die "The voice engine is not on its tested version." "Re-run the installer, or report this."
+log "  Voice engine is on the tested version."
 
 VOICE_PATCH="$PROJ/scripts/voice-patch"
 if [ -d "$VOICE_PATCH" ]; then
