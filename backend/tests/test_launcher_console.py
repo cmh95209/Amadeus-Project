@@ -161,6 +161,58 @@ class ConsoleTests(unittest.TestCase):
             ensure.assert_called_once_with(base_python=None, passthrough=True)
 
 
+class ShutdownTests(unittest.TestCase):
+    """Closing the launcher window shuts everything down (2026-10-19: her
+    built-in model kept running after the window's X)."""
+
+    def setUp(self):
+        self.launcher = _load_launcher()
+        self.tmp = Path(tempfile.mkdtemp(prefix="amadeus_shutdown_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.launcher.LOG_DIR = self.tmp / "logs"
+        self.launcher.LAUNCHER_LOG = self.launcher.LOG_DIR / "launcher.log"
+
+    def test_window_close_runs_cleanup_once(self):
+        with patch.object(self.launcher, "terminate_process_tree") as stop, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.launcher.processes.append(object())
+            for event in (2, 5, 6):   # window closed, sign-out, shutdown
+                self.assertEqual(self.launcher._on_console_event(event), 1)
+            self.launcher.cleanup()   # the normal exit path afterwards
+        stop.assert_called_once()     # ran exactly once
+
+    def test_ctrl_c_is_left_to_python(self):
+        with patch.object(self.launcher, "cleanup") as cleanup:
+            self.assertEqual(self.launcher._on_console_event(0), 0)
+            self.assertEqual(self.launcher._on_console_event(1), 0)
+        cleanup.assert_not_called()
+
+    def test_builtin_port_freed_only_in_builtin_mode(self):
+        with patch.object(self.launcher, "clear_port") as clear, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.launcher.cleanup()
+            clear.assert_not_called()          # custom mode: 8091 may be the user's own
+            self.launcher._cleaned_up = False
+            self.launcher._builtin_this_run = True
+            self.launcher.cleanup()
+            clear.assert_called_once_with("built-in model", 8091)
+
+    @unittest.skipUnless(os.name == "nt", "Windows job objects")
+    def test_started_parts_join_the_kill_on_close_job(self):
+        import ctypes
+        from ctypes import wintypes
+        proc = self.launcher.start_process(
+            "sleeper", [sys.executable, "-c", "import time; time.sleep(30)"], self.tmp)
+        self.addCleanup(self.launcher.cleanup)
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE,
+                                            ctypes.POINTER(wintypes.BOOL))
+        inside = wintypes.BOOL()
+        self.assertTrue(kernel32.IsProcessInJob(int(proc._handle), self.launcher._job_handle,
+                                                ctypes.byref(inside)))
+        self.assertTrue(inside.value)
+
+
 class AppWindowTests(unittest.TestCase):
     """Her own app window (2026-10-18): a Chromium browser with --app and its
     own profile, so the autoplay flag applies even with Chrome already open."""

@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -789,7 +790,90 @@ def start_process(name: str, command: list[str], cwd: Path,
 
     process = subprocess.Popen(command, **kwargs)
     processes.append(process)
+    _add_to_job(process)
     return process
+
+
+# ---------------------------------------------------------------------------
+# Windows: every part the launcher starts goes into one "job" that Windows
+# ends - with everything those parts started, e.g. the backend's
+# llama-server - the moment the launcher process ends, however it ends
+# (Ctrl+C, the window's X / Alt+F4, Task Manager, a crash). Closing the
+# window used to leave her built-in model running, holding ~10 GB of
+# graphics memory (2026-10-19): Windows ends the window's own processes
+# first, the backend among them, and its hidden llama-server child was
+# orphaned before the launcher's cleanup could reach it. The browser is
+# NOT in the job (it is started separately), so a browser the user had
+# open is never closed.
+# ---------------------------------------------------------------------------
+_job_handle = None
+
+
+def _windows_job():
+    """The launcher's kill-on-close job (created once), or None."""
+    global _job_handle
+    if os.name != "nt":
+        return None
+    if _job_handle is not None:
+        return _job_handle or None
+    import ctypes
+    from ctypes import wintypes
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class BASIC_LIMITS(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class EXTENDED_LIMITS(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BASIC_LIMITS),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int,
+                                                 wintypes.LPVOID, wintypes.DWORD)
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        note("Could not create the shutdown job - parts may outlive a closed window.")
+        _job_handle = 0
+        return None
+    limits = EXTENDED_LIMITS()
+    limits.BasicLimitInformation.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+        note("Could not set up the shutdown job - parts may outlive a closed window.")
+        _job_handle = 0
+        return None
+    _job_handle = job   # kept open for the launcher's whole life (closing it ends the job)
+    return job
+
+
+def _add_to_job(process: subprocess.Popen) -> None:
+    job = _windows_job()
+    if job is None:
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    if not kernel32.AssignProcessToJobObject(job, int(process._handle)):
+        note(f"Could not add process {process.pid} to the shutdown job "
+             f"(error {ctypes.get_last_error()}).")
 
 
 def terminate_process_tree(process: subprocess.Popen) -> None:
@@ -815,18 +899,92 @@ def terminate_process_tree(process: subprocess.Popen) -> None:
         pass
 
 
+_cleanup_lock = threading.Lock()
+_cleaned_up = False
+# Set by run() when her built-in model may be running this session (the
+# backend starts it; see cleanup()).
+_builtin_this_run = False
+
+
 def cleanup() -> None:
+    """Stop every part of Amadeus. Runs once, from whichever comes first:
+    the normal exit (Ctrl+C, an error) or Windows closing the launcher
+    window (X, Alt+F4, sign-out, shutdown - see install_close_handler)."""
+    global _cleaned_up
+    with _cleanup_lock:
+        if _cleaned_up:
+            return
+        _cleaned_up = True
     if processes:
-        say("\nShutting down Amadeus...")
+        try:
+            say("\nShutting down Amadeus...")
+        except (OSError, ValueError):
+            pass   # the window may already be gone
 
     for process in reversed(processes):
         terminate_process_tree(process)
+
+    # Her built-in model is the backend's child and goes with its process
+    # tree; should anything still hold its port (it was started another
+    # way, or outlived its parent), end it too - it holds ~10 GB of
+    # graphics memory. Only in built-in mode: in custom mode 8091 may be
+    # the user's own server.
+    if _builtin_this_run:
+        try:
+            clear_port("built-in model", LLM_PORT)
+        except Exception as exc:
+            note(f"Could not free port {LLM_PORT}: {exc}")
 
     for handle in log_handles:
         try:
             handle.close()
         except Exception:
             pass
+
+
+# Keeps the Windows callback alive (ctypes would otherwise free it).
+_close_handler = None
+
+# Windows console events: 0 Ctrl+C, 1 Ctrl+Break (Python's own handling),
+# 2 the window is closed (X / Alt+F4), 5 sign-out, 6 shutdown.
+_CLOSE_EVENTS = (2, 5, 6)
+
+
+def _on_console_event(event: int) -> int:
+    """Windows calls this (on its own thread) for console events. For a
+    closing window it allows about 5 seconds before ending the process -
+    enough for cleanup(), which used to be skipped, so her built-in model
+    kept running in the background holding graphics memory (2026-10-19,
+    llama-server.exe still running after closing the window with X)."""
+    if event in _CLOSE_EVENTS:
+        note(f"Windows is closing the launcher (console event {event}) - shutting everything down.")
+        cleanup()
+        return 1
+    return 0   # Ctrl+C / Ctrl+Break: Python's own handling (KeyboardInterrupt)
+
+
+def install_close_handler() -> None:
+    """Make closing the launcher window shut Amadeus down like Ctrl+C does.
+    Windows: a console control handler. macOS / Linux: closing the Terminal
+    window sends SIGHUP (and a shutdown SIGTERM)."""
+    global _close_handler
+    if os.name == "nt":
+        import ctypes
+        handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+        _close_handler = handler_type(_on_console_event)
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_close_handler, True):
+            note("Could not register the window-close handler.")
+        return
+
+    def on_signal(signum, _frame):
+        note(f"Signal {signum} - shutting everything down.")
+        cleanup()
+        os._exit(0)
+
+    for name in ("SIGHUP", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, on_signal)
 
 
 def check_required_paths() -> None:
@@ -1120,6 +1278,8 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
     # A missing model never stops the app - the backend reports it.
     load_model = False
     if builtin:
+        global _builtin_this_run
+        _builtin_this_run = True
         ready, why = builtin_files_ready(builtin)
         note(f"Built-in model: {Path(selected_model_file(builtin)).name}, "
              f"{builtin.get('context')} context, {builtin.get('kv_cache')} memory, "
@@ -1319,6 +1479,7 @@ def main() -> int:
         return setup_memory(args.cm_python)
 
     open_launcher_log()
+    install_close_handler()
     try:
         run(no_browser=args.no_browser, simulate_vram_gb=args.simulate_vram_gb,
             no_model=args.no_model)
