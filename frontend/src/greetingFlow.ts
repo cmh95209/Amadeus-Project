@@ -45,6 +45,13 @@ export function deriveFooter(input: {
     if (conn.builtin_model_missing) {
       return s("Her built-in model is not installed. Run the installer again.", "warning");
     }
+    if (conn.builtin_state === "unloaded") {
+      return s("Her built-in model is not loaded. Load it in Settings.", "warning");
+    }
+    if (conn.builtin_state === "failed") {
+      return s("Her built-in model could not load. See Settings.", "offline");
+    }
+    if (conn.builtin_state === "loading") return s("Her built-in model is loading...", "warning", true);
     if (!conn.reachable) return s("Her built-in model is not running. Restart Amadeus.", "offline");
     if (conn.loading || !conn.model_found) return s("Her built-in model is loading...", "warning", true);
   }

@@ -632,6 +632,8 @@ export type ConnectionStatus = {
   builtin?: boolean;
   /** Built-in mode, but its model / llama.cpp is not on disk. */
   builtin_model_missing?: boolean;
+  /** Her built-in model's server, run by the app: "unloaded" | "loading" | "loaded" | "failed". */
+  builtin_state?: BuiltinServerState | null;
 };
 
 /** How she thinks: the built-in model the installer set up, or the user's
@@ -672,6 +674,59 @@ export async function setBrainMode(mode: "builtin" | "custom"): Promise<BrainMod
       })
     )
   );
+}
+
+// ---- Her built-in model's server (Settings -> Connection -> Built-in) --------
+export type BuiltinServerState = "unloaded" | "loading" | "loaded" | "failed";
+
+export type BuiltinModel = {
+  state: BuiltinServerState;
+  /** The file it runs (or tried to). */
+  file: string;
+  /** Why it could not load (state "failed"). */
+  error: string;
+  /** Every chat-model GGUF in her models folder. */
+  files: { file: string; name: string; gb: number }[];
+  /** The file she loads by default (the one last loaded fine). */
+  selected: string;
+  folder: string;
+};
+
+function toBuiltinModel(data: Record<string, unknown>): BuiltinModel {
+  const server = (data.server ?? {}) as Record<string, unknown>;
+  const state = server.state;
+  return {
+    state: state === "loading" || state === "loaded" || state === "failed" ? state : "unloaded",
+    file: typeof server.file === "string" ? server.file : "",
+    error: typeof server.error === "string" ? server.error : "",
+    files: Array.isArray(data.files)
+      ? (data.files as Record<string, unknown>[])
+          .filter((f) => typeof f.name === "string")
+          .map((f) => ({ file: String(f.file ?? ""), name: String(f.name), gb: Number(f.gb) || 0 }))
+      : [],
+    selected: typeof data.selected === "string" ? data.selected : "",
+    folder: typeof data.folder === "string" ? data.folder : "",
+  };
+}
+
+export async function getBuiltinModel(): Promise<BuiltinModel> {
+  return toBuiltinModel(await parseResponse(await fetch(`${API_BASE}/builtinModel`, { cache: "no-store" })));
+}
+
+/** Load (or switch to) a model file from her models folder; it loads in the background. */
+export async function loadBuiltinModel(name: string): Promise<void> {
+  await parseResponse(
+    await fetch(`${API_BASE}/builtinModel/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: name }),
+    })
+  );
+}
+
+/** Stop her model and free its graphics memory. */
+export async function unloadBuiltinModel(): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/builtinModel/unload`, { method: "POST" }));
 }
 
 export async function getLLMServer(): Promise<string> {

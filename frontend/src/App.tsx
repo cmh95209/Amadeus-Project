@@ -36,6 +36,9 @@ import {
   getContextBudgetInfo,
   getBrainMode,
   setBrainMode,
+  getBuiltinModel,
+  loadBuiltinModel,
+  unloadBuiltinModel,
   setContextBudget,
   getLLMServer,
   setLLMServer,
@@ -48,6 +51,7 @@ import {
   testConnection,
   ConnectionStatus,
   BrainMode,
+  BuiltinModel,
   Conversation,
   listConversations,
   createConversation,
@@ -66,6 +70,11 @@ import type { InteractionName } from "./interactions";
 // part after the final "/" so the matching chip still highlights as active.
 function baseModelName(name: string): string {
   return name.trim().split("/").pop() ?? "";
+}
+
+// A model file's name without its folder (Windows or macOS paths).
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? "";
 }
 
 // Settings choices for the "about you" section.
@@ -129,6 +138,10 @@ export default function App() {
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
   // How she thinks (built-in model vs the user's own); null = unknown.
   const [brain, setBrain] = useState<BrainMode | null>(null);
+  // Settings -> Connection -> Built-in: her model's server and the file picker.
+  const [builtinModel, setBuiltinModel] = useState<BuiltinModel | null>(null);
+  const [modelChoice, setModelChoice] = useState<string>("");
+  const [modelBusy, setModelBusy] = useState(false);
   const [brainSwitching, setBrainSwitching] = useState(false);
   const builtinMode = brain?.mode === "builtin";
   // The built-in model's cap on the history budget (null = no cap).
@@ -189,6 +202,10 @@ export default function App() {
     : connStatus.builtin
       ? connStatus.builtin_model_missing
         ? "Her built-in model is not installed yet - run the installer again (it continues where it stopped)."
+        : connStatus.builtin_state === "unloaded"
+          ? "Her built-in model is not loaded - load it below."
+        : connStatus.builtin_state === "failed"
+          ? "Her built-in model could not load - see below."
         : !connStatus.reachable
           ? "Her built-in model is not running. Restart Amadeus to start it."
           : connStatus.loading || !connStatus.model_found
@@ -312,6 +329,24 @@ export default function App() {
     modalRef.current?.focus();
     return () => { previousFocus?.focus(); };
   }, [settingsOpen]);
+
+  // Her built-in model's panel: fresh state whenever Settings opens, and a
+  // light poll while it loads (Loading... -> Loaded / Could not load).
+  useEffect(() => {
+    if (!settingsOpen || !builtinMode) return;
+    void refreshBuiltinModel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen, builtinMode]);
+
+  useEffect(() => {
+    if (!settingsOpen || builtinModel?.state !== "loading") return;
+    const timer = window.setInterval(() => {
+      void refreshBuiltinModel();
+      void refreshConnection();
+    }, 2000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen, builtinModel?.state]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -935,14 +970,64 @@ export default function App() {
       }
       setSettingsNotice(
         mode === "builtin"
-          ? "Switched to her built-in model. Restart Amadeus to start it."
-          : "Switched to your own model. Restart Amadeus to free the memory her built-in model uses."
+          ? "Switched to her built-in model - it is loading now."
+          : "Switched to your own model. Her built-in model was unloaded (its graphics memory is free)."
       );
       void refreshConnection();
+      void refreshBuiltinModel();
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "Could not switch.");
     } finally {
       setBrainSwitching(false);
+    }
+  }
+
+  // Her built-in model's server: state + the GGUF files in her models folder
+  // ("Refresh list" asks again). The dropdown keeps the user's pick.
+  async function refreshBuiltinModel() {
+    try {
+      const info = await getBuiltinModel();
+      setBuiltinModel(info);
+      setModelChoice((current) => {
+        const names = info.files.map((f) => f.name);
+        if (current && names.includes(current)) return current;
+        const loaded = info.state !== "unloaded" ? baseName(info.file) : "";
+        return names.includes(loaded) ? loaded : baseName(info.selected) || names[0] || "";
+      });
+    } catch {
+      setBuiltinModel(null);
+    }
+  }
+
+  async function loadChosenModel() {
+    if (!modelChoice || modelBusy) return;
+    setModelBusy(true);
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      await loadBuiltinModel(modelChoice);
+      await refreshBuiltinModel();
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not load her model.");
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function unloadModel() {
+    if (modelBusy) return;
+    setModelBusy(true);
+    setSettingsError("");
+    try {
+      await unloadBuiltinModel();
+      await refreshBuiltinModel();
+      setSettingsNotice("Her model was unloaded - its graphics memory is free. She can't answer until you load it again.");
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not unload her model.");
+    } finally {
+      setModelBusy(false);
     }
   }
 
@@ -1870,6 +1955,70 @@ export default function App() {
                         ? `${brain.model_label || "Her built-in model"} is not installed yet - run the installer again (it continues the download where it stopped).`
                         : `She thinks with ${brain.model_label || "her built-in model"}, privately on this PC. Nothing to connect.`}
                     </p>
+                  )}
+                  {builtinMode && builtinModel && (
+                    <div className="builtin-model">
+                      <p className={`builtin-model-state is-${builtinModel.state}`} role="status">
+                        {builtinModel.state === "loaded"
+                          ? `Loaded: ${baseName(builtinModel.file)}`
+                          : builtinModel.state === "loading"
+                            ? `Loading ${baseName(builtinModel.file)}...`
+                            : builtinModel.state === "failed"
+                              ? `Could not load ${baseName(builtinModel.file)}: ${builtinModel.error}`
+                              : "Not loaded - she can't answer until her model is loaded."}
+                      </p>
+                      <label>
+                        Her model
+                        <div className="builtin-model-row">
+                          <select
+                            value={modelChoice}
+                            disabled={modelBusy || builtinModel.files.length === 0}
+                            onChange={(event) => setModelChoice(event.target.value)}
+                          >
+                            {builtinModel.files.length === 0 && <option value="">No model files found</option>}
+                            {builtinModel.files.map((f) => (
+                              <option key={f.name} value={f.name}>
+                                {f.name} ({f.gb.toLocaleString("en-US")} GB)
+                              </option>
+                            ))}
+                          </select>
+                          <button type="button" className="ghost-button" disabled={modelBusy}
+                            onClick={() => void refreshBuiltinModel()}>
+                            Refresh list
+                          </button>
+                        </div>
+                      </label>
+                      <div className="builtin-model-row">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={modelBusy || !modelChoice || builtinModel.state === "loading" ||
+                            (builtinModel.state === "loaded" && baseName(builtinModel.file) === modelChoice)}
+                          onClick={() => void loadChosenModel()}
+                        >
+                          {builtinModel.state === "loaded" && baseName(builtinModel.file) !== modelChoice
+                            ? "Switch to this model"
+                            : "Load"}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={modelBusy || builtinModel.state === "unloaded"}
+                          onClick={() => void unloadModel()}
+                        >
+                          Unload
+                        </button>
+                      </div>
+                      <p className="settings-help">
+                        Unload frees her graphics memory (for a game, for example); she
+                        can't answer until you load her model again. To use your own GGUF
+                        model, put the file in{" "}
+                        <span className="settings-path">{builtinModel.folder || "her models folder"}</span>{" "}
+                        and press Refresh list. Your own model runs with this PC's
+                        settings{brain.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
+                        a model too big for your graphics card will not load.
+                      </p>
+                    </div>
                   )}
                 </div>
               )}

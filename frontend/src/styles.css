@@ -1386,3 +1386,24 @@ button {
   visibility: visible;
   opacity: 1;
 }
+
+/* Settings -> Connection -> Built-in: her model's state and the file picker */
+.builtin-model { margin-top: 14px; }
+.builtin-model-state {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: #0b1017;
+  color: #c9d2df;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.builtin-model-state.is-loaded { border-color: rgba(120, 190, 140, 0.35); }
+.builtin-model-state.is-loading { border-color: rgba(216, 185, 123, 0.35); }
+.builtin-model-state.is-failed { border-color: rgba(192, 110, 110, 0.5); color: #e3b5b5; }
+.builtin-model-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.builtin-model-row select { flex: 1; min-width: 0; margin-top: 0; }
+.settings-path { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }

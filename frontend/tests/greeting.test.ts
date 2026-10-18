@@ -107,6 +107,14 @@ assert.equal(footer({ conn: conn({ builtin: true, loading: true }) }).text,
 assert.equal(footer({ conn: conn({ builtin: true, model_found: false }) }).text,
   "Her built-in model is loading...");
 assert.equal(footer({ conn: conn({ builtin: true }) }).text, "Ready");
+// The app runs her model: unloaded / failed / loading come from its own state.
+assert.equal(footer({ conn: conn({ builtin: true, reachable: false, builtin_state: "unloaded" }) }).text,
+  "Her built-in model is not loaded. Load it in Settings.");
+assert.equal(footer({ conn: conn({ builtin: true, reachable: false, builtin_state: "failed" }) }).text,
+  "Her built-in model could not load. See Settings.");
+assert.equal(footer({ conn: conn({ builtin: true, reachable: false, builtin_state: "loading" }) }).text,
+  "Her built-in model is loading...");
+assert.equal(footer({ conn: conn({ builtin: true, builtin_state: "loaded" }) }).text, "Ready");
 
 // ---- First-launch wait lines (chat box stays locked) ----
 for (const kind of ["intro", "trying", "reminder"]) {
