@@ -50,7 +50,11 @@ class SpeechTests(unittest.TestCase):
                 self.headers = {}
             def call_on_close(self, callback): self.close = callback
         tickets = {'one': (time.monotonic(), 'test', None)}
-        scope = dict(request=SimpleNamespace(method='GET'), _speech_requests=tickets,
+        # The speed-log stopwatch (backend/timing.py) has no heavy imports.
+        spec = importlib.util.spec_from_file_location('speech_timing_test', ROOT / 'timing.py')
+        timing = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(timing)
+        scope = dict(request=SimpleNamespace(method='GET'), _speech_requests=tickets, timing=timing,
                      _speech_requests_lock=threading.Lock(), time=time, chain=chain,
                      jsonify=lambda data: data, Response=Response,
                      streamVoiceChunks=lambda text, save_path=None: (chunk for chunk in (b'header', b'pcm')))

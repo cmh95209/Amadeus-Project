@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 import builtin_llm
+import timing
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = PROJECT_ROOT / "logs" / "llm.log"
@@ -172,6 +173,7 @@ def load(file: str | None = None) -> dict:
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         global _proc
+        started, memory_before = timing.now(), timing.gpu_memory()
         try:
             _proc = subprocess.Popen(server_command(cfg, target), **kwargs)
         except OSError as e:
@@ -180,12 +182,12 @@ def load(file: str | None = None) -> dict:
             return dict(_state)
         _set("loading", target)
         proc = _proc
-    threading.Thread(target=_watch_loading, args=(proc, target, port, log),
+    threading.Thread(target=_watch_loading, args=(proc, target, port, log, started, memory_before),
                      daemon=True, name="builtin-model-load").start()
     return status()
 
 
-def _watch_loading(proc, target, port, log) -> None:
+def _watch_loading(proc, target, port, log, started=None, memory_before=None) -> None:
     """Background: wait until the model answers, or report why it did not.
     A newer load/unload replaces `proc`; then this watcher just ends."""
     global _proc
@@ -202,9 +204,12 @@ def _watch_loading(proc, target, port, log) -> None:
                 return
             if _health(port) == 200:
                 with _lock:
-                    if _proc is proc:
+                    current = _proc is proc
+                    if current:
                         _set("loaded", target)
                         _remember(target)
+                if current and started is not None:
+                    timing.model_loaded(started, memory_before)
                 return
             time.sleep(1)
         with _lock:

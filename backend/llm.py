@@ -6,6 +6,7 @@ from langchain_openai import ChatOpenAI
 
 import builtin_llm
 import memory
+import timing
 
 # =============================================================================
 #  Amadeus -> YOUR local model (Unsloth Desktop)
@@ -95,6 +96,9 @@ class _ThoughtFreeChatOpenAI(ChatOpenAI):
     tools, translations - goes through this one place."""
 
     def _create_chat_result(self, response, generation_info=None):
+        # Speed log: hand the server's own report (llama-server "timings" /
+        # cloud "usage") to the stopwatch. Never lets a failure through.
+        timing.note_server_report(response)
         result = super()._create_chat_result(response, generation_info)
         for gen in result.generations:
             message = getattr(gen, "message", None)

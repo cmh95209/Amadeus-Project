@@ -28,6 +28,7 @@ import ceremony
 import llm
 import memory
 import stats
+import timing
 
 from tts import streamVoiceChunks, renderVoiceToPath
 import tts as tts_module
@@ -248,6 +249,8 @@ def request_message():
     print("[Flask] / route triggered")
     content = request.get_json()
     user_input = content.get("user_input", "")
+    started = timing.now()
+    timing.start_reports()
 
     if chat.store.load_web_access():
         # Web access ON: the reply is the original single call (both lines at
@@ -257,6 +260,7 @@ def request_message():
         except Exception as exc:
             print("[Flask] LLM failure:", repr(exc))
             return jsonify({"message": _llm_error_message(exc)}), 502
+        timing.line_ready(assistant_id, started, "her reply (web access on, both lines)")
         print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
         print("[Flask]: JPS:", pack.assistant_reply_JPS)
 
@@ -280,6 +284,7 @@ def request_message():
         # still applies.
         print("[Flask] LLM failure (voice-first call 1):", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
+    timing.line_ready(turn.assistant_id, started)
     print("\n[Flask]: JPS (voice-first call 1):", turn.pack.assistant_reply_JPS)
 
     speech_id = uuid.uuid4().hex
@@ -316,18 +321,23 @@ def speech(speech_id):
     save_path = None
     if assistant_id:
         save_path = Path(__file__).resolve().parent / "generated" / f"voice_{assistant_id}.wav"
+    watch = timing.VoiceWatch(assistant_id)
     chunks = streamVoiceChunks(jps_text, save_path=save_path)
     try:
         first = next(chunks)
     except Exception:
         chunks.close()
+        watch.finish()
         return jsonify({"message": "Speech generation failed"}), 502
 
     def generate():
         try:
-            yield from chain((first,), chunks)
+            for chunk in chain((first,), chunks):
+                watch.feed(chunk)
+                yield chunk
         finally:
             chunks.close()
+            watch.finish()
             # Keep the line for replay only if it was actually generated.
             if assistant_id and save_path is not None and save_path.exists():
                 memory.set_message_audio(assistant_id, f"generated/voice_{assistant_id}.wav")

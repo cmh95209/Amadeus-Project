@@ -12,6 +12,7 @@ import time
 import concurrent.futures
 from datetime import datetime
 import stats
+import timing
 import ja_voice
 import speech_text
 import webfetch
@@ -3374,11 +3375,14 @@ def _backfill_english(turn: "VoiceFirstTurn", llm, context_lines) -> None:
     real words, just untranslated - so a slow or down model never holds her
     voice hostage."""
     jps = (turn.pack.assistant_reply_JPS or "").strip()
+    started = timing.now()
+    timing.start_reports()
     try:
         en = _translate_reply_en(llm, jps, context_lines)
     except Exception as exc:
         print("[Amadeus] Voice-first: English backfill failed:", repr(exc))
         en = ""
+    timing.english_done(turn.assistant_id, started)
     final = en or jps
     try:
         store.update_message_content(turn.assistant_id, final)
