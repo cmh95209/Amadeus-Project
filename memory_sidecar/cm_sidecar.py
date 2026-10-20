@@ -233,6 +233,11 @@ _SAVE_QUEUE_MAX = 1000            # soft cap: the queue is a bridge, not a datab
 _queue_truncated = False
 
 
+# Seconds spent in the embedder by the current thread (speed log: a recall's
+# line says how much of its time was the embedder).
+_embed_clock = threading.local()
+
+
 class STEmbedder(EmbeddingProvider):
     """In-process CPU embedder. NAME+MODULE MATTER: persisted lore indexes
     were built by __main__.STEmbedder (fingerprint-verified) so seeded
@@ -246,8 +251,12 @@ class STEmbedder(EmbeddingProvider):
     def embed(self, texts):
         if isinstance(texts, str):
             texts = [texts]
-        return self._model.encode(list(texts), normalize_embeddings=True,
-                                  batch_size=16, show_progress_bar=False).astype("float32")
+        t0 = time.time()
+        try:
+            return self._model.encode(list(texts), normalize_embeddings=True,
+                                      batch_size=16, show_progress_bar=False).astype("float32")
+        finally:
+            _embed_clock.seconds = getattr(_embed_clock, "seconds", 0.0) + time.time() - t0
 
 
 class NonThinkingLLM(OpenAICompatibleLLM):
@@ -316,6 +325,44 @@ def _seed_index():
             log(f"seeded {sub}/ from {os.path.basename(SEED_DIR)}")
 
 
+def _total_ram_gb():
+    """Installed memory in GB, or None when it cannot be read."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            ms = _MS()
+            ms.dwLength = ctypes.sizeof(_MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                return ms.ullTotalPhys / 2**30
+            return None
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+EMBED_32BIT_MIN_RAM_GB = 24
+
+
+def _embedder_bits() -> int:
+    """32-bit on PCs with plenty of memory: PyTorch's 16-bit maths on the
+    processor is slow (measured 2026-10-20, 5800X3D: 0.56 s vs 0.17 s per
+    lookup, 2.05 s vs 0.34 s per 8 notes) and lookups that passed the app's
+    6 s limit cost her memories. It needs ~1.2 GB more memory, so smaller
+    PCs keep 16-bit (see _build_engine). CM_EMBED_BITS=16/32 overrides."""
+    forced = os.environ.get("CM_EMBED_BITS", "").strip()
+    if forced in ("16", "32"):
+        return int(forced)
+    ram = _total_ram_gb()
+    return 32 if ram is not None and ram >= EMBED_32BIT_MIN_RAM_GB else 16
+
+
 def _build_engine():
     """The heavy startup, run in a background thread: the 16-bit embedder,
     the persisted lore cache and the extraction state. Until it finishes,
@@ -329,7 +376,9 @@ def _build_engine():
     the 18 GB test box, sharing RAM with a local 27 B model, failed a 55 MB
     allocation). 16-bit vs 32-bit moves retrieval rankings only at ~1e-3
     relative precision - imperceptible for cosine similarity. Encoded
-    vectors are cast back to float32 before storage.
+    vectors are cast back to float32 before storage. Since 2026-10-20 PCs
+    with >= EMBED_32BIT_MIN_RAM_GB load 32-bit instead (3-6x faster
+    lookups, see _embedder_bits).
     """
     global store, memories, agent, _emb
     with _engine_lock:
@@ -340,11 +389,12 @@ def _build_engine():
         try:
             import torch
             from sentence_transformers import SentenceTransformer
+            bits = _embedder_bits()
             model = SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B", device="cpu",
-                model_kwargs={"torch_dtype": torch.float16,
+                model_kwargs={"torch_dtype": torch.float32 if bits == 32 else torch.float16,
                               "low_cpu_mem_usage": True})
-            log(f"embedder loaded in {time.time()-t0:.1f}s (CPU 16-bit, "
+            log(f"embedder loaded in {time.time()-t0:.1f}s (CPU {bits}-bit, "
                 f"dim={model.get_embedding_dimension()})")
 
             from character_memory.rag.hybrid import HybridSearch
@@ -621,11 +671,14 @@ def context(chat_id: str, user: str = USER_ID,
         # Comma-separated memory names, e.g. 'user_facts,episodic,emotion'.
         # Lets the bridge choose which sections land in the prompt.
         opts["memory_types"] = [m.strip() for m in memories.split(",") if m.strip()]
+    learning = bool(_extracting_chats)
+    _embed_clock.seconds = 0.0
     with _recall_exclude_chat(exclude_chat_id):
         snap = agent.build_context_snapshot(chat, user_id=user, **opts)
     text = "\n\n".join(snap.sections.values())
     log(f"context chat={chat_id}: {len(text)} chars, {len(snap.sections)} "
-        f"sections, {time.time()-t0:.2f}s")
+        f"sections, {time.time()-t0:.2f}s (embedder {_embed_clock.seconds:.2f}s"
+        f"{', while learning' if learning else ''})")
     return {"chat_id": chat_id, "context_text": text,
             "sections": snap.sections, "context_order": list(snap.sections)}
 
