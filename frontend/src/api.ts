@@ -139,7 +139,12 @@ type VoiceFirstEvent = {
   japanese?: string;
 };
 
-async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
+// Hands the turn back as soon as the "voice" event arrives, so her voice can
+// start while the backend is still writing the English line; the rest of the
+// stream is read in the background and settles `text`. (Until 2026-10-20 this
+// waited for the WHOLE stream, so the voice always waited for the English line
+// - 2 s on the built-in model, 9-20 s on cloud.)
+export async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
   if (!response.ok) {
     const data = await parseResponse(response);
     throw new Error(data?.message || `Request failed (${response.status})`);
@@ -150,8 +155,12 @@ async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
   }
 
   let resolveReply: ((reply: MessageReply) => void) | null = null;
+  let rejectReply: ((error: unknown) => void) | null = null;
   let resolveText: ((text: string) => void) | null = null;
-  const replyPromise = new Promise<MessageReply>((r) => (resolveReply = r));
+  const replyPromise = new Promise<MessageReply>((resolve, reject) => {
+    resolveReply = resolve;
+    rejectReply = reject;
+  });
   const textPromise = new Promise<string>((r) => (resolveText = r));
 
   let reply: MessageReply | null = null;
@@ -172,61 +181,68 @@ async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
     }
   };
 
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // Events are "data: <json>" frames terminated by a blank line.
-      let cut: number;
-      while ((cut = buffer.indexOf("\n\n")) !== -1) {
-        const frame = buffer.slice(0, cut);
-        buffer = buffer.slice(cut + 2);
-        for (const line of frame.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          let event: VoiceFirstEvent;
-          try {
-            event = JSON.parse(line.slice(6)) as VoiceFirstEvent;
-          } catch {
-            continue; // a torn frame - the server always terminates frames
-          }
-          if (event.phase === "voice") {
-            reply = {
-              response: "",
-              japanese: typeof event.japanese === "string" ? event.japanese : undefined,
-              speechUrl:
-                typeof event.speech_id === "string"
-                  ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
-                  : undefined,
-              userId: typeof event.user_id === "number" ? event.user_id : undefined,
-              assistantId:
-                typeof event.assistant_id === "number" ? event.assistant_id : undefined,
-              conversationId:
-                typeof event.conversation_id === "number" ? event.conversation_id : undefined,
-            };
-            settleReply();
-          } else if (event.phase === "text") {
-            if (typeof event.response === "string") text = event.response;
-            settleText(text);
+  const pump = async () => {
+    let failure: unknown = null;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Events are "data: <json>" frames terminated by a blank line.
+        let cut: number;
+        while ((cut = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          for (const line of frame.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            let event: VoiceFirstEvent;
+            try {
+              event = JSON.parse(line.slice(6)) as VoiceFirstEvent;
+            } catch {
+              continue; // a torn frame - the server always terminates frames
+            }
+            if (event.phase === "voice") {
+              reply = {
+                response: "",
+                japanese: typeof event.japanese === "string" ? event.japanese : undefined,
+                speechUrl:
+                  typeof event.speech_id === "string"
+                    ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
+                    : undefined,
+                userId: typeof event.user_id === "number" ? event.user_id : undefined,
+                assistantId:
+                  typeof event.assistant_id === "number" ? event.assistant_id : undefined,
+                conversationId:
+                  typeof event.conversation_id === "number" ? event.conversation_id : undefined,
+              };
+              settleReply();
+            } else if (event.phase === "text") {
+              if (typeof event.response === "string") text = event.response;
+              settleText(text);
+            }
           }
         }
       }
+    } catch (error) {
+      failure = error;
+    } finally {
+      reader.releaseLock();
     }
-  } finally {
-    reader.releaseLock();
-  }
-
-  // The server always sends both events (the text event is bounded by a
-  // server-side timeout and then carries her Japanese line). If the stream
-  // still ends early, settle what arrived and surface the missing voice
-  // phase as an error.
-  settleReply();
-  settleText(text);
-  if (!replySettled) {
-    throw new Error("The backend stream ended before the voice event");
-  }
+    // The server always sends both events (the text event is bounded by a
+    // server-side timeout and then carries her Japanese line). If the stream
+    // ends early, the English box falls back to her Japanese line, and a
+    // missing voice phase surfaces as an error.
+    settleReply();
+    settleText(text || reply?.japanese || "");
+    if (!replySettled && rejectReply) {
+      replySettled = true;
+      (rejectReply as (error: unknown) => void)(
+        failure ?? new Error("The backend stream ended before the voice event"));
+    }
+  };
+  void pump();
 
   const resolvedReply = await replyPromise;
   return { reply: resolvedReply, text: textPromise };
