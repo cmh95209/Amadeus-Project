@@ -259,21 +259,60 @@ class STEmbedder(EmbeddingProvider):
             _embed_clock.seconds = getattr(_embed_clock, "seconds", 0.0) + time.time() - t0
 
 
+_REASONING_LEVELS = ("off", "low", "medium", "high")
+_THINKING_BUDGETS = {"low": 512, "medium": 1024, "high": 2048}
+
+
+def _learning_reasoning() -> str:
+    """Learning follows the app's Settings -> Reasoning -> Translations level
+    (MH 2026-10-20; default "off")."""
+    try:
+        path = os.path.join(os.path.dirname(KEY_FILE), "reasoning.json")
+        with open(path, encoding="utf-8") as f:
+            level = json.load(f).get("translations")
+    except (OSError, ValueError, AttributeError):
+        level = None
+    return level if level in _REASONING_LEVELS else "off"
+
+
+def _reasoning_body(server: str, level: str) -> dict:
+    """The request fields for this level on this server (same rules as the
+    app's llm.get_llm): local/LAN llama.cpp-style servers get the chat-template
+    flag + a thinking budget; OpenRouter / Gemini get an effort, "minimal"
+    for off (Gemini 3.8 Flash refuses to switch reasoning off completely)."""
+    host = server.split("//", 1)[-1].split("/")[0].split(":")[0].lower()
+    thinking = level != "off"
+    if host in ("localhost", "127.0.0.1", "::1") or host.startswith(("192.168.", "10.", "172.16.")):
+        body = {"chat_template_kwargs": {"enable_thinking": thinking}}
+        if thinking:
+            body["thinking_budget_tokens"] = _THINKING_BUDGETS[level]
+        return body
+    if "openrouter.ai" in server:
+        return {"reasoning": {"effort": level if thinking else "minimal"}}
+    if "generativelanguage.googleapis.com" in server:
+        return {"reasoning_effort": level if thinking else "minimal"}
+    return {"reasoning_effort": level} if thinking else {"chat_template_kwargs": {"enable_thinking": False}}
+
+
 class NonThinkingLLM(OpenAICompatibleLLM):
-    """Their client + Amadeus's thinking-off extra_body. Thinking off is
-    REQUIRED where the server accepts it (the thinking budget otherwise
-    truncates the extraction JSON); servers that REJECT the parameter
+    """Their client + Amadeus's reasoning extra_body (the app's Translations
+    level, default off). Thinking off matters where the server accepts it
+    (unbudgeted thinking truncated the extraction JSON); servers that REJECT the parameter
     (HTTP 400/422 - foreign local servers, cloud) get one plain retry,
     mirroring the app's maybe_strip_rejected_params."""
     def chat(self, messages, *, temperature=None, max_tokens=None):
+        level = _learning_reasoning()
         kw = dict(
             model=self.config.model, messages=messages,
             temperature=self.config.temperature if temperature is None else temperature,
             max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
         )
+        if level != "off" and kw["max_tokens"]:
+            # Thinking counts against the cap: keep the extraction's own room.
+            kw["max_tokens"] += _THINKING_BUDGETS[level]
         try:
             resp = self._client.chat.completions.create(
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}}, **kw)
+                extra_body=_reasoning_body(_read_app_llm()[0], level), **kw)
         except Exception as e:
             msg = repr(e)
             if not ("400" in msg or "422" in msg
