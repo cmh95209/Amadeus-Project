@@ -123,6 +123,18 @@ export default function App() {
       return false;
     }
   });
+  // Off (default): her voice and the bubble wait for the English line, so
+  // text and voice arrive together. On: she starts speaking as soon as her
+  // Japanese line is written; her Japanese line is then always shown, so the
+  // bubble is never blank while the English is being written.
+  const [voiceEarly, setVoiceEarly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("amadeusVoiceEarly") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const japaneseShown = showJapanese || voiceEarly;
   const [editSaving, setEditSaving] = useState(false);
   const [voiceRetention, setVoiceRetentionState] = useState<number>(100);
   const [contextBudget, setContextBudgetState] = useState<number>(40000);
@@ -276,13 +288,21 @@ export default function App() {
     }
   }, [showJapanese]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem("amadeusVoiceEarly", voiceEarly ? "1" : "0");
+    } catch {
+      // Storage blocked: the switch still works for this visit.
+    }
+  }, [voiceEarly]);
+
   // Chat replies arrive with her Japanese line, but greetings and touch
   // reactions are added locally without it. While the Japanese line is
   // shown, pick those up once from the server's copy (each id only once,
   // so a line that really has no Japanese never causes a reload loop).
   const japaneseFetched = useRef<Set<number>>(new Set());
   useEffect(() => {
-    if (!showJapanese || loading || editingId !== null) return;
+    if (!japaneseShown || loading || editingId !== null) return;
     const missing = messages.filter(
       (m) => m.role !== "user" && m.id != null && m.japanese === undefined &&
         !japaneseFetched.current.has(m.id)
@@ -303,7 +323,7 @@ export default function App() {
         );
       })
       .catch(() => undefined);
-  }, [showJapanese, loading, editingId, messages]);
+  }, [japaneseShown, loading, editingId, messages]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -797,7 +817,13 @@ export default function App() {
 
     try {
       const turn = await sendMessage(text);
-      const reply = turn.reply;
+      let reply = turn.reply;
+      if (!voiceEarly && !reply.response) {
+        // Default: wait for the English line, so the bubble and her voice
+        // arrive together (the typing dots stay up meanwhile).
+        const english = await turn.text.catch(() => "");
+        reply = { ...reply, response: english || reply.japanese || "" };
+      }
 
       // The reply tells us which conversation the turn was stored in. If the
       // pane is showing a different one, the pane went stale - reload it.
@@ -827,6 +853,7 @@ export default function App() {
           content: reply.response,
           japanese: reply.japanese,
           id: reply.assistantId,
+          translating: !reply.response,
         });
         return next;
       });
@@ -856,7 +883,7 @@ export default function App() {
               const next = [...current];
               for (let i = next.length - 1; i >= 0; i--) {
                 if (next[i].role === "assistant" && next[i].id === reply.assistantId) {
-                  next[i] = { ...next[i], content: english };
+                  next[i] = { ...next[i], content: english, translating: false };
                   break;
                 }
               }
@@ -1807,7 +1834,14 @@ export default function App() {
               ) : (
                 <div className="bubble">
                   {message.content}
-                  {showJapanese && message.role !== "user" && message.japanese && (
+                  {message.translating && !message.content && (
+                    <span className="bubble-translating" aria-label="Writing the English line">
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                  )}
+                  {japaneseShown && message.role !== "user" && message.japanese && (
                     <span className="bubble-japanese" lang="ja">
                       {message.japanese}
                     </span>
@@ -2446,16 +2480,39 @@ export default function App() {
                     messages - this is also what she remembers. Editing one of
                     her messages rewrites it to match (her long-term memory may
                     already have learned the old line). Saved in this browser.
+                    {voiceEarly && " Always on while her voice starts early (below)."}
                   </span>
                 </div>
                 <button
                   type="button"
-                  className={`settings-toggle${showJapanese ? " on" : ""}`}
+                  className={`settings-toggle${japaneseShown ? " on" : ""}`}
                   onClick={() => setShowJapanese((v) => !v)}
-                  aria-pressed={showJapanese}
+                  aria-pressed={japaneseShown}
+                  disabled={voiceEarly}
                 >
                   <span className="settings-toggle-knob" aria-hidden="true" />
-                  <span>{showJapanese ? "On" : "Off"}</span>
+                  <span>{japaneseShown ? "On" : "Off"}</span>
+                </button>
+              </div>
+
+              <div className="settings-toggle-row" aria-label="Start her voice early">
+                <div className="settings-toggle-text">
+                  <span className="settings-toggle-title">Start her voice early</span>
+                  <span className="settings-toggle-desc">
+                    She starts speaking as soon as her Japanese line is written,
+                    and the English appears a moment later. Her Japanese line is
+                    shown meanwhile. Off: her voice and the English text arrive
+                    together, a few seconds later. Saved in this browser.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={`settings-toggle${voiceEarly ? " on" : ""}`}
+                  onClick={() => setVoiceEarly((v) => !v)}
+                  aria-pressed={voiceEarly}
+                >
+                  <span className="settings-toggle-knob" aria-hidden="true" />
+                  <span>{voiceEarly ? "On" : "Off"}</span>
                 </button>
               </div>
 

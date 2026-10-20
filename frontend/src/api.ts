@@ -23,6 +23,8 @@ export type MemoryMessage = {
   greeting_regenerable?: boolean;
   version_ids?: number[];
   is_greeting?: boolean;
+  /** Screen-only: her voice started before the English line arrived. */
+  translating?: boolean;
 };
 
 export type MessageReply = {
