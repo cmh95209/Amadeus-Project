@@ -438,17 +438,24 @@ export async function setWebAccess(enabled: boolean): Promise<void> {
   }));
 }
 
-export async function getDeepThinking(): Promise<boolean> {
-  const data = await parseResponse(await fetch(`${API_BASE}/getDeepThinking`, { cache: "no-store" }));
-  if (typeof data.enabled !== "boolean") throw new Error("Could not read deep thinking state");
-  return data.enabled;
+export type ReasoningLevel = "off" | "low" | "medium" | "high";
+export type ReasoningKey = "replies_builtin" | "replies_custom" | "translations";
+export type ReasoningInfo = Record<ReasoningKey, ReasoningLevel> & {
+  /** Which brain is active: her replies' level is the one for this brain. */
+  mode: "builtin" | "custom";
+  custom_is_cloud: boolean;
+};
+
+// Settings -> Connection -> Reasoning (replaced the Deep thinking switch).
+export async function getReasoning(): Promise<ReasoningInfo> {
+  return await parseResponse(await fetch(`${API_BASE}/reasoning`, { cache: "no-store" }));
 }
 
-export async function setDeepThinking(enabled: boolean): Promise<void> {
-  await parseResponse(await fetch(`${API_BASE}/setDeepThinking`, {
+export async function setReasoning(levels: Partial<Record<ReasoningKey, ReasoningLevel>>): Promise<ReasoningInfo> {
+  return await parseResponse(await fetch(`${API_BASE}/reasoning`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(levels),
   }));
 }
 

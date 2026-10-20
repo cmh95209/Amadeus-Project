@@ -21,8 +21,8 @@ import {
   setModel,
   getWebAccess,
   setWebAccess,
-  getDeepThinking,
-  setDeepThinking,
+  getReasoning,
+  setReasoning,
   sendInteraction,
   editMessage,
   deleteMessage,
@@ -63,6 +63,7 @@ import {
   getStats,
   StatInfo,
 } from "./api";
+import type { ReasoningInfo, ReasoningKey, ReasoningLevel } from "./api";
 
 import { interactions } from "./interactions";
 import type { InteractionName } from "./interactions";
@@ -95,6 +96,13 @@ function addressOptions(name: string): [string, string][] {
     ["custom", "Custom…"],
   ];
 }
+const REASONING_CHOICES: Array<[ReasoningLevel, string]> = [
+  ["off", "Off"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+];
+
 export default function App() {
   const [messages, setMessages] = useState<MemoryMessage[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -113,8 +121,8 @@ export default function App() {
   const [model, setModelName] = useState("");
   const [webAccess, setWebAccessState] = useState<boolean | null>(null);
   const [webToggling, setWebToggling] = useState(false);
-  const [deepThinking, setDeepThinkingState] = useState<boolean | null>(null);
-  const [deepThinkingBusy, setDeepThinkingBusy] = useState(false);
+  const [reasoning, setReasoningState] = useState<ReasoningInfo | null>(null);
+  const [reasoningBusy, setReasoningBusy] = useState(false);
   // Display-only, so it lives in this browser (no backend setting file).
   const [showJapanese, setShowJapanese] = useState<boolean>(() => {
     try {
@@ -712,13 +720,13 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetInfo, serverAddr, savedName, profile, brainInfo] =
+      const [memory, currentModel, configured, webOn, reasoningInfo, convs, voiceCap, budgetInfo, serverAddr, savedName, profile, brainInfo] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
           getApiKeyStatus(),
           getWebAccess().catch(() => true),
-          getDeepThinking().catch(() => false),
+          getReasoning().catch(() => null),
           listConversations().catch(() => null),
           getVoiceRetention().catch(() => 100),
           getContextBudgetInfo().catch(() => ({ budget: 40000, builtinCap: null, defaultBudget: 40000 })),
@@ -732,7 +740,7 @@ export default function App() {
       setModelName(currentModel === "No Model Selected." ? "" : currentModel);
       setHasApiKey(configured);
       setWebAccessState(webOn);
-      setDeepThinkingState(deepThinkingOn);
+      setReasoningState(reasoningInfo);
       setVoiceRetentionState(voiceCap);
       setContextBudgetState(budgetInfo.budget);
       setBuiltinBudgetCap(budgetInfo.builtinCap);
@@ -1124,25 +1132,19 @@ export default function App() {
     }
   }
 
-  async function toggleDeepThinking() {
-    if (deepThinkingBusy || deepThinking === null) return;
-
-    const next = !deepThinking;
-    setDeepThinkingState(next);
-    setDeepThinkingBusy(true);
-
+  async function changeReasoning(key: ReasoningKey, level: ReasoningLevel) {
+    if (reasoningBusy || !reasoning) return;
+    const before = reasoning;
+    setReasoningState({ ...reasoning, [key]: level });
+    setReasoningBusy(true);
     try {
-      await setDeepThinking(next);
-      setStatus(next ? "Deep thinking on" : "Deep thinking off");
+      setReasoningState(await setReasoning({ [key]: level }));
+      setStatus(`Reasoning (${key === "translations" ? "translations" : "her replies"}): ${level}`);
     } catch (error) {
-      setDeepThinkingState(!next);
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "Could not toggle deep thinking"
-      );
+      setReasoningState(before);
+      setStatus(error instanceof Error ? error.message : "Could not change reasoning");
     } finally {
-      setDeepThinkingBusy(false);
+      setReasoningBusy(false);
     }
   }
 
@@ -2452,24 +2454,48 @@ export default function App() {
                 )}
               </p>
 
-              <div className="settings-toggle-row" aria-label="Deep thinking">
-                <div className="settings-toggle-text">
-                  <span className="settings-toggle-title">Deep thinking</span>
-                  <span className="settings-toggle-desc">
-                    Lets her reason before deciding to search the web. Slower,
-                    so off by default. Only affects messages while web access is on.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={`settings-toggle${deepThinking ? " on" : ""}`}
-                  onClick={toggleDeepThinking}
-                  disabled={deepThinkingBusy || deepThinking === null}
-                  aria-pressed={!!deepThinking}
-                >
-                  <span className="settings-toggle-knob" aria-hidden="true" />
-                  <span>{deepThinking ? "On" : "Off"}</span>
-                </button>
+              <div className="settings-reasoning" aria-label="Reasoning">
+                <label>
+                  Reasoning: her replies ({builtinMode ? "built-in model" : "your model"})
+                  <select
+                    value={reasoning ? reasoning[builtinMode ? "replies_builtin" : "replies_custom"] : "off"}
+                    disabled={!reasoning || reasoningBusy}
+                    onChange={(event) => void changeReasoning(
+                      builtinMode ? "replies_builtin" : "replies_custom",
+                      event.target.value as ReasoningLevel)}
+                    aria-describedby="reasoning-help"
+                  >
+                    {REASONING_CHOICES.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Reasoning: translations
+                  <select
+                    value={reasoning ? reasoning.translations : "off"}
+                    disabled={!reasoning || reasoningBusy}
+                    onChange={(event) => void changeReasoning(
+                      "translations", event.target.value as ReasoningLevel)}
+                    aria-describedby="reasoning-help"
+                  >
+                    {REASONING_CHOICES.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="settings-help" id="reasoning-help">
+                  Lets her think before she answers: better thought-through,
+                  but slower (on cloud models a few seconds more per level; on
+                  the built-in model much more on smaller graphics cards), and
+                  cloud services charge for the thinking too. "Her replies"
+                  also covers greetings and deciding whether to search the
+                  web; "translations" covers the English line and what her
+                  memory learns. Some cloud models can't turn reasoning off
+                  completely - they use their lowest level instead. If her
+                  replies look cut off or broken with reasoning on, raise Max
+                  output tokens in the Sampling tab.
+                </p>
               </div>
 
               <div className="settings-toggle-row" aria-label="Show her Japanese line">
