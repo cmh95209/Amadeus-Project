@@ -79,18 +79,32 @@ def parse_server_report(data) -> dict | None:
             "read_ms": float(t.get("prompt_ms") or 0.0),
             "wrote": int(t.get("predicted_n") or 0),
             "write_ms": float(t.get("predicted_ms") or 0.0),
+            # Reasoning on: llama-server returns the thoughts apart
+            # (--reasoning-format deepseek) - their length in characters.
+            "thought_chars": _thought_chars(data),
         }
     u = data.get("usage")
     if isinstance(u, dict) and "prompt_tokens" in u:
         details = u.get("prompt_tokens_details") or {}
         cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        out_details = u.get("completion_tokens_details") or {}
+        thinking = out_details.get("reasoning_tokens") if isinstance(out_details, dict) else None
         return {
             "kind": "cloud",
             "prompt": int(u.get("prompt_tokens") or 0),
             "cached": int(cached) if cached is not None else None,
             "wrote": int(u.get("completion_tokens") or 0),
+            "thinking": int(thinking) if thinking is not None else None,
         }
     return None
+
+
+def _thought_chars(data) -> int:
+    try:
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        return len(message.get("reasoning_content") or "")
+    except (AttributeError, IndexError, TypeError):
+        return 0
 
 
 def describe_reports(reports) -> str:
@@ -106,13 +120,17 @@ def describe_reports(reports) -> str:
         wrote = sum(r["wrote"] for r in local)
         write_s = sum(r["write_ms"] for r in local) / 1000.0
         speed = f" ({wrote / write_s:.0f} per second)" if write_s > 0 else ""
+        thought = sum(r.get("thought_chars", 0) for r in local)
+        thought_text = f", of it thinking: {thought:,} characters" if thought else ""
         return (f"read {new:,} new + {reused:,} remembered pieces in {read_s:.2f} s, "
-                f"wrote {wrote:,} pieces in {write_s:.2f} s{speed}{calls}")
+                f"wrote {wrote:,} pieces in {write_s:.2f} s{speed}{thought_text}{calls}")
     prompt = sum(r["prompt"] for r in reports)
     wrote = sum(r["wrote"] for r in reports)
     cached = [r["cached"] for r in reports if r.get("cached") is not None]
     cache = f" ({sum(cached):,} cached by the service)" if cached else ""
-    return f"sent {prompt:,} pieces{cache}, got {wrote:,} back{calls}"
+    thinking = [r["thinking"] for r in reports if r.get("thinking") is not None]
+    think = f" (of it thinking: {sum(thinking):,})" if thinking else ""
+    return f"sent {prompt:,} pieces{cache}, got {wrote:,} back{think}{calls}"
 
 
 # ---------- reply stages ----------

@@ -39,6 +39,19 @@ def _port_alive(host: str, port: int, timeout: float = 1.5) -> bool:
         return False
 
 
+def _configured_server_url() -> str:
+    """The server the user set (or her built-in one), WITHOUT probing ports -
+    enough to tell a cloud service from a local one, and instant."""
+    if builtin_llm.active():
+        return builtin_llm.server_url()
+    try:
+        if _SERVER_FILE.exists():
+            return _SERVER_FILE.read_text(encoding="utf-8").strip().rstrip("/") or DEFAULT_SERVER_URL
+    except Exception:
+        pass
+    return DEFAULT_SERVER_URL
+
+
 def _server_url() -> str:
     # 0) Built-in mode: only the launcher's own llama-server - never another
     #    local server found on the usual ports (see builtin_llm).
@@ -96,10 +109,62 @@ _LLM_CACHE_PARAMS = {}   # cache key -> list of user sampling params that client
 _REJECTED = {}
 
 
+# Reasoning levels (Settings -> Connection -> Reasoning, MH 2026-10-20).
+# "off" = no thinking, or the lowest level a model accepts (some cloud models,
+# e.g. Gemini 3.8 Flash on OpenRouter, refuse to switch it off completely).
+REASONING_LEVELS = ("off", "low", "medium", "high")
+# Local servers (llama.cpp): a per-request thinking budget in pieces. Without
+# one Gemma 4 thought up to ~2,300 pieces (18 s) in the 2026-10-20 test.
+THINKING_BUDGETS = {"low": 512, "medium": 1024, "high": 2048}
+
+
+def _reasoning_fallback(extra_body, exc):
+    """A softer reasoning setting after the server refused ours (HTTP 400/422
+    mentioning reasoning/thinking), or None when this error is something else.
+    OpenRouter, Gemini 3.8 Flash: "Reasoning is mandatory for this endpoint and
+    cannot be disabled." (2026-10-20) - "minimal" works there."""
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return None
+    text = str(exc).lower()
+    if "reasoning" not in text and "thinking" not in text:
+        return None
+    extra = dict(extra_body or {})
+    if isinstance(extra.get("reasoning"), dict):
+        current = extra["reasoning"]
+        if current.get("enabled") is False:
+            extra["reasoning"] = {"effort": "minimal"}
+        elif current.get("effort") == "minimal":
+            extra["reasoning"] = {"effort": "low"}
+        else:
+            extra.pop("reasoning")
+        return extra
+    if "reasoning_effort" in extra:
+        if extra["reasoning_effort"] == "minimal":
+            extra["reasoning_effort"] = "low"
+        else:
+            extra.pop("reasoning_effort")
+        return extra
+    return None
+
+
 class _ThoughtFreeChatOpenAI(ChatOpenAI):
     """ChatOpenAI whose replies never carry an inline Gemma 4 thought block
     (builtin_llm.strip_thoughts). Every Amadeus call - chat, greetings,
     tools, translations - goes through this one place."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        # A server that refuses our reasoning setting gets one retry with a
+        # softer one; the client keeps it for the rest of the session.
+        try:
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        except Exception as exc:
+            softer = _reasoning_fallback(self.extra_body, exc)
+            if softer is None:
+                raise
+            print(f"[Amadeus] Server refused the reasoning setting {self.extra_body!r} - "
+                  f"retrying with {softer!r}.")
+            self.extra_body = softer or None
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     def _create_chat_result(self, response, generation_info=None):
         # Speed log: hand the server's own report (llama-server "timings" /
@@ -133,10 +198,42 @@ def _is_local_host(base_url: str) -> bool:
     )
 
 
+def reasoning_levels() -> dict:
+    """The three Reasoning choices with defaults applied (Settings shows these):
+    replies_builtin "off", replies_custom "low" on a cloud host / "off" on a
+    local or LAN server, translations "off" (MH 2026-10-20)."""
+    saved = memory.load_reasoning()
+    custom_default = "off" if _is_local_host(_configured_server_url()) else "low"
+    return {
+        "replies_builtin": saved.get("replies_builtin", "off"),
+        "replies_custom": saved.get("replies_custom", custom_default),
+        "translations": saved.get("translations", "off"),
+    }
+
+
+def reasoning_for(kind: str) -> str:
+    """The level for one kind of call right now: "replies" (her replies, the
+    web-search decision, greetings) follows the active brain; "translations"
+    (English line, repair passes) is one setting. Anything else: "off"."""
+    try:
+        levels = reasoning_levels()
+    except Exception:
+        return "off"
+    if kind == "translations":
+        return levels["translations"]
+    if kind == "replies":
+        return levels["replies_builtin"] if builtin_llm.active() else levels["replies_custom"]
+    return "off"
+
+
 def is_local_server(client) -> bool:
     """True when this client talks to a server on this PC / the LAN (her
     built-in model, the user's own llama-server, ...)."""
     return _is_local_host(str(getattr(client, "openai_api_base", None) or ""))
+
+
+def _is_openrouter_host(base_url: str) -> bool:
+    return "openrouter.ai" in base_url
 
 
 def _is_gemini_host(base_url: str) -> bool:
@@ -270,15 +367,14 @@ def maybe_strip_rejected_params(exc, model: str) -> bool:
     return True
 
 
-def get_llm(api_key: str, model: str, enable_thinking: bool = False):
+def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: str = None):
     """Build (once per model + thinking + sampling settings) and return a
     client that talks
     to your local Unsloth model.
 
-    enable_thinking=True turns Qwen3's internal reasoning ON for that client.
-    Amadeus uses it only for the web-search judgement call (deciding whether a
-    message references something she should verify); the final reply always
-    comes from the normal thinking-off client to stay fast and reliable.
+    reasoning = one of REASONING_LEVELS (Settings -> Reasoning: her replies /
+    translations; helper calls use "off"). enable_thinking=True is the old
+    shape and means "medium".
     """
     # Re-probe the local server on every call. When the saved port is alive
     # this is a single fast localhost check; it only matters when the port
@@ -291,8 +387,13 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
     # The user's Model Sampling settings are part of the client identity:
     # changing them rebuilds the client, so new values apply to the next
     # message without an app restart.
-    sampling_standard, sampling_extra, sent_params = _effective_sampling(base_url, enable_thinking)
-    key = (model, bool(enable_thinking),
+    # reasoning: one of REASONING_LEVELS. None = the old call shape:
+    # enable_thinking=True means "medium", otherwise "off" (helper calls).
+    if reasoning not in REASONING_LEVELS:
+        reasoning = "medium" if enable_thinking else "off"
+    thinking = reasoning != "off"
+    sampling_standard, sampling_extra, sent_params = _effective_sampling(base_url, thinking)
+    key = (model, reasoning,
            tuple(sorted(sampling_standard.items())),
            tuple(sorted(sampling_extra.items())))
 
@@ -308,36 +409,23 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
     # Local servers (Unsloth, vLLM, ...) understand it; public cloud providers
     # may reject unknown body fields, so it is only sent for local/LAN hosts.
     local = _is_local_host(base_url)
+    reply_cap = BUILTIN_MAX_TOKENS if builtin_llm.active() else 4096
 
-    if enable_thinking:
+    if thinking:
         # The thinking client is BOUNDED on purpose: a hard cap on tokens stops
         # runaway reasoning, and a shorter timeout means a slow or hung
-        # reasoning call fails over to the normal client quickly instead of
-        # stalling the whole reply for many minutes.
+        # reasoning call fails over quickly instead of stalling the whole
+        # reply for many minutes. Thinking counts against the output cap
+        # (local AND cloud), so the cap is her normal room PLUS the budget.
+        budget = THINKING_BUDGETS[reasoning]
         kwargs = {
             "model": model,
             "api_key": resolved_key,
             "base_url": base_url,
             "timeout": 240,
             "max_retries": 1,
-            "max_tokens": 4096,
+            "max_tokens": reply_cap + budget if builtin_llm.active() else max(4096, reply_cap + budget),
         }
-        extra_body = dict(sampling_extra)
-        if local:
-            # Qwen3/llama.cpp chat-template flag for local servers.
-            extra_body["chat_template_kwargs"] = {"enable_thinking": True}
-        elif _is_gemini_host(base_url):
-            # Gemini 3 models take thinking level via the compat layer's
-            # reasoning_effort field (verified live 2026-09-14: "high" runs
-            # ~1000 internal reasoning tokens, "low" ~270; the google-scoped
-            # thinking_config shape now 400s). The reasoning happens
-            # server-side and stays INTERNAL - content (and therefore her
-            # UI/voice output) comes back clean. Models that don't support
-            # the parameter (e.g. Gemma on the Gemini API) get an HTTP 400,
-            # which the caller's existing fallback already handles.
-            extra_body["reasoning_effort"] = "high"
-        if extra_body:
-            kwargs["extra_body"] = extra_body
     else:
         kwargs = {
             "model": model,
@@ -365,13 +453,34 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # 4096 gives real headroom for long replies - the same floor the
             # thinking client already uses - while still bounding a runaway.
             # Her built-in model: BUILTIN_MAX_TOKENS (see there).
-            "max_tokens": BUILTIN_MAX_TOKENS if builtin_llm.active() else 4096,
+            "max_tokens": reply_cap,
         }
-        extra_body = dict(sampling_extra)
-        if local:
-            extra_body["chat_template_kwargs"] = {"enable_thinking": False}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+    extra_body = dict(sampling_extra)
+    if local:
+        # llama.cpp / Qwen3-style chat-template flag + a per-request thinking
+        # budget (llama-server b11400 honours thinking_budget_tokens; the
+        # thoughts come back apart from the reply - --reasoning-format).
+        extra_body["chat_template_kwargs"] = {"enable_thinking": thinking}
+        if thinking:
+            extra_body["thinking_budget_tokens"] = THINKING_BUDGETS[reasoning]
+    elif _is_openrouter_host(base_url):
+        # OpenRouter's unified field. "minimal" = the lowest level; Gemini 3.8
+        # Flash refuses to switch reasoning off completely (2026-10-20).
+        extra_body["reasoning"] = {"effort": reasoning if thinking else "minimal"}
+    elif _is_gemini_host(base_url):
+        # Gemini 3 models take thinking level via the compat layer's
+        # reasoning_effort field (verified live 2026-09-14: "high" runs ~1000
+        # internal reasoning tokens, "low" ~270; the google-scoped
+        # thinking_config shape now 400s). The reasoning happens server-side
+        # and stays INTERNAL - content (and therefore her UI/voice output)
+        # comes back clean. A refusal falls back (_reasoning_fallback).
+        extra_body["reasoning_effort"] = reasoning if thinking else "minimal"
+    elif thinking:
+        # Other cloud services: the common OpenAI-style field; a server that
+        # rejects it is handled by maybe_strip_rejected_params / fallback.
+        extra_body["reasoning_effort"] = reasoning
+    if extra_body:
+        kwargs["extra_body"] = extra_body
 
     # User sampling settings (temperature / top_p / presence_penalty, and the
     # user's own output cap when set) override the built-in defaults above.

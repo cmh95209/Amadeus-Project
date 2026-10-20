@@ -139,6 +139,57 @@ def save_deep_thinking(enabled: bool) -> None:
         f.write("1" if enabled else "0")
 
 
+# ---------- REASONING LEVELS ---------- (NO SQL)
+# Settings -> Connection -> Reasoning (MH 2026-10-20; replaces the Deep
+# thinking switch). Three choices, each one of llm.REASONING_LEVELS:
+#   replies_builtin  her replies on her built-in model     (default "off")
+#   replies_custom   her replies on the user's own/cloud model
+#                    (default "low" on a cloud host, "off" on a local server)
+#   translations     the English line + repair passes, and the memory
+#                    helper's learning (default "off")
+# Built-in and custom are kept apart so switching brains never carries a
+# cloud level over to a small graphics card.
+PATH_TO_REASONING = os.path.join(DATA_DIR, "reasoning.json")
+REASONING_LEVELS = ("off", "low", "medium", "high")
+REASONING_KEYS = ("replies_builtin", "replies_custom", "translations")
+
+
+def load_reasoning() -> Dict[str, str]:
+    """The saved levels; a key that is missing/invalid is absent (the caller
+    applies the default). An old Deep thinking ON becomes "medium" for her
+    replies (both brains) the first time this is read."""
+    data = {}
+    try:
+        with open(PATH_TO_REASONING, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            data = {k: v for k, v in raw.items() if k in REASONING_KEYS and v in REASONING_LEVELS}
+    except (OSError, ValueError):
+        if os.path.exists(PATH_TO_DEEP_THINKING) and load_deep_thinking():
+            data = {"replies_builtin": "medium", "replies_custom": "medium"}
+            save_reasoning(data)
+    return data
+
+
+def save_reasoning(levels: Dict[str, str]) -> Dict[str, str]:
+    """Merge the given (valid) levels into the saved ones; returns all saved."""
+    current = {}
+    try:
+        with open(PATH_TO_REASONING, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            current = {k: v for k, v in raw.items() if k in REASONING_KEYS and v in REASONING_LEVELS}
+    except (OSError, ValueError):
+        pass
+    for key, value in (levels or {}).items():
+        if key in REASONING_KEYS and value in REASONING_LEVELS:
+            current[key] = value
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PATH_TO_REASONING, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=1)
+    return current
+
+
 # ---------- VOICE RETENTION (NO SQL) ----------
 # How many voice recordings to keep on disk (0 = keep everything).
 # Files beyond the cap are deleted after each new voice is saved; the rows

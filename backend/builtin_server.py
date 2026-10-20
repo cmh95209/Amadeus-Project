@@ -69,6 +69,9 @@ def server_command(cfg: dict, model_file: str) -> list[str]:
         "-ngl", str(int(cfg.get("gpu_layers") if cfg.get("gpu_layers") is not None else 999)),
         "--jinja",
         "--temp", "1.0", "--top-p", "0.95", "--top-k", "64",
+        # Thoughts (Settings -> Reasoning above Off) come back in their own
+        # field, never inside her reply text (tested 2026-10-20: 24/24 clean).
+        "--reasoning-format", "deepseek",
     ]
     if cfg.get("kv_cache") == "q8_0":
         # A compressed conversation memory needs flash attention on.

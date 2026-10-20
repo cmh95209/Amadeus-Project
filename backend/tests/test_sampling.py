@@ -114,7 +114,9 @@ class SamplingClientTests(SamplingBase):
     def test_thinking_client_keeps_4096_floor(self):
         small = self._with(self.memory.default_sampling(), max_tokens=256)
         client = self._build("http://localhost:8888/v1", small, enable_thinking=True)
-        self.assertEqual(client.max_tokens, 4096)
+        # Since 2026-10-20 the floor is her reply room PLUS the thinking budget
+        # (enable_thinking=True = "medium", budget 1024).
+        self.assertEqual(client.max_tokens, 4096 + self.llm.THINKING_BUDGETS["medium"])
         big = self._with(self.memory.default_sampling(), max_tokens=8192)
         client2 = self._build("http://localhost:8888/v1", big, enable_thinking=True)
         self.assertEqual(client2.max_tokens, 8192)

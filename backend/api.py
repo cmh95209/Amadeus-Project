@@ -505,20 +505,45 @@ def set_web_access():
     return jsonify({"status": "ok", "enabled": enabled})
 
 
+@application.route("/reasoning", methods=["GET"])
+def get_reasoning():
+    """Settings -> Reasoning: the three levels (defaults applied), which brain
+    is active, and whether the custom model is a cloud service."""
+    return jsonify({**llm.reasoning_levels(),
+                    "mode": "builtin" if builtin_llm.active() else "custom",
+                    "custom_is_cloud": not llm._is_local_host(llm._configured_server_url()),
+                    "levels": list(llm.REASONING_LEVELS)})
+
+
+@application.route("/reasoning", methods=["POST"])
+def set_reasoning():
+    """Save one or more levels: {"replies_builtin": "off", ...}."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"message": "Expected a JSON object"}), 400
+    bad = [k for k, v in data.items()
+           if k not in memory.REASONING_KEYS or v not in memory.REASONING_LEVELS]
+    if bad or not data:
+        return jsonify({"message": "Unknown setting or level: " + ", ".join(map(str, bad or ["(none)"]))}), 400
+    memory.save_reasoning(data)
+    return get_reasoning()
+
+
+# The old Deep thinking switch (replaced 2026-10-20) - kept one release for
+# older pages: "on" = her replies above Off for the active brain.
 @application.route("/getDeepThinking", methods=["GET"])
 def get_deep_thinking():
-    """Current state of the deep-thinking (search judgement) toggle."""
-    return jsonify({"enabled": memory.load_deep_thinking()})
+    return jsonify({"enabled": llm.reasoning_for("replies") != "off"})
 
 
 @application.route("/setDeepThinking", methods=["POST"])
 def set_deep_thinking():
-    """Turn deep thinking on or off (persisted)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or "enabled" not in data:
         return jsonify({"message": "Missing 'enabled' field"}), 400
     enabled = bool(data["enabled"])
-    memory.save_deep_thinking(enabled)
+    key = "replies_builtin" if builtin_llm.active() else "replies_custom"
+    memory.save_reasoning({key: "medium" if enabled else "off"})
     return jsonify({"status": "ok", "enabled": enabled})
 
 
