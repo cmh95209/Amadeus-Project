@@ -1,6 +1,7 @@
 import memory as store
 import builtin_llm
 from llm import get_llm, reset_llm, maybe_strip_rejected_params
+import llm as _llm_module
 from pydantic import BaseModel, Field
 from typing import Optional
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -1101,6 +1102,29 @@ def _forced_tool_choice_rejected(exc) -> bool:
             or "cannot guarantee" in text)
 
 
+def _structured(client, schema, messages):
+    """Her reply in the structured format `schema` (AmadeusPack / AmadeusReply).
+    Local servers (her built-in model, the user's own llama-server) get
+    tool_choice "required": llama-server rejects the named-function form that
+    with_structured_output sends ("Wrong type supplied for parameter
+    'tool_choice'") and falls back to "auto", so the first answer came back
+    empty and EVERY reply was written twice (Run 1, 2026-10-19). Cloud
+    services keep with_structured_output unchanged. Returns a `schema`
+    instance, or None when no usable call came back (the callers' existing
+    "came back empty" ladder handles it)."""
+    # Looked up at call time: several tests stand in a small fake `llm`
+    # module without this helper (then: the cloud path, i.e. unchanged).
+    is_local = getattr(_llm_module, "is_local_server", None)
+    if not (is_local and is_local(client)):
+        return client.with_structured_output(schema, method="function_calling").invoke(messages)
+    bound = client.bind_tools([convert_to_openai_tool(schema)], tool_choice="required")
+    reply = _invoke_forced(bound, messages)
+    for call in getattr(reply, "tool_calls", None) or []:
+        if call.get("name") == schema.__name__:
+            return schema.model_validate(call.get("args") or {})
+    return None
+
+
 def _invoke_forced(bound_llm, convo):
     """Invoke a tool_choice="required" binding; if the server rejects the forced
     choice (see _forced_tool_choice_rejected), retry once with tool_choice="auto"
@@ -1189,6 +1213,35 @@ def _honest_search_failure_pack(weather: bool = False) -> "AmadeusPack":
             "temporary glitch, could you ask me again in a moment?"
         ),
     )
+
+
+# Gemma 4 can write its native tool-call syntax as TEXT inside a field of an
+# otherwise valid pack and repeat it until the output cap (Run 1, 2026-10-19:
+# assistant_reply_ENG = "<|tool_call>call:AmadeusPack{assistant_reply_ENG:" x ~200,
+# JPS empty, 66 s, no voice). _repetition_cut only ever saw the plain-text
+# salvage path, never the parsed pack's fields.
+_TOOL_CALL_TEXT = re.compile(r"<\|tool_call>|<tool_call\|>|call:Amadeus(?:Pack|Reply)\{")
+_LOOP_CHECK_MIN_CHARS = 600   # a real reply may repeat a phrase; a loop runs long
+
+
+def _degenerate_field(text) -> str:
+    """Why this reply field is unusable ('' = fine): tool-call markup written
+    as text, or a long repetition loop."""
+    text = text if isinstance(text, str) else ""
+    if _TOOL_CALL_TEXT.search(text):
+        return "tool-call text in the reply"
+    if len(text) >= _LOOP_CHECK_MIN_CHARS and _repetition_cut(text) is not None:
+        return "repetition loop in the reply"
+    return ""
+
+
+def _degenerate_pack(p) -> str:
+    """'' when the pack's lines are usable, else the reason."""
+    for field in ("assistant_reply_JPS", "assistant_reply_ENG"):
+        why = _degenerate_field(getattr(p, field, "") if not isinstance(p, dict) else p.get(field))
+        if why:
+            return why
+    return ""
 
 
 def _honest_plain_failure_pack() -> "AmadeusPack":
@@ -2907,10 +2960,8 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         # below takes over unchanged. OFF (default): exactly the original path.
         if store.load_deep_thinking():
             think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True)
-            structured = think_llm.with_structured_output(AmadeusPack, method="function_calling")
-            return structured.invoke(messages)
-        structured = client.with_structured_output(AmadeusPack, method="function_calling")
-        return structured.invoke(messages)
+            return _structured(think_llm, AmadeusPack, messages)
+        return _structured(client, AmadeusPack, messages)
 
     try:
         out: AmadeusPack = _attempt(llm)
@@ -2922,6 +2973,14 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             # setting" signal the web path has, not a cryptic AttributeError.
             raise ValueError("structured reply came back empty - clipped "
                              "mid-JSON? check the max-output-tokens setting")
+        why = _degenerate_pack(out)
+        if why:
+            if web_on:
+                # Another round would repeat the searches (and the wait);
+                # say plainly that this answer failed.
+                print(f"[Amadeus] Web reply unusable ({why}) - honest fallback.")
+                return _honest_search_failure_pack()
+            raise ValueError(f"structured reply unusable ({why})")
         return _out(out)
     except Exception as e:
         # The server may REJECT a sampling parameter (strict cloud compat
@@ -2957,7 +3016,12 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             raise
         calls = getattr(reply, "tool_calls", None) or []
         if calls and calls[0].get("name") == "AmadeusPack":
-            return _out(_pack_from_args(calls[0].get("args")))
+            forced = _pack_from_args(calls[0].get("args"))
+            why = _degenerate_pack(forced)
+            if why:
+                print(f"[Amadeus] Forced pack retry unusable ({why}) - honest fallback.")
+                return _honest_plain_failure_pack()
+            return _out(forced)
 
         # The call returned but not as an AmadeusPack (she answered in plain text).
         # Rather than erroring out, salvage whatever she said into a pack so the user
@@ -3067,8 +3131,8 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         # not need it, and speed is the point.
         if store.load_deep_thinking():
             think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True)
-            return think_llm.with_structured_output(AmadeusReply, method="function_calling").invoke(messages)
-        return client.with_structured_output(AmadeusReply, method="function_calling").invoke(messages)
+            return _structured(think_llm, AmadeusReply, messages)
+        return _structured(client, AmadeusReply, messages)
 
     def _jps_of(out) -> str:
         if isinstance(out, AmadeusReply):
@@ -3096,6 +3160,9 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
             # same actionable error as the single-call path.
             raise ValueError("structured reply came back empty - clipped "
                              "mid-JSON? check the max-output-tokens setting")
+        why = _degenerate_field(_jps_of(out))
+        if why:
+            raise ValueError(f"structured reply unusable ({why})")
         return _out(_jps_of(out))
     except Exception as e:
         # Same ladder as the single-call path, with the JA-only twins: one
@@ -3124,7 +3191,13 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
             raise
         calls = getattr(reply, "tool_calls", None) or []
         if calls and calls[0].get("name") == "AmadeusReply":
-            return _out(_jps_of(calls[0].get("args")))
+            jps = _jps_of(calls[0].get("args"))
+            why = _degenerate_field(jps)
+            if why:
+                print(f"[Amadeus] Voice-first: forced retry unusable ({why}) - honest fallback.")
+                honest = _honest_plain_failure_pack()
+                return AmadeusPack(assistant_reply_JPS=honest.assistant_reply_JPS, assistant_reply_ENG="")
+            return _out(jps)
 
         raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
         if _repetition_cut(raw) is not None:

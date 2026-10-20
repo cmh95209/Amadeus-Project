@@ -80,6 +80,12 @@ def _server_url() -> str:
 # whenever it restarts. If the port moves, we must rebuild the client instead
 # of keeping the old one - otherwise every request goes to a dead address and
 # hangs until its timeout (the "first message stalls, restart fixes it" bug).
+# Output cap for her built-in model's normal client. Her longest measured
+# reply was ~950 pieces (both lines); a Gemma loop that hits the cap now costs
+# ~12 s on a fast card instead of over a minute (Run 1, 2026-10-19: 2 x 4,096
+# pieces, 66 s). Cloud / custom models keep 4096.
+BUILTIN_MAX_TOKENS = 1536
+
 _LLM_CACHE = {}
 _LLM_CACHE_URL = {}
 _LLM_CACHE_PARAMS = {}   # cache key -> list of user sampling params that client sends
@@ -125,6 +131,12 @@ def _is_local_host(base_url: str) -> bool:
         host in ("localhost", "127.0.0.1", "::1")
         or host.startswith(("192.168.", "10.", "172.16."))
     )
+
+
+def is_local_server(client) -> bool:
+    """True when this client talks to a server on this PC / the LAN (her
+    built-in model, the user's own llama-server, ...)."""
+    return _is_local_host(str(getattr(client, "openai_api_base", None) or ""))
 
 
 def _is_gemini_host(base_url: str) -> bool:
@@ -352,7 +364,8 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False):
             # and surfaced as "no usable reply" (fresh-VM incident, 2026-10-08).
             # 4096 gives real headroom for long replies - the same floor the
             # thinking client already uses - while still bounding a runaway.
-            "max_tokens": 4096,
+            # Her built-in model: BUILTIN_MAX_TOKENS (see there).
+            "max_tokens": BUILTIN_MAX_TOKENS if builtin_llm.active() else 4096,
         }
         extra_body = dict(sampling_extra)
         if local:
