@@ -153,6 +153,16 @@ def main():
     # GPT-SoVITS expects to run from repo root
     os.chdir(GPT_ROOT)
 
+    # Processor voice: one thread per real core (the launcher measured it).
+    threads = os.environ.get("AMADEUS_VOICE_THREADS", "").strip()
+    if threads.isdigit():
+        try:
+            import torch
+            torch.set_num_threads(int(threads))
+            print(f"[Amadeus] voice on the processor: {threads} threads")
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[Amadeus] could not set voice threads: {exc!r}")
+
     print("[Amadeus] Starting GPT-SoVITS native API...")
     _install_audio_fallback()
 

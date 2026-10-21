@@ -189,6 +189,35 @@ def generateVoice(text: str):
         _stream_audio(text, play=False)
 
 
+WARM_UP_LINE = "うん、準備できたわ。"
+
+
+def warm_up(wait_s: float = 600.0) -> None:
+    """Speak one short line into a throw-away file once the voice engine is
+    up, so her first real reply is not the slowest (cold first line on the
+    processor: first sound 4.7-6.3 s, up to 1.26x real time - 2026-10-21).
+    Background only; any failure is just logged."""
+    import time
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            requests.get(f"{GPTSOVITS_API_URL}/docs", timeout=2)
+            break
+        except requests.RequestException:
+            time.sleep(2)
+    else:
+        return
+    started = time.monotonic()
+    target = OUT_WAV.with_name("warm_up.wav")
+    ok = renderVoiceToPath(WARM_UP_LINE, target)
+    try:
+        target.unlink()
+    except OSError:
+        pass
+    if ok:
+        print(f"[Timing] voice warm-up took {time.monotonic() - started:.1f} s", flush=True)
+
+
 def renderVoiceToPath(text: str, path) -> bool:
     """Synthesize a line straight into a specific WAV file (no playback).
 

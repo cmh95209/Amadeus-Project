@@ -24,6 +24,11 @@ _threading.Thread(target=_chat.backfill_japanese_voice, daemon=True, name="ja-ba
 # launcher said "start without it". Settings can unload / load / switch it.
 import builtin_server as _builtin_server
 _builtin_server.start_at_launch()
+
+# Her voice: one short throw-away line once the engine is up, so the first
+# real reply is not the slowest.
+import tts as _tts
+_threading.Thread(target=_tts.warm_up, daemon=True, name="voice-warm-up").start()
 logging.basicConfig(level=logging.ERROR)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module='torch')
