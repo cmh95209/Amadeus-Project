@@ -749,6 +749,8 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
         pack = AmadeusPack(assistant_reply_JPS=cleaned, assistant_reply_ENG=pack.assistant_reply_ENG)
     if _has_japanese_script(pack.assistant_reply_JPS):
         return pack
+    if not _usable_source(pack.assistant_reply_ENG):
+        return pack
     try:
         trans = llm.invoke([{
             "role": "user",
@@ -781,6 +783,9 @@ def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
     # Fast path: already English (has Latin letters and no Japanese script).
     if _has_latin(eng) and not _has_japanese_script(eng):
         return pack
+    if not _usable_source(pack.assistant_reply_JPS or eng):
+        return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS,
+                           assistant_reply_ENG=eng or (pack.assistant_reply_JPS or ""))
     try:
         trans = llm.invoke([{
             "role": "user",
@@ -792,7 +797,7 @@ def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
             ),
         }])
         new_eng = _strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)).strip()
-        if _has_latin(new_eng):
+        if _has_latin(new_eng) and not _META_TRANSLATION.search(new_eng):
             print("[Amadeus] ENG was not English - repaired with a translation pass")
             return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS, assistant_reply_ENG=new_eng)
     except Exception as e:
@@ -965,6 +970,8 @@ def _ensure_japanese_jps(jps: str, llm) -> str:
     cleaned = _clean_tts_text(jps or "")
     if _has_japanese_script(cleaned):
         return cleaned
+    if not _usable_source(cleaned):
+        return cleaned
     try:
         trans = llm.invoke([{
             "role": "user",
@@ -1124,6 +1131,73 @@ def _translation_llm():
     return get_llm(API_KEY, LLM_Model, reasoning=level) if level else get_llm(API_KEY, LLM_Model)
 
 
+def _is_local(client) -> bool:
+    """True for her built-in model / the user's own local server (looked up at
+    call time - several tests stand in a fake `llm` module)."""
+    fn = getattr(_llm_module, "is_local_server", None)
+    try:
+        return bool(fn and fn(client))
+    except Exception:
+        return False
+
+
+_PLAIN_LABEL = re.compile(r"^\s*(?:JA|JP|Japanese|日本語|Amadeus|アマデウス)\s*[:：]\s*", re.I)
+
+
+def _plain_jps(client, messages) -> str:
+    """One plain-text call for her Japanese line. Returns the cleaned line, or
+    raises ValueError(reason) when it is unusable (empty, cut off at the output
+    cap, no Japanese, markup/tool-call text, a long loop)."""
+    reply = client.invoke(messages)
+    raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+    text = _PLAIN_LABEL.sub("", _strip_thinking(raw).strip()).strip()
+    if len(text) >= 2 and text[0] in "「\"'" and text[-1] in "」\"'":
+        text = text[1:-1].strip()
+    meta = getattr(reply, "response_metadata", None) or {}
+    why = _degenerate_field(text)
+    if not text:
+        why = "empty"
+    elif meta.get("finish_reason") == "length":
+        why = why or "cut off at the output limit"
+    elif not _has_japanese_script(text):
+        why = why or "no Japanese"
+    if why:
+        raise ValueError(f"plain reply unusable ({why}): {text[:80]!r}")
+    return text
+
+
+def _plain_reply(client, messages, label):
+    """_plain_jps with ONE retry. None = both attempts unusable (the caller
+    serves the honest line); a connection error that repeats is raised."""
+    for attempt in (1, 2):
+        try:
+            return _plain_jps(client, messages)
+        except ValueError as exc:
+            print(f"[Amadeus] {label}: plain reply attempt {attempt} unusable - {exc}")
+        except Exception as exc:
+            print(f"[Amadeus] {label}: plain reply attempt {attempt} failed: {exc!r}")
+            if attempt == 2:
+                raise
+    return None
+
+
+def _two_step_pack(client, messages, message_context, label) -> "AmadeusPack":
+    """Local models, a full reply with both lines (regenerate, greetings): her
+    Japanese line as plain text, then the English line by the translation call
+    (Settings -> Reasoning -> Translations). The English falls back to her
+    Japanese line (the guards then try their own translation pass)."""
+    jps = _plain_reply(client, messages, label)
+    if jps is None:
+        return _honest_plain_failure_pack()
+    en = ""
+    try:
+        en = _translate_reply_en(_translation_llm(), jps,
+                                 _voice_first_context_lines(message_context))
+    except Exception as exc:
+        print(f"[Amadeus] {label}: English line failed: {exc!r}")
+    return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=en or jps)
+
+
 def _structured(client, schema, messages):
     """Her reply in the structured format `schema` (AmadeusPack / AmadeusReply).
     Local servers (her built-in model, the user's own llama-server) get
@@ -1264,6 +1338,19 @@ def _degenerate_pack(p) -> str:
         if why:
             return why
     return ""
+
+
+# A translation pass may only run on a real line, and a model that answers it
+# with a request ("Please provide the Japanese text you would like me to
+# translate" - Run 4, 2026-10-21, after a broken reply left a field empty) has
+# not translated anything.
+_META_TRANSLATION = re.compile(
+    r"\b(?:provide|paste|send|share|give|enter)\b.{0,40}\b(?:text|sentence|line|japanese|english)\b"
+    r"|\bwould you like me to translate\b|\bnothing to translate\b", re.I)
+
+
+def _usable_source(text) -> bool:
+    return len(re.sub(r"[\s\W_0-9]", "", text or "")) >= 2
 
 
 def _honest_plain_failure_pack() -> "AmadeusPack":
@@ -2362,6 +2449,21 @@ _PACK_RULES_JA_ONLY = {
     ),
 }
 
+# Local models (her built-in model, the user's own server) answer her Japanese
+# line as PLAIN TEXT: with the reply form every model broke on 9-30 of 30 real
+# prompts (the form left open, loops to the output cap, numbers in the field),
+# with plain text 0-3 of 30 (reliability test 2026-10-21). Cloud keeps the form.
+_PLAIN_RULES_JA = {
+    "role": "system",
+    "content": (
+        _PACK_RULES_JA_ONLY["content"]
+        .replace(", in assistant_reply_JPS", "")
+        .replace("Write assistant_reply_JPS natively", "Write it natively")
+        + " Reply with ONLY her spoken Japanese line as plain text: no English, "
+          "no quotes, no labels, no markup, no JSON."
+    ),
+}
+
 
 class GreetingSuperseded(Exception):
     """The user sent a message in the greeted tab while the greeting was
@@ -2770,11 +2872,21 @@ def generate_greeting(mode: str = "startup",
                                            previous_conversation_id=(
                                                previous_conversation_id
                                                if switch else None))]
-            + [_PACK_RULES]
+            + [_PLAIN_RULES_JA if _is_local(client) else _PACK_RULES]
             + [ja_voice.build_voice_context(stats.load_stat("trust"))]
             + [NO_WEB_BLOCK]
             + ctx
         )
+        if _is_local(client):
+            # Local model: plain Japanese line + translated English line. An
+            # unusable line raises, so the bounded retry below applies.
+            jps = _plain_jps(client, messages)
+            en = ""
+            try:
+                en = _translate_reply_en(_translation_llm(), jps, _voice_first_context_lines(ctx))
+            except Exception as exc:
+                print("[Amadeus] Greeting: English line failed:", repr(exc))
+            return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=en or jps)
         # The same forced-pack call the normal reply path uses: _invoke_forced
         # auto-retries with tool_choice="auto" when the server rejects the
         # forced choice (NInfer does - documented, harmless), and the parse
@@ -2922,9 +3034,11 @@ def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
 def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     llm = _reply_llm()
 
-    pack_rules = _PACK_RULES
-
     web_on = store.load_web_access()
+    # Local model, web off: her Japanese line as plain text + the English line
+    # by the translation call (_two_step_pack); the form only for cloud / web.
+    plain = not web_on and _is_local(llm)
+    pack_rules = _PLAIN_RULES_JA if plain else _PACK_RULES
 
     # Character book: her appearance/outfit are NOT in the base prompt (saves ~230
     # tokens every turn). Load them only when the user's latest message asks how
@@ -2967,6 +3081,9 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         # Web access OFF: original single-call path (no search tool offered).
         # The client carries the Settings -> Reasoning level (_reply_llm).
         return _structured(client, AmadeusPack, messages)
+
+    if plain:
+        return _out(_two_step_pack(llm, messages, message_context, "Reply"))
 
     try:
         out: AmadeusPack = _attempt(llm)
@@ -3105,6 +3222,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 #   backfill) while her voice is already playing
 def getResponsePackedVoiceFirst(message_context, internal_context=None) -> AmadeusPack:
     llm = _reply_llm()
+    plain = _is_local(llm)
 
     # Same prompt assembly as getResponsePacked, with the JA-only pack rules
     # and NO_WEB_BLOCK (this path is web-OFF by construction).
@@ -3123,7 +3241,7 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         + book_messages
         + ([memory_block] if memory_block else [])
         + [internal_context if internal_context is not None else store.load_internal_context()]
-        + [_PACK_RULES_JA_ONLY]
+        + [_PLAIN_RULES_JA if plain else _PACK_RULES_JA_ONLY]
         + [ja_voice.build_voice_context(stats.load_stat("trust"))]
         + [NO_WEB_BLOCK]
         + message_context
@@ -3152,6 +3270,13 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
                         assistant_reply_ENG=""))
         return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS,
                            assistant_reply_ENG="")
+
+    if plain:
+        jps = _plain_reply(llm, messages, "Voice-first")
+        if jps is None:
+            honest = _honest_plain_failure_pack()
+            return AmadeusPack(assistant_reply_JPS=honest.assistant_reply_JPS, assistant_reply_ENG="")
+        return _out(jps)
 
     try:
         out = _attempt(llm)
@@ -3407,6 +3532,8 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
     with a short snippet of what the model actually returned, so a silent
     backfill failure is visible in the log instead of found only by digging
     through the memory DB."""
+    if not _usable_source(jps):
+        return ""
     lines = [
         "You are writing the English line shown to the user in the chat UI for "
         "one of Amadeus's replies. Translate her Japanese line into natural, "
@@ -3424,6 +3551,9 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
     en = _strip_thinking(content).strip().strip(chr(34)).strip()
     if not en:
         print(f"[Amadeus] Voice-first: English backfill unusable (empty) - raw: {content[:120]!r}")
+        return ""
+    if _META_TRANSLATION.search(en):
+        print(f"[Amadeus] Voice-first: English backfill unusable (a request, not a translation) - raw: {en[:120]!r}")
         return ""
     # A weaker model can echo the Japanese input back as the "translation";
     # that would put Japanese in the English box - treat it as a failure so
