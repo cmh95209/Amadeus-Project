@@ -342,10 +342,10 @@ def ask_about_graphics_memory(need: float, read_free=None, ask=input) -> bool:
         note(f"Graphics memory low ({free} of {need} GB) - no one to ask, loading anyway.")
         return True
     while True:
-        say(f"\n  Your graphics card has {free} GB free; her model needs about {need} GB.")
-        say("  Close games or other programs that use a lot of graphics memory, then")
-        say("  press Enter to check again. Or type S to start her model anyway (it may")
-        say("  be slow or fail), or N to start without it (load it later in")
+        say(f"\n  Your graphics card is busy: {free} GB free, her model needs about {need} GB.")
+        say("  Close games or other programs for full speed, then press Enter to check")
+        say("  again. Or type S to start her model anyway (she will be slower until the")
+        say("  card has room), or N to start without it (load it later in")
         say("  Settings -> Connection).")
         try:
             answer = ask("  Your choice [Enter / S / N]: ").strip().upper()

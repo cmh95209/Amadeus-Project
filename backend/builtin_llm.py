@@ -91,16 +91,16 @@ def _is_main_model(path: Path) -> bool:
 
 # Settings -> "Get more models" (2026-10-18 - option B: links, no
 # in-app downloader): the official Gemma 4 QAT files, pinned to the same
-# Hugging Face revisions the installer uses (E4B / 12B must match
+# Hugging Face revisions the installer uses (12B-Q3 / 12B must match
 # scripts/local_llm_tiers.json - a test keeps them equal). The download
 # runs in the user's browser; they move the file into the models folder
 # and press Refresh list. 26B-A4B and 31B are offered here only: the
 # installer no longer picks them (31B ~31 GB and 26B-A4B 31.5 GB at peak on
 # a 32 GB card with this app's settings).
 MODEL_CATALOG = [
-    {"key": "E4B", "label": "Gemma 4 E4B (QAT)", "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
-     "revision": "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265",
-     "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", "bytes": 4215695776},
+    {"key": "12B-Q3", "label": "Gemma 4 12B (3-bit, for 8 GB cards)", "repo": "unsloth/gemma-4-12b-it-GGUF",
+     "revision": "fc034cfff751157913579611efad8462ac1be606",
+     "file": "gemma-4-12b-it-Q3_K_M.gguf", "bytes": 5693872960},
     {"key": "12B", "label": "Gemma 4 12B (QAT)", "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
      "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
      "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", "bytes": 6716356800},

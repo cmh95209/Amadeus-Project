@@ -46,10 +46,11 @@ def pick_build(table: dict, vendor: str | None, driver: str = "") -> str:
 
 
 def download_bytes(table: dict, model_key: str, build: str) -> int:
-    """Everything option A downloads: model + llama.cpp files."""
+    """Everything option A downloads: model + its vision file + llama.cpp files."""
     model = table["models"][model_key]
     files = table["llama_cpp"]["builds"][build]["files"]
-    return model["bytes"] + sum(f["bytes"] for f in files)
+    vision = (model.get("mmproj") or {}).get("bytes", 0)
+    return model["bytes"] + vision + sum(f["bytes"] for f in files)
 
 
 def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
@@ -72,6 +73,10 @@ def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
     for candidate in sorted(table["tiers"], key=lambda t: t["min_vram_gb"]):
         if vram_gb >= candidate["min_vram_gb"]:
             tier = candidate
+    if tier is None:
+        # A separate card, but smaller than the smallest tier (8 GB since
+        # tiers v5): the models that fit did not sound like her.
+        return {"offered": False, "reason": "small_card"}
     # Her voice engine can use only NVIDIA cards; on any other card it runs
     # on the processor, which needs plenty of normal memory.
     voice = tier["voice_device"] if vendor == "nvidia" else "cpu"

@@ -298,7 +298,26 @@ class LauncherTests(unittest.TestCase):
         cmd = self.command(_config(self.tmp, context=32768, kv_cache="f16"))
         self.assertIn("32768", cmd)
         self.assertNotIn("-ctk", cmd)
-        self.assertNotIn("-fa", cmd)
+        # Since tiers v5: flash attention always on, 2 slots sharing one
+        # context, the normal working space on big tiers.
+        self.assertEqual(cmd[cmd.index("-fa") + 1], "on")
+        self.assertEqual(cmd[cmd.index("-np") + 1], "2")
+        self.assertIn("-kvu", cmd)
+        self.assertEqual(cmd[cmd.index("-ub") + 1], "512")
+
+    def test_command_for_the_8gb_tier(self):
+        cmd = self.command(_config(self.tmp, context=16384, kv_cache="q4_0"))
+        self.assertEqual((cmd[cmd.index("-ctk") + 1], cmd[cmd.index("-ctv") + 1]), ("q4_0", "q4_0"))
+        self.assertEqual(cmd[cmd.index("-ub") + 1], "256")
+        self.assertEqual(cmd[cmd.index("-fa") + 1], "on")
+
+    def test_safe_retry_command_drops_the_fast_settings(self):
+        import builtin_server
+        cfg = _config(self.tmp, context=16384, kv_cache="q4_0")
+        cmd = builtin_server.server_command(cfg, cfg["model_file"], safe=True)
+        for flag in ("-fa", "-ctk", "-ctv", "-ub"):
+            self.assertNotIn(flag, cmd)
+        self.assertIn("-kvu", cmd)
 
     def test_no_speed_up_drafter(self):
         # Never used (2026-10-18), so never passed - even from an old settings file.
@@ -338,9 +357,11 @@ class LauncherTests(unittest.TestCase):
                           sim["voice_device"]), ("12B", "12-15", 24576, "q8_0", "cpu"))
         self.assertTrue(sim["model_ok"])   # the 12B file exists in this models folder
         self.assertTrue(sim["simulated"])
-        sim = self.launcher.apply_simulated_vram(cfg, 6)
-        self.assertEqual(sim["model"], "E4B")
+        sim = self.launcher.apply_simulated_vram(cfg, 8)
+        self.assertEqual((sim["model"], sim["kv_cache"]), ("12B-Q3", "q4_0"))
         self.assertFalse(sim["model_ok"])  # not downloaded -> reported, not started
+        # Under 8 GB (tiers v5) and no card: no built-in model at all.
+        self.assertIsNone(self.launcher.apply_simulated_vram(cfg, 6))
         self.assertIsNone(self.launcher.apply_simulated_vram(cfg, 0))
 
     def test_sidecar_follows_builtin_without_touching_user_files(self):

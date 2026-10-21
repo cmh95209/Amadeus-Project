@@ -540,27 +540,29 @@ function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
 # >>> TIER TABLE (copy of scripts/local_llm_tiers.json)
 $TierTableJson = @'
 {
-  "version": 4,
-  "about": "Built-in local model: which Gemma 4 QAT model and settings each PC gets. scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card) - an estimate, used by the launcher's free-memory check.",
+  "version": 5,
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB, no built-in model under 8 GB - the smaller files did not sound like her). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it for the coming picture support (not loaded yet).",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
   "disk_headroom_gb": 2,
   "models": {
-    "E4B": {
-      "label": "Gemma 4 E4B (QAT)",
-      "repo": "unsloth/gemma-4-E4B-it-qat-GGUF",
-      "revision": "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265",
-      "file": "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
-      "bytes": 4215695776,
-      "sha256": "df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3"
-    },
     "12B": {
       "label": "Gemma 4 12B (QAT)",
       "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
       "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
       "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
       "bytes": 6716356800,
-      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370"
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
+      "mmproj": {"file": "mmproj-F16.gguf", "save_as": "gemma-4-12B-it-qat-mmproj-F16.gguf", "bytes": 175115840, "sha256": "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3"}
+    },
+    "12B-Q3": {
+      "label": "Gemma 4 12B (3-bit, for 8 GB cards)",
+      "repo": "unsloth/gemma-4-12b-it-GGUF",
+      "revision": "fc034cfff751157913579611efad8462ac1be606",
+      "file": "gemma-4-12b-it-Q3_K_M.gguf",
+      "bytes": 5693872960,
+      "sha256": "dbf58f4c413b82b27106867eb42f7087e4172a172f6f201e2e11598a6582e504",
+      "mmproj": {"file": "mmproj-F16.gguf", "save_as": "gemma-4-12b-it-mmproj-F16.gguf", "bytes": 175115840, "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e"}
     }
   },
   "llama_cpp": {
@@ -588,8 +590,7 @@ $TierTableJson = @'
     }
   },
   "tiers": [
-    {"id": "under-8",  "min_vram_gb": 2,  "model": "E4B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 5.0,  "warning": true},
-    {"id": "8-11",     "min_vram_gb": 8,  "model": "12B",     "context": 16384, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 7.5,  "warning": false},
+    {"id": "8-11",     "min_vram_gb": 8,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 6.4,  "warning": false},
     {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 14000, "vram_need_gb": 8.0,  "warning": false},
     {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 22000, "vram_need_gb": 10.5, "warning": false},
     {"id": "24-plus",  "min_vram_gb": 24, "model": "12B",     "context": 49152, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 32000, "vram_need_gb": 11.0, "warning": false}
@@ -703,6 +704,7 @@ function Select-LlamaBuild($vendor, $driver){
 function Get-LlmDownloadBytes($modelKey, $build){
     $m = $TierTable.models.$modelKey
     $total = [double]$m.bytes
+    if ($m.mmproj) { $total += [double]$m.mmproj.bytes }
     foreach ($f in $TierTable.llama_cpp.builds.$build.files) { $total += [double]$f.bytes }
     return $total
 }
@@ -713,6 +715,9 @@ function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = ""){
     }
     $tier = $null
     foreach ($t in ($TierTable.tiers | Sort-Object min_vram_gb)) { if ($vramGb -ge $t.min_vram_gb) { $tier = $t } }
+    # A separate card, but smaller than the smallest tier (8 GB since tiers
+    # v5): the models that fit did not sound like her.
+    if (-not $tier) { return [pscustomobject]@{ offered = $false; reason = "small_card" } }
     # Her voice engine can use only NVIDIA cards; on any other card it runs
     # on the processor, which needs plenty of normal memory.
     $voice = if ($vendor -eq "nvidia") { $tier.voice_device } else { "cpu" }
@@ -767,6 +772,8 @@ function Format-HardwareCheck($hw){
         if ($hw.choice.warning) { $lines += "  (Not recommended on this PC - under 8 GB of graphics memory.)" }
     } elseif ($hw.choice.reason -eq "no_card") {
         $lines += "  Local model   : not offered - no separate graphics card (option B only)"
+    } elseif ($hw.choice.reason -eq "small_card") {
+        $lines += ("  Local model   : not offered - her built-in model needs a graphics card with at least " + (($TierTable.tiers | ForEach-Object { $_.min_vram_gb } | Measure-Object -Minimum).Minimum) + " GB (option B only)")
     } else {
         $lines += "  Local model   : not offered - her voice would run on the processor, which needs 16 GB of normal memory (option B only)"
     }
@@ -812,6 +819,9 @@ function Confirm-LocalModel($hw){
     if (-not $hw.choice.offered) {
         if ($hw.choice.reason -eq "no_card") {
             Log "  A local model needs a separate graphics card. On this PC she would think far too slowly, so Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server)." "Yellow"
+        } elseif ($hw.choice.reason -eq "small_card") {
+            $minGb = ($TierTable.tiers | ForEach-Object { $_.min_vram_gb } | Measure-Object -Minimum).Minimum
+            Log ("  Her built-in model needs a graphics card with at least " + $minGb + " GB of its own memory (this one has " + $hw.card.vram_gb + " GB). The smaller models that would fit don't sound like her, so Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server).") "Yellow"
         } else {
             Log ("  On this PC her voice has to run on the processor, which needs at least " + $TierTable.voice_on_cpu_min_ram_gb + " GB of normal memory (this PC has " + $hw.ram_gb + " GB). So Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server).") "Yellow"
         }
@@ -1067,6 +1077,12 @@ function Install-BuiltinLlm($proj, $choice){
         $exe = Install-LlamaWithFallback $choice; $serverOk = [bool]$exe
         try { Get-VerifiedFile (Get-HfUrl $m $m.file) $modelPath $m.bytes $m.sha256 $m.label; $modelOk = $true }
         catch { Log ("  " + $_.Exception.Message) "Red" }
+        # Her vision file (for the coming picture support - not used yet).
+        # A failed download never stops the install.
+        if ($m.mmproj) {
+            try { Get-VerifiedFile (Get-HfUrl $m $m.mmproj.file) (Join-Path $ModelsDir $m.mmproj.save_as) $m.mmproj.bytes $m.mmproj.sha256 ($m.label + " - vision file") }
+            catch { Log ("  Vision file not downloaded (she works without it): " + $_.Exception.Message) "Yellow" }
+        }
     }
     Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk
     return ($serverOk -and $modelOk)

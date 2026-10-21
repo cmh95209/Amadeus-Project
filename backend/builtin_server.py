@@ -49,7 +49,7 @@ def override_config() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def server_command(cfg: dict, model_file: str) -> list[str]:
+def server_command(cfg: dict, model_file: str, safe: bool = False) -> list[str]:
     """llama-server with the tier's settings; sampling = Unsloth's
     recommendation for Gemma 4 (the Model Sampling panel can override).
     Thinking is NOT set server-wide: every request already says it (the
@@ -73,9 +73,23 @@ def server_command(cfg: dict, model_file: str) -> list[str]:
         # field, never inside her reply text (tested 2026-10-20: 24/24 clean).
         "--reasoning-format", "deepseek",
     ]
-    if cfg.get("kv_cache") == "q8_0":
-        # A compressed conversation memory needs flash attention on.
-        cmd += ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+    # Two reply slots sharing ONE context (her reply + the memory helper or
+    # the English line at the same time); the default 4 slots cost card
+    # memory (the short-window cache is kept per slot) and -np without -kvu
+    # would split her context in halves (measured 2026-10-20).
+    cmd += ["-np", "2", "-kvu"]
+    if safe:
+        # The retry after a failed start (an older AMD/Intel card whose
+        # driver lacks flash attention / compressed memory): llama.cpp's own
+        # defaults - full-size conversation memory, flash attention "auto".
+        return cmd
+    context = int(cfg.get("context") or 16384)
+    # Smaller working space on the smaller-card tiers (16K / 24K context).
+    cmd += ["-ub", "256" if context <= 24576 else "512", "-fa", "on"]
+    kv = cfg.get("kv_cache")
+    if kv in ("q8_0", "q4_0"):
+        # A compressed conversation memory (needs flash attention on).
+        cmd += ["-ctk", kv, "-ctv", kv]
     return cmd
 
 
@@ -185,19 +199,42 @@ def load(file: str | None = None) -> dict:
             return dict(_state)
         _set("loading", target)
         proc = _proc
-    threading.Thread(target=_watch_loading, args=(proc, target, port, log, started, memory_before),
+    def _retry_safe():
+        print("[Amadeus] her model did not start with the fast settings - retrying once "
+              "with llama.cpp's safe defaults.")
+        try:
+            log.write("\n[Amadeus] retrying with safe settings\n")
+            log.flush()
+            return subprocess.Popen(server_command(cfg, target, safe=True), **kwargs)
+        except (OSError, ValueError):
+            return None
+
+    threading.Thread(target=_watch_loading, args=(proc, target, port, log, started, memory_before,
+                                                  _retry_safe),
                      daemon=True, name="builtin-model-load").start()
     return status()
 
 
-def _watch_loading(proc, target, port, log, started=None, memory_before=None) -> None:
+def _watch_loading(proc, target, port, log, started=None, memory_before=None,
+                   retry=None) -> None:
     """Background: wait until the model answers, or report why it did not.
-    A newer load/unload replaces `proc`; then this watcher just ends."""
+    A start that fails gets ONE retry with safe settings (`retry` returns
+    the new process). A newer load/unload replaces `proc`; then this watcher
+    just ends."""
     global _proc
     deadline = time.monotonic() + LOAD_TIMEOUT_S
     try:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
+                if retry is not None:
+                    with _lock:
+                        again = retry() if _proc is proc else None
+                        if again is not None:
+                            _proc = again
+                    retry = None
+                    if again is not None:
+                        proc = again
+                        continue
                 with _lock:
                     if _proc is proc:
                         _proc = None

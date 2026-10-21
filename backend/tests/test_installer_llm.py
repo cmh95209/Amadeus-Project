@@ -119,12 +119,17 @@ class ScreenTests(unittest.TestCase):
         self.assertFalse(s["server_ok"])    # screens-only mode downloads nothing
         self.assertEqual(Path(s["model_file"]).parent, self.dir / "models")
 
-    def test_small_card_warns_and_can_switch_to_b(self):
-        out = self.screens(["A", "B"], "-SimulateVramGB", "6", "-SimulateRamGB", "32")
-        self.assertIn("not recommended on PCs with less than 8 GB of graphics memory", out.stdout)
+    def test_small_card_gets_option_b(self):
+        # Tiers v5 (2026-10-21): under 8 GB no built-in model - explained,
+        # then option B.
+        out = self.screens(["A", ""], "-SimulateVramGB", "6", "-SimulateRamGB", "32")
+        self.assertIn("needs a graphics card with at least 8 GB", out.stdout)
         self.assertEqual(self.choice()["mode"], "custom")
-        out = self.screens(["N", "A", "A", "Y"], "-SimulateVramGB", "6", "-SimulateRamGB", "32")
-        self.assertEqual(self.choice()["model"], "E4B")
+
+    def test_8gb_card_gets_the_3bit_model(self):
+        out = self.screens(["A", "Y"], "-SimulateVramGB", "8", "-SimulateRamGB", "32")
+        self.assertIn("Gemma 4 12B (3-bit, for 8 GB cards)", out.stdout)
+        self.assertEqual((self.choice()["model"], self.choice()["kv_cache"]), ("12B-Q3", "q4_0"))
 
     def test_not_offered_cases_explain_and_use_b(self):
         for extra, words in ((("-SimulateVramGB", "0"), "needs a separate graphics card"),

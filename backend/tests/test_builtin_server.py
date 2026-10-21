@@ -163,7 +163,7 @@ class CatalogTests(_ServerBase):
     def test_pinned_like_the_installer(self):
         table = json.loads((SCRIPTS / "local_llm_tiers.json").read_text(encoding="utf-8"))
         by_key = {m["key"]: m for m in self.b.MODEL_CATALOG}
-        self.assertEqual(list(by_key), ["E4B", "12B", "26B-A4B", "31B"])
+        self.assertEqual(list(by_key), ["12B-Q3", "12B", "26B-A4B", "31B"])
         for key, model in table["models"].items():
             with self.subTest(model=key):
                 for field in ("label", "repo", "revision", "file", "bytes"):
@@ -177,7 +177,7 @@ class CatalogTests(_ServerBase):
         _write(self.cfg_path, _config(self.tmp, port=self.port, model="12B", n=1))
         items = {m["key"]: m for m in self.b.catalog()}
         self.assertEqual(items["12B"]["fit"], "recommended")
-        self.assertEqual(items["E4B"]["fit"], "smaller")
+        self.assertEqual(items["12B-Q3"]["fit"], "smaller")
         self.assertEqual((items["26B-A4B"]["fit"], items["31B"]["fit"]), ("bigger", "bigger"))
         self.assertTrue(items["12B"]["installed"])        # the test config's file exists
         self.assertFalse(items["31B"]["installed"])

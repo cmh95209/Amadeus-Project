@@ -60,15 +60,16 @@ class TableDecisionTests(unittest.TestCase):
         # 2026-10-18: the 31B (~31 GB at peak on a 32 GB card) and then
         # the 26B-A4B (31.5 GB) were too heavy -> every card of 24 GB+ runs
         # the 12B with a longer conversation.
-        expected = {"under-8": "E4B", "8-11": "12B", "12-15": "12B", "16-23": "12B",
-                    "24-plus": "12B"}
+        # 2026-10-21 (tiers v5): 8-11 GB cards get the 3-bit 12B (the 4-bit
+        # needs 8.1 GB); under 8 GB no built-in model (the smaller files
+        # did not sound like her).
+        expected = {"8-11": "12B-Q3", "12-15": "12B", "16-23": "12B", "24-plus": "12B"}
         self.assertEqual({t["id"]: t["model"] for t in TABLE["tiers"]}, expected)
-        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [2, 8, 12, 16, 24])
+        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [8, 12, 16, 24])
 
     def test_tier_settings(self):
         expected = {   # context, kv cache, voice, conversation memory default
-            "under-8": (16384, "q8_0", "cpu", 6000),
-            "8-11": (16384, "q8_0", "cpu", 6000),
+            "8-11": (16384, "q4_0", "cpu", 6000),
             "12-15": (24576, "q8_0", "cpu", 14000),
             "16-23": (32768, "f16", "cuda", 22000),
             "24-plus": (49152, "f16", "cuda", 32000),
@@ -90,26 +91,35 @@ class TableDecisionTests(unittest.TestCase):
         needs = [t["vram_need_gb"] for t in TABLE["tiers"]]
         self.assertEqual(needs, sorted(needs))
         for t in TABLE["tiers"]:
-            if t["id"] != "under-8":
-                with self.subTest(tier=t["id"]):
-                    self.assertLessEqual(t["vram_need_gb"], t["min_vram_gb"])
+            with self.subTest(tier=t["id"]):
+                self.assertLessEqual(t["vram_need_gb"], t["min_vram_gb"])
 
-    def test_only_the_smallest_tier_warns(self):
-        self.assertEqual([t["id"] for t in TABLE["tiers"] if t["warning"]], ["under-8"])
+    def test_no_tier_warns(self):
+        self.assertEqual([t["id"] for t in TABLE["tiers"] if t["warning"]], [])
 
-    def test_official_unsloth_qat_files_only(self):
-        self.assertEqual(set(TABLE["models"]), {"E4B", "12B"})
+    def test_official_unsloth_files_only(self):
+        self.assertEqual(set(TABLE["models"]), {"12B", "12B-Q3"})
+        self.assertTrue(TABLE["models"]["12B"]["file"].endswith("-it-qat-UD-Q4_K_XL.gguf"))
+        self.assertEqual(TABLE["models"]["12B-Q3"]["file"], "gemma-4-12b-it-Q3_K_M.gguf")
         for key, model in TABLE["models"].items():
             with self.subTest(model=key):
                 self.assertTrue(model["repo"].startswith("unsloth/gemma-4-"))
-                self.assertTrue(model["repo"].endswith("-it-qat-GGUF"))
-                self.assertTrue(model["file"].endswith("-it-qat-UD-Q4_K_XL.gguf"))
+                self.assertTrue(model["repo"].endswith("-GGUF"))
                 self.assertGreater(model["bytes"], 0)
                 self.assertRegex(model["sha256"], r"^[0-9a-f]{64}$")
                 self.assertRegex(model["revision"], r"^[0-9a-f]{40}$")
                 # The speed-up (MTP drafter) files were downloaded but never
                 # used (2026-10-18) - no longer part of the table.
                 self.assertNotIn("drafter", model)
+                # Each model's OWN vision file (the two differ), saved under
+                # a model-specific name, for the coming picture support.
+                v = model["mmproj"]
+                self.assertEqual(v["file"], "mmproj-F16.gguf")
+                self.assertIn("mmproj", v["save_as"])
+                self.assertGreater(v["bytes"], 0)
+                self.assertRegex(v["sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(TABLE["models"]["12B"]["mmproj"]["save_as"],
+                            TABLE["models"]["12B-Q3"]["mmproj"]["save_as"])
 
     def test_memory_rule(self):
         self.assertEqual(TABLE["voice_on_cpu_min_ram_gb"], 16)
@@ -130,9 +140,10 @@ class RoundingTests(unittest.TestCase):
 GRID = [
     (None, 0, 32, (False, "no_card")),
     ("nvidia", 1, 32, (False, "no_card")),
-    ("nvidia", 6, 32, (True, "E4B", "cpu", "cuda-13.4", True)),
-    ("nvidia", 6, 8, (False, "low_ram")),
-    ("nvidia", 8, 16, (True, "12B", "cpu", "cuda-13.4", False)),
+    ("nvidia", 6, 32, (False, "small_card")),
+    ("nvidia", 6, 8, (False, "small_card")),
+    ("nvidia", 8, 16, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
+    ("nvidia", 10, 32, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
     ("nvidia", 8, 8, (False, "low_ram")),
     ("nvidia", 12, 32, (True, "12B", "cpu", "cuda-13.4", False)),
     ("nvidia", 16, 8, (True, "12B", "cuda", "cuda-13.4", False)),
@@ -143,7 +154,7 @@ GRID = [
     ("amd", 32, 32, (True, "12B", "cpu", "vulkan", False)),
     ("intel", 12, 16, (True, "12B", "cpu", "vulkan", False)),
     ("nvidia-unverified", 24, 32, (True, "12B", "cpu", "vulkan", False)),
-    ("nvidia", 8, -1, (True, "12B", "cpu", "cuda-13.4", False)),   # memory unknown
+    ("nvidia", 8, -1, (True, "12B-Q3", "cpu", "cuda-13.4", False)),   # memory unknown
 ]
 
 
@@ -191,7 +202,7 @@ class BuildTests(unittest.TestCase):
         m = TABLE["models"]["12B"]
         files = TABLE["llama_cpp"]["builds"]["cuda-13.4"]["files"]
         self.assertEqual(tiers.download_bytes(TABLE, "12B", "cuda-13.4"),
-                         m["bytes"] + sum(f["bytes"] for f in files))
+                         m["bytes"] + m["mmproj"]["bytes"] + sum(f["bytes"] for f in files))
 
 
 _POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
