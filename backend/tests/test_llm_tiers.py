@@ -63,12 +63,15 @@ class TableDecisionTests(unittest.TestCase):
         # 2026-10-21 (tiers v5): 8-11 GB cards get the 3-bit 12B (the 4-bit
         # needs 8.1 GB); under 8 GB no built-in model (the smaller files
         # did not sound like her).
-        expected = {"8-11": "12B-Q3", "12-15": "12B", "16-23": "12B", "24-plus": "12B"}
+        # 6-7 GB cards may choose the same 3-bit 12B after a NOTICE.
+        expected = {"6-7": "12B-Q3", "8-11": "12B-Q3", "12-15": "12B", "16-23": "12B",
+                    "24-plus": "12B"}
         self.assertEqual({t["id"]: t["model"] for t in TABLE["tiers"]}, expected)
-        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [8, 12, 16, 24])
+        self.assertEqual([t["min_vram_gb"] for t in TABLE["tiers"]], [6, 8, 12, 16, 24])
 
     def test_tier_settings(self):
         expected = {   # context, kv cache, voice, conversation memory default
+            "6-7": (16384, "q4_0", "cpu", 6000),
             "8-11": (16384, "q4_0", "cpu", 6000),
             "12-15": (24576, "q8_0", "cpu", 14000),
             "16-23": (32768, "f16", "cuda", 22000),
@@ -94,8 +97,8 @@ class TableDecisionTests(unittest.TestCase):
             with self.subTest(tier=t["id"]):
                 self.assertLessEqual(t["vram_need_gb"], t["min_vram_gb"])
 
-    def test_no_tier_warns(self):
-        self.assertEqual([t["id"] for t in TABLE["tiers"] if t["warning"]], [])
+    def test_only_the_6gb_tier_has_a_notice(self):
+        self.assertEqual([t["id"] for t in TABLE["tiers"] if t["warning"]], ["6-7"])
 
     def test_official_unsloth_files_only(self):
         self.assertEqual(set(TABLE["models"]), {"12B", "12B-Q3"})
@@ -140,8 +143,9 @@ class RoundingTests(unittest.TestCase):
 GRID = [
     (None, 0, 32, (False, "no_card")),
     ("nvidia", 1, 32, (False, "no_card")),
-    ("nvidia", 6, 32, (False, "small_card")),
-    ("nvidia", 6, 8, (False, "small_card")),
+    ("nvidia", 5, 32, (False, "small_card")),
+    ("nvidia", 6, 32, (True, "12B-Q3", "cpu", "cuda-13.4", True)),
+    ("nvidia", 6, 8, (False, "low_ram")),
     ("nvidia", 8, 16, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
     ("nvidia", 10, 32, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
     ("nvidia", 8, 8, (False, "low_ram")),
@@ -223,7 +227,7 @@ class PowerShellAgreesTests(unittest.TestCase):
         return json.loads(out.stdout.strip().splitlines()[-1])
 
     def test_grid_matches_python(self):
-        for vram, ram in [(0, 32), (6, 32), (6, 8), (8, 16), (8, 8), (12, 32),
+        for vram, ram in [(0, 32), (5, 32), (6, 32), (6, 8), (8, 16), (8, 8), (12, 32),
                           (16, 8), (24, 32), (32, 32), (48, 64)]:
             with self.subTest(vram=vram, ram=ram):
                 hw = self.run_check(vram, ram)

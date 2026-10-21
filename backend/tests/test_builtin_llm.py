@@ -311,6 +311,11 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-ub") + 1], "256")
         self.assertEqual(cmd[cmd.index("-fa") + 1], "on")
 
+    def test_6gb_tier_lets_llama_server_fit_the_layers(self):
+        cmd = self.command(_config(self.tmp, context=16384, kv_cache="q4_0", tier="6-7"))
+        self.assertNotIn("-ngl", cmd)
+        self.assertIn("-ngl", self.command(_config(self.tmp, context=16384, kv_cache="q4_0", tier="8-11")))
+
     def test_safe_retry_command_drops_the_fast_settings(self):
         import builtin_server
         cfg = _config(self.tmp, context=16384, kv_cache="q4_0")
@@ -360,8 +365,9 @@ class LauncherTests(unittest.TestCase):
         sim = self.launcher.apply_simulated_vram(cfg, 8)
         self.assertEqual((sim["model"], sim["kv_cache"]), ("12B-Q3", "q4_0"))
         self.assertFalse(sim["model_ok"])  # not downloaded -> reported, not started
-        # Under 8 GB (tiers v5) and no card: no built-in model at all.
-        self.assertIsNone(self.launcher.apply_simulated_vram(cfg, 6))
+        # 6-7 GB: the same model after a NOTICE; under 6 GB / no card: none.
+        self.assertEqual(self.launcher.apply_simulated_vram(cfg, 6)["tier"], "6-7")
+        self.assertIsNone(self.launcher.apply_simulated_vram(cfg, 5))
         self.assertIsNone(self.launcher.apply_simulated_vram(cfg, 0))
 
     def test_sidecar_follows_builtin_without_touching_user_files(self):

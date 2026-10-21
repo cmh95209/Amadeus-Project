@@ -49,6 +49,12 @@ def override_config() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+# 6-7 GB cards (tiers v5, MH 2026-10-21: offered after a NOTICE): the 12B
+# Q3_K_M (~6.4 GB) does not fit, so no "-ngl 999" - llama-server's own fit
+# puts the layers that do not fit in normal memory (slow, but it starts).
+SMALL_CARD_TIER = "6-7"
+
+
 def server_command(cfg: dict, model_file: str, safe: bool = False) -> list[str]:
     """llama-server with the tier's settings; sampling = Unsloth's
     recommendation for Gemma 4 (the Model Sampling panel can override).
@@ -66,13 +72,14 @@ def server_command(cfg: dict, model_file: str, safe: bool = False) -> list[str]:
         "--port", str(cfg.get("port") or builtin_llm.PORT),
         "--alias", builtin_llm.ALIAS,
         "-c", str(int(cfg.get("context") or 16384)),
-        "-ngl", str(int(cfg.get("gpu_layers") if cfg.get("gpu_layers") is not None else 999)),
         "--jinja",
         "--temp", "1.0", "--top-p", "0.95", "--top-k", "64",
         # Thoughts (Settings -> Reasoning above Off) come back in their own
         # field, never inside her reply text (tested 2026-10-20: 24/24 clean).
         "--reasoning-format", "deepseek",
     ]
+    if cfg.get("tier") != SMALL_CARD_TIER:
+        cmd += ["-ngl", str(int(cfg.get("gpu_layers") if cfg.get("gpu_layers") is not None else 999))]
     # Two reply slots sharing ONE context (her reply + the memory helper or
     # the English line at the same time); the default 4 slots cost card
     # memory (the short-window cache is kept per slot) and -np without -kvu

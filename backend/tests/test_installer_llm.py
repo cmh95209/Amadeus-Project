@@ -120,11 +120,19 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual(Path(s["model_file"]).parent, self.dir / "models")
 
     def test_small_card_gets_option_b(self):
-        # Tiers v5 (2026-10-21): under 8 GB no built-in model - explained,
+        # Tiers v5 (2026-10-21): under 6 GB no built-in model - explained,
         # then option B.
-        out = self.screens(["A", ""], "-SimulateVramGB", "6", "-SimulateRamGB", "32")
-        self.assertIn("needs a graphics card with at least 8 GB", out.stdout)
+        out = self.screens(["A", ""], "-SimulateVramGB", "5", "-SimulateRamGB", "32")
+        self.assertIn("needs a graphics card with at least 6 GB", out.stdout)
         self.assertEqual(self.choice()["mode"], "custom")
+
+    def test_6gb_card_notice_then_choice(self):
+        out = self.screens(["A", "B"], "-SimulateVramGB", "6", "-SimulateRamGB", "32")
+        self.assertIn("NOTICE: this graphics card has less than 8 GB", out.stdout)
+        self.assertNotIn("WARNING", out.stdout)
+        self.assertEqual(self.choice()["mode"], "custom")
+        out = self.screens(["N", "A", "A", "Y"], "-SimulateVramGB", "6", "-SimulateRamGB", "32")
+        self.assertEqual((self.choice()["model"], self.choice()["tier"]), ("12B-Q3", "6-7"))
 
     def test_8gb_card_gets_the_3bit_model(self):
         out = self.screens(["A", "Y"], "-SimulateVramGB", "8", "-SimulateRamGB", "32")

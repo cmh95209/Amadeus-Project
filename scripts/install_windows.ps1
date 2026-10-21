@@ -541,7 +541,7 @@ function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
 $TierTableJson = @'
 {
   "version": 5,
-  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB, no built-in model under 8 GB - the smaller files did not sound like her). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it for the coming picture support (not loaded yet).",
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it for the coming picture support (not loaded yet).",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
   "disk_headroom_gb": 2,
@@ -590,6 +590,7 @@ $TierTableJson = @'
     }
   },
   "tiers": [
+    {"id": "6-7",      "min_vram_gb": 6,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 4.5,  "warning": true},
     {"id": "8-11",     "min_vram_gb": 8,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 6.4,  "warning": false},
     {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 14000, "vram_need_gb": 8.0,  "warning": false},
     {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 22000, "vram_need_gb": 10.5, "warning": false},
@@ -769,7 +770,7 @@ function Format-HardwareCheck($hw){
     if ($hw.choice.offered) {
         $lines += ("  Local model   : " + $hw.model.label + " (" + $hw.download_gb + " GB download, with its helper program)")
         $lines += ("  Settings      : " + $hw.choice.context + " context, " + $hw.choice.kv_cache + " memory, voice on the " + $(if ($hw.choice.voice_device -eq "cpu") { "processor" } else { "graphics card" }) + ", " + $hw.choice.build + " build")
-        if ($hw.choice.warning) { $lines += "  (Not recommended on this PC - under 8 GB of graphics memory.)" }
+        if ($hw.choice.warning) { $lines += "  (Under 8 GB of graphics memory: part of her model runs on the processor - slow.)" }
     } elseif ($hw.choice.reason -eq "no_card") {
         $lines += "  Local model   : not offered - no separate graphics card (option B only)"
     } elseif ($hw.choice.reason -eq "small_card") {
@@ -829,9 +830,8 @@ function Confirm-LocalModel($hw){
         return (New-CustomChoice)
     }
     if ($hw.choice.warning) {
-        Log "  WARNING:" "Yellow"
-        Log "  Using Amadeus with a local model is not recommended on PCs with less than 8 GB of graphics memory. Her responses will be slower and less intelligent, and features like web search might be buggy. For a better experience, choose option B and connect a cloud model (e.g. OpenRouter)." "Yellow"
-        if ((Read-Answer "Type A to use the local model anyway, or B to switch to option B" @("A","B")) -eq "B") { return (New-CustomChoice) }
+        Log ("  " + "NOTICE: this graphics card has less than 8 GB of its own memory. Her built-in model does not fully fit, so part of it runs on the processor. Expect slow replies and a noticeably worse experience (slower still with games or other programs open). For the experience Amadeus is meant to have, choose option B and connect a cloud model (e.g. OpenRouter).") "Cyan"
+        if ((Read-Answer "Type A to install the local model anyway, or B for option B" @("A","B")) -eq "B") { return (New-CustomChoice) }
     }
     $need = $hw.download_gb + $TierTable.disk_headroom_gb
     if ($hw.disk_free_gb -ge 0 -and $hw.disk_free_gb -lt $need) {
