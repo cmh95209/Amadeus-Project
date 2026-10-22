@@ -66,8 +66,8 @@ class ScreenTests(unittest.TestCase):
         s = self.settings()
         self.assertEqual(s["mode"], "builtin")
         self.assertEqual((s["context"], s["kv_cache"], s["voice_device"], s["port"]),
-                         (24576, "q8_0", "cpu", 8091))
-        self.assertEqual((s["history_default"], s["vram_need_gb"]), (14000, 8.0))
+                         (24576, "q8_0", "cuda", 8091))   # voice on the card since 2026-10-22
+        self.assertEqual((s["history_default"], s["vram_need_gb"]), (14000, 9.5))
         # Screens-only mode downloads nothing, so the model is recorded missing.
         self.assertFalse(s["model_ok"])
         self.assertFalse(s["server_ok"])

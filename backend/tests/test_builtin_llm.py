@@ -359,7 +359,7 @@ class LauncherTests(unittest.TestCase):
                       kv_cache="f16", voice_device="cuda")
         sim = self.launcher.apply_simulated_vram(cfg, 12)
         self.assertEqual((sim["model"], sim["tier"], sim["context"], sim["kv_cache"],
-                          sim["voice_device"]), ("12B", "12-15", 24576, "q8_0", "cpu"))
+                          sim["voice_device"]), ("12B", "12-15", 24576, "q8_0", "cuda"))
         self.assertTrue(sim["model_ok"])   # the 12B file exists in this models folder
         self.assertTrue(sim["simulated"])
         sim = self.launcher.apply_simulated_vram(cfg, 8)

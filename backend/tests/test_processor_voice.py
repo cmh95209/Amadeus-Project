@@ -34,17 +34,20 @@ class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.l = _launcher()
 
-    def test_processor_voice_gets_threads_and_mode_2(self):
+    def test_processor_voice_gets_one_thread_per_core(self):
         with patch.object(self.l, "physical_cores", return_value=8):
-            voice, backend = self.l.voice_speed_env({"voice_device": "cpu"})
+            voice = self.l.voice_speed_env({"voice_device": "cpu"})
         self.assertEqual((voice["OMP_NUM_THREADS"], voice["MKL_NUM_THREADS"], voice["AMADEUS_VOICE_THREADS"]),
                          ("8", "8", "8"))
-        self.assertEqual(backend, {"GPTSOVITS_STREAMING_MODE": "2"})
 
     def test_card_voice_unchanged(self):
         with patch.object(self.l.shutil, "which", return_value=r"C:\nvidia-smi.exe"):
-            self.assertEqual(self.l.voice_speed_env({"voice_device": "cuda"}), ({}, {}))
-            self.assertEqual(self.l.voice_speed_env(None), ({}, {}))
+            self.assertEqual(self.l.voice_speed_env({"voice_device": "cuda"}), {})
+            self.assertEqual(self.l.voice_speed_env(None), {})
+
+    def test_mode_2_is_the_default_everywhere(self):
+        self.assertIn('getenv("GPTSOVITS_STREAMING_MODE", "2")',
+                      (BACKEND / "tts.py").read_text(encoding="utf-8"))
 
     def test_no_nvidia_means_processor_voice(self):
         with patch.object(self.l.shutil, "which", return_value=None):

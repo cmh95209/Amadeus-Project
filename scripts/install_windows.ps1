@@ -541,7 +541,7 @@ function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
 $TierTableJson = @'
 {
   "version": 5,
-  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it for the coming picture support (not loaded yet).",
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it for the coming picture support (not loaded yet).",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
   "disk_headroom_gb": 2,
@@ -592,7 +592,7 @@ $TierTableJson = @'
   "tiers": [
     {"id": "6-7",      "min_vram_gb": 6,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 4.5,  "warning": true},
     {"id": "8-11",     "min_vram_gb": 8,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 6.4,  "warning": false},
-    {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cpu",  "history_default": 14000, "vram_need_gb": 8.0,  "warning": false},
+    {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cuda", "history_default": 14000, "vram_need_gb": 9.5,  "warning": false},
     {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 22000, "vram_need_gb": 10.5, "warning": false},
     {"id": "24-plus",  "min_vram_gb": 24, "model": "12B",     "context": 49152, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 32000, "vram_need_gb": 11.0, "warning": false}
   ]

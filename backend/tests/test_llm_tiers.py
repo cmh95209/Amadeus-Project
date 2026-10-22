@@ -73,7 +73,7 @@ class TableDecisionTests(unittest.TestCase):
         expected = {   # context, kv cache, voice, conversation memory default
             "6-7": (16384, "q4_0", "cpu", 6000),
             "8-11": (16384, "q4_0", "cpu", 6000),
-            "12-15": (24576, "q8_0", "cpu", 14000),
+            "12-15": (24576, "q8_0", "cuda", 14000),
             "16-23": (32768, "f16", "cuda", 22000),
             "24-plus": (49152, "f16", "cuda", 32000),
         }
@@ -149,7 +149,8 @@ GRID = [
     ("nvidia", 8, 16, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
     ("nvidia", 10, 32, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
     ("nvidia", 8, 8, (False, "low_ram")),
-    ("nvidia", 12, 32, (True, "12B", "cpu", "cuda-13.4", False)),
+    ("nvidia", 12, 32, (True, "12B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 12, 8, (True, "12B", "cuda", "cuda-13.4", False)),   # voice on the card: no memory rule
     ("nvidia", 16, 8, (True, "12B", "cuda", "cuda-13.4", False)),
     ("nvidia", 24, 32, (True, "12B", "cuda", "cuda-13.4", False)),
     ("nvidia", 32, 32, (True, "12B", "cuda", "cuda-13.4", False)),

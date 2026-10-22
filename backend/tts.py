@@ -16,7 +16,10 @@ OUT_WAV = BACKEND_DIR / "generated" / "generated.wav"
 REF_TXT = "ん? ほっと来てくれませんか?ん? ふざけてないでちょっと来てくださいアニカって何ですか?人激の悪い私は"
 
 GPTSOVITS_API_URL = os.getenv("GPTSOVITS_API_URL", "http://127.0.0.1:9880")
-STREAMING_MODE = int(os.getenv("GPTSOVITS_STREAMING_MODE", "1"))
+# 2 = the engine streams inside a sentence: first sound after ~1 s instead
+# of 2-5 s on long first sentences (2026-10-21/22: MH's ear test - sounds
+# almost identical to 1; mode 3 is more tinny). Env overrides.
+STREAMING_MODE = int(os.getenv("GPTSOVITS_STREAMING_MODE", "2"))
 _speech_lock = threading.Lock()
 
 

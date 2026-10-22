@@ -430,16 +430,14 @@ def voice_on_processor(cfg: dict | None) -> bool:
     return bool(cfg and cfg.get("voice_device") == "cpu") or shutil.which("nvidia-smi") is None
 
 
-def voice_speed_env(cfg: dict | None) -> tuple[dict, dict]:
-    """(voice engine env, backend env) for a processor voice: one thread per
-    core (0.88-0.95x -> 0.77-0.82x real time) and streaming mode 2 (first
-    sound after ~1 s instead of 2-5 s; MH 2026-10-21: sounds almost the
-    same as mode 1). Card voice: unchanged."""
+def voice_speed_env(cfg: dict | None) -> dict:
+    """Voice engine env for a processor voice: one thread per core
+    (0.88-0.95x -> 0.77-0.82x real time). Card voice: nothing. (Streaming
+    mode 2 is the default for every voice since 2026-10-22 - backend/tts.py.)"""
     if not voice_on_processor(cfg):
-        return {}, {}
+        return {}
     n = str(physical_cores())
-    return ({"OMP_NUM_THREADS": n, "MKL_NUM_THREADS": n, "AMADEUS_VOICE_THREADS": n},
-            {"GPTSOVITS_STREAMING_MODE": "2"})
+    return {"OMP_NUM_THREADS": n, "MKL_NUM_THREADS": n, "AMADEUS_VOICE_THREADS": n}
 
 
 def _cm_python() -> Path:
@@ -1332,8 +1330,7 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
             if not load_model:
                 say("  Starting without her model (load it in Settings -> Connection).")
     backend_env = {"AMADEUS_LOAD_MODEL": "1" if load_model else "0"}
-    voice_extra, backend_extra = voice_speed_env(builtin)
-    backend_env.update(backend_extra)
+    voice_extra = voice_speed_env(builtin)
     if builtin and builtin.get("simulated"):
         import json
         backend_env["AMADEUS_BUILTIN_OVERRIDE"] = json.dumps(builtin)
