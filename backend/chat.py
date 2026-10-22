@@ -1288,8 +1288,11 @@ def _merge_leading_system_messages(messages):
 # next reply then differs only after that point). Measured on a real chat:
 # ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the newest user
 # message re-read the whole chat history).
-_RIGHT_NOW_LABEL = ("RIGHT NOW (private background for your next reply - "
-                    "not said by the user):\n\n")
+# The label's wording matters (measured 2026-10-22, "What time is it right
+# now?" x10): "private background" made her refuse to read the clock 4/5 times,
+# "use it freely" answered 10/10.
+_RIGHT_NOW_LABEL = ("RIGHT NOW (what you know at this moment - use it freely; "
+                    "the user did not write this):\n\n")
 
 
 def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
