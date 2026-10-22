@@ -326,6 +326,56 @@ class WindowBehaviourTests(_StoreWithConversation):
                           for m in raw])
 
 
+class BatchFoldTests(_StoreWithConversation):
+    """Prompt order B (2026-10-22): on the built-in model the window grows to
+    WINDOW + BATCH turns, then BATCH turns fold in ONE merge call."""
+
+    def setUp(self):
+        super().setUp()
+        self._builtin = patch.object(store, "_builtin_active", return_value=True)
+        self._builtin.start()
+        self.calls = []
+        store.set_summary_merger(
+            lambda current, new: (self.calls.append(new) or
+                                  (current + " | " if current else "") + new))
+
+    def tearDown(self):
+        self._builtin.stop()
+        super().tearDown()
+
+    def test_no_fold_until_a_full_batch(self):
+        for n in range(1, store.SUMMARY_WINDOW_TURNS + store.SUMMARY_BATCH_TURNS):
+            _add_turn(n)
+            store.maybe_roll_summary(1)
+        time.sleep(0.3)
+        self.assertEqual(self.summary_state(), ("", 0))
+        self.assertEqual(self.calls, [])
+
+    def test_full_batch_folds_in_one_call(self):
+        total = store.SUMMARY_WINDOW_TURNS + store.SUMMARY_BATCH_TURNS
+        for n in range(1, total + 1):
+            _add_turn(n)
+            store.maybe_roll_summary(1)
+        self.assertTrue(self.wait_until(lambda: self.summary_state()[1] > 0))
+        self.assertEqual(len(self.calls), 1)
+        for n in range(1, store.SUMMARY_BATCH_TURNS + 1):
+            self.assertIn(f"user turn {n}\n", self.calls[0] + "\n")
+        self.assertNotIn(f"user turn {store.SUMMARY_BATCH_TURNS + 1}\n", self.calls[0] + "\n")
+        users = [m for m in store.build_prompt_messages(token_budget=1_000_000)
+                 if m["role"] == "user"]
+        self.assertEqual(len(users), store.SUMMARY_WINDOW_TURNS)
+
+    def test_batch_queued_twice_never_adds_a_turn_twice(self):
+        for n in range(1, 4):
+            _add_turn(n)
+        turns = store._conversation_turns(1)
+        store._fold_one_turn(1, {"last_id": turns[1]["last_id"], "parts": turns[:2]})
+        store._fold_one_turn(1, {"last_id": turns[2]["last_id"], "parts": turns[:3]})
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn("user turn 1", self.calls[1])
+        self.assertIn("user turn 3", self.calls[1])
+
+
 class BridgeExclusionTests(unittest.TestCase):
     """Tier 2 on the bridge side: the label says 'other conversations' and
     the /context query always carries the active conversation id as

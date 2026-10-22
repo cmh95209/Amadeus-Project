@@ -8,7 +8,11 @@ changed byte, so her prompt must START with the blocks that never change:
   2. two replies with different memories, time, trust and history share the
      whole fixed start (personality, voice rules, reply rules, web rules), and
      the changing blocks all come after it - on the normal and the
-     voice-first reply paths.
+     voice-first reply paths;
+  3. order B (built-in model): the changing blocks leave the instruction
+     message and become one "right now" note after the newest user
+     message (after it: the server resumes from the start of that
+     message), so the instruction message is identical across replies.
 All LLM calls and the stores are stubbed; no network, no live data.
 """
 import contextlib
@@ -74,6 +78,8 @@ class VoiceSplitTests(unittest.TestCase):
 
 
 class PromptOrderTests(unittest.TestCase):
+    right_now = False
+
     def _run(self, fn, trust, memory_text, timing, history):
         sink = {}
         with contextlib.ExitStack() as stack:
@@ -88,6 +94,7 @@ class PromptOrderTests(unittest.TestCase):
                 (stats, "load_stat", lambda _name: trust),
                 (chat, "_finalize", lambda p, llm: p),
                 (chat, "_web_off_honesty_net", lambda p: p),
+                (chat, "_right_now_note", lambda: self.right_now),
                 (cm_bridge, "fetch_memory_block",
                  lambda _cid: {"role": "system", "content": memory_text}),
             ]:
@@ -95,18 +102,25 @@ class PromptOrderTests(unittest.TestCase):
             fn(list(history), internal_context={"role": "system", "content": timing})
         return sink["messages"]
 
-    def _check(self, fn, rules):
+    def _two_turns(self, fn):
         one = self._run(fn, 20, "MEMORY tea", "TIMING 10:00",
                         [{"role": "user", "content": "hi"}])
         two = self._run(fn, 80, "MEMORY rain", "TIMING 11:30",
                         [{"role": "user", "content": "hi"},
                          {"role": "assistant", "content": "やあ"},
                          {"role": "user", "content": "how are you?"}])
+        return one, two
+
+    def _fixed(self, rules):
         with contextlib.ExitStack() as stack:
             for p in _voice_patches():
                 stack.enter_context(p)
-            fixed = "\n\n".join(["PERSONALITY", ja_voice.build_voice_rules()["content"],
-                                 rules["content"], chat.NO_WEB_BLOCK["content"]])
+            return "\n\n".join(["PERSONALITY", ja_voice.build_voice_rules()["content"],
+                                rules["content"], chat.NO_WEB_BLOCK["content"]])
+
+    def _check(self, fn, rules):
+        one, two = self._two_turns(fn)
+        fixed = self._fixed(rules)
         for msgs, memory_text, timing in [(one, "MEMORY tea", "TIMING 10:00"),
                                           (two, "MEMORY rain", "TIMING 11:30")]:
             system = msgs[0]["content"]
@@ -122,6 +136,30 @@ class PromptOrderTests(unittest.TestCase):
 
     def test_voice_first_reply(self):
         self._check(chat.getResponsePackedVoiceFirst, chat._PACK_RULES_JA_ONLY)
+
+
+class RightNowNoteTests(PromptOrderTests):
+    right_now = True
+
+    def _check(self, fn, rules):
+        one, two = self._two_turns(fn)
+        fixed = self._fixed(rules)
+        self.assertEqual(one[0], two[0])  # the instruction message never changes
+        for msgs, memory_text, timing in [(one, "MEMORY tea", "TIMING 10:00"),
+                                          (two, "MEMORY rain", "TIMING 11:30")]:
+            self.assertEqual(msgs[0]["content"], fixed)
+            last, note = msgs[-2], msgs[-1]
+            self.assertEqual((last["role"], note["role"]), ("user", "system"))
+            self.assertTrue(note["content"].startswith(chat._RIGHT_NOW_LABEL + "CLOSENESS"))
+            body = note["content"]
+            self.assertLess(body.index(memory_text), body.index(timing))
+            self.assertTrue(body.endswith(timing))
+        self.assertEqual([m["content"] for m in two[1:-1]], ["hi", "やあ", "how are you?"])
+
+    def test_no_user_line_puts_the_note_last(self):
+        msgs = chat._ordered_prompt({"role": "system", "content": "R"},
+                                    {"role": "system", "content": "W"}, [], [], right_now=True)
+        self.assertTrue(msgs[-1]["content"].startswith(chat._RIGHT_NOW_LABEL))
 
 
 if __name__ == "__main__":

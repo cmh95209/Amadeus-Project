@@ -1280,16 +1280,40 @@ def _merge_leading_system_messages(messages):
 # appearance, memories, time, greeting instruction) come after them, right before
 # the conversation. Measured on the built-in model: a changed block at the top
 # re-read all ~7,300 pieces; at the end, ~40.
-def _ordered_prompt(rules_block, web_block, changing, context):
-    return _merge_leading_system_messages(
-        store.load_default_personality_messages()
-        + [ja_voice.build_voice_rules()]
-        + [rules_block]
-        + [web_block]
-        + [ja_voice.build_closeness_context(stats.load_stat("trust"))]
-        + list(changing)
-        + list(context)
-    )
+#
+# Prompt order B (right_now=True, built-in model only): her model's sliding-
+# window layers can resume only from a point the server saved at the start of
+# the newest user message, so the changing blocks leave the instruction
+# message and become one "right now" note AFTER the newest user message (the
+# next reply then differs only after that point). Measured on a real chat:
+# ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the newest user
+# message re-read the whole chat history).
+_RIGHT_NOW_LABEL = ("RIGHT NOW (private background for your next reply - "
+                    "not said by the user):\n\n")
+
+
+def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
+    fixed = (store.load_default_personality_messages()
+             + [ja_voice.build_voice_rules()]
+             + [rules_block]
+             + [web_block])
+    changing = ([ja_voice.build_closeness_context(stats.load_stat("trust"))]
+                + list(changing))
+    if not right_now:
+        return _merge_leading_system_messages(fixed + changing + list(context))
+    note = {"role": "system", "content": _RIGHT_NOW_LABEL
+            + "\n\n".join(m.get("content", "") for m in changing)}
+    return _merge_leading_system_messages(fixed + list(context)) + [note]
+
+
+def _right_now_note() -> bool:
+    """Order B only on her built-in model (looked up at call time - several
+    tests stand in a fake `llm` module)."""
+    builtin = getattr(_llm_module, "builtin_llm", None)
+    try:
+        return bool(builtin and builtin.active())
+    except Exception:
+        return False
 
 
 # --- Search-failure honesty net -------------------------------------------------
@@ -3081,6 +3105,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         + ([memory_block] if memory_block else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
+        right_now=_right_now_note(),
     )
 
     def _out(p: "AmadeusPack") -> "AmadeusPack":
@@ -3258,6 +3283,7 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         + ([memory_block] if memory_block else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
+        right_now=_right_now_note(),
     )
 
     def _attempt(client):

@@ -1887,6 +1887,14 @@ def effective_context_budget() -> int:
     return own if own else load_context_budget()
 
 
+def _builtin_active() -> bool:
+    try:
+        import builtin_llm   # late import: builtin_llm imports this module
+        return bool(builtin_llm.active())
+    except Exception:
+        return False
+
+
 def save_context_budget(budget: int) -> int:
     """Persist the history token budget, clamped to [MIN_CONTEXT_BUDGET, MAX_CONTEXT_BUDGET]."""
     value = max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, int(budget or 0)))
@@ -2026,6 +2034,12 @@ def estimate_tokens(text: str) -> int:
 # summary lands (still exactly-once, just briefly larger).
 
 SUMMARY_WINDOW_TURNS = 12      # reply turns kept verbatim (a turn = user line + its reply run; a greeting is its own turn)
+# Prompt order B (2026-10-22, built-in model only): fold in batches - the
+# window grows to WINDOW + BATCH turns, then BATCH turns fold in ONE merge
+# call. Her model reuses the prompt only up to the first changed byte, and a
+# fold changes the summary at the top of the chat; one fold per BATCH replies
+# keeps the chat's start stable in between.
+SUMMARY_BATCH_TURNS = 6
 SUMMARY_MAX_CHARS = 2200       # hard cap on the stored summary text
 
 _SUMMARY_HEADER = (
@@ -2234,7 +2248,13 @@ def _fold_one_turn(conv: int, turn: Dict[str, object]) -> None:
     # queue replayed after a restart): never move covers backwards.
     if int(turn["last_id"]) <= covers:
         return
-    merged = _merge_summary_text(summary, str(turn["text"]))
+    text = str(turn.get("text") or "")
+    if turn.get("parts"):
+        # A batch (built-in model): merge only the turns the summary does not
+        # cover yet, so a batch queued twice never adds a turn twice.
+        text = "\n".join(str(p["text"]) for p in turn["parts"]
+                         if int(p["last_id"]) > covers)
+    merged = _merge_summary_text(summary, text)
     _set_rolling_summary(conv, merged, int(turn["last_id"]))
 
 
@@ -2257,6 +2277,19 @@ def maybe_roll_summary(conversation_id=None) -> None:
     verbatim = [t for t in turns if int(t["last_id"]) > covers]
     overflow = len(verbatim) - SUMMARY_WINDOW_TURNS
     if overflow <= 0:
+        return
+    if _builtin_active():
+        if overflow < SUMMARY_BATCH_TURNS:
+            return
+        batch = {"last_id": verbatim[overflow - 1]["last_id"], "parts": verbatim[:overflow]}
+        with _roll_lock:
+            q = _roll_queue.setdefault(conv, collections.deque())
+            known = _roll_queued_ids.setdefault(conv, set())
+            if q or batch["last_id"] in known:
+                return  # a batch is already waiting; it folds these turns
+            q.append({**batch, "db": PATH_TO_MEMORY})
+            known.add(batch["last_id"])
+        _start_roll_worker()
         return
     with _roll_lock:
         q = _roll_queue.setdefault(conv, collections.deque())
