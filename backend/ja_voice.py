@@ -1,6 +1,7 @@
 """ja_voice.py: editable Japanese voice block + closeness-tier context."""
 import os
 import stats
+import speech_text
 
 DATA_DIR = "data"
 VOICE_FILE = os.path.join(DATA_DIR, "voice_ja.txt")
@@ -187,7 +188,24 @@ def build_voice_rules() -> dict:
             "Use the register of the current closeness tier (the CLOSENESS "
             "block below), and follow the anti-caricature tsundere rules.")
     head += chr(10) + FOREIGN_WORDS_RULE
+    names = names_rule()
+    if names:
+        head += chr(10) + names
     return {"role": "system", "content": head + chr(10) + chr(10) + load_voice_block()}
+
+
+def names_rule() -> str:
+    """The user's name list (Settings -> Names she knows) as one line, or ''.
+    Fixed between edits, so it sits in the fixed part of her prompt."""
+    try:
+        pairs = speech_text.load_user_names()
+    except Exception as exc:  # a settings hiccup must never block a reply
+        print("[Amadeus] Name list skipped:", repr(exc))
+        return ""
+    if not pairs:
+        return ""
+    return ("NAMES: in assistant_reply_JPS write these names exactly so: "
+            + ", ".join(f"{w} -> {r}" for w, r in pairs) + ".")
 
 
 def build_closeness_context(trust_value) -> dict:

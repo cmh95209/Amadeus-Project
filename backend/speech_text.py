@@ -253,6 +253,97 @@ def _pronunciations() -> dict:
     return merged
 
 
+# ---------- the shared name list (option C, 2026-10-22) ----------
+# The same list also keeps her written line and the English line consistent:
+# Settings -> "Names she knows" edits the user's entries; her prompt asks for
+# them in katakana (ja_voice), a listed word still in Latin letters in her
+# Japanese line is swapped (swap_listed_words), and the translator is told
+# the English spelling of the listed names her line contains (names_in).
+
+def _read_pairs(path: str) -> list:
+    """[(word, kana)] in file order, the word as typed."""
+    pairs = []
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                word, reading = (part.strip() for part in line.split("=", 1))
+                if word and is_kana(reading):
+                    pairs.append((word, reading))
+    except OSError:
+        pass
+    return pairs
+
+
+def load_user_names() -> list:
+    """The user's own entries, [(word, kana)]."""
+    _ensure_user_list()
+    return _read_pairs(USER_LIST)
+
+
+def save_user_names(pairs) -> list:
+    """Replace the user's entries; the comment lines at the top are kept.
+    Pairs with an empty word, a word holding '=' or a line break, or a
+    reading that is not kana are dropped. Returns what was saved."""
+    clean, seen = [], set()
+    for word, reading in pairs:
+        word, reading = (word or "").strip(), (reading or "").strip()
+        if (not word or "=" in word or "\n" in word or not is_kana(reading)
+                or word.casefold() in seen):
+            continue
+        seen.add(word.casefold())
+        clean.append((word, reading))
+    _ensure_user_list()
+    header = []
+    try:
+        with open(USER_LIST, encoding="utf-8-sig") as f:
+            for line in f:
+                if not line.strip().startswith("#"):
+                    break
+                header.append(line.rstrip("\n"))
+    except OSError:
+        header = _USER_LIST_TEMPLATE.rstrip("\n").split("\n")
+    with open(USER_LIST, "w", encoding="utf-8") as f:
+        f.write("\n".join(header + [f"{w} = {r}" for w, r in clean]) + "\n")
+    return clean
+
+
+def swap_listed_words(text: str) -> str:
+    """Her written Japanese line: every listed word still in Latin letters
+    becomes its katakana (exact whole words, any case). A run of 3+ English
+    words (a quoted phrase) is left alone, the same rule the voice uses."""
+    if not text or not re.search(r"[A-Za-z]", text):
+        return text
+    entries = _pronunciations()
+    if not entries:
+        return text
+    out, last = [], 0
+    for m in _PHRASE.finditer(text):
+        out.append(_apply_list(text[last:m.start()], entries))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_apply_list(text[last:], entries))
+    return "".join(out)
+
+
+def names_in(text: str) -> list:
+    """[(word, kana)] for the listed readings her Japanese line contains, the
+    user's entries first (one English spelling per reading)."""
+    if not text:
+        return []
+    found, seen = [], set()
+    for word, reading in load_user_names() + _read_pairs(DEFAULT_LIST):
+        # A whole katakana word only: クリス, not the start of クリスマス.
+        if reading in seen or not re.search(
+                r"(?<![ァ-ヺー])" + re.escape(reading) + r"(?![ァ-ヺー])", text):
+            continue
+        seen.add(reading)
+        found.append((word, reading))
+    return found
+
+
 def _apply_list(text: str, entries: dict) -> str:
     if not entries:
         return text

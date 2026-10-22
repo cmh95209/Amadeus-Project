@@ -27,6 +27,7 @@ import builtin_server
 import ceremony
 import llm
 import memory
+import speech_text
 import stats
 import timing
 
@@ -679,6 +680,39 @@ def set_voice_retention():
         return jsonify({"message": "'limit' must be a number"}), 400
     saved = memory.save_voice_retention(limit)
     return jsonify({"status": "ok", "limit": saved})
+
+
+@application.route("/getNames", methods=["GET"])
+def get_names():
+    """The user's name list (Settings -> Names she knows): how each name is
+    written in her Japanese line and said by her voice."""
+    return jsonify({"names": [{"word": w, "reading": r}
+                              for w, r in speech_text.load_user_names()]})
+
+
+@application.route("/setNames", methods=["POST"])
+def set_names():
+    """Replace the user's name list. Each reading must be kana; rows that are
+    not (or have no name) are refused with the first bad row named."""
+    data = request.get_json(silent=True)
+    rows = data.get("names") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return jsonify({"message": "Missing 'names' list"}), 400
+    pairs = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        word = str(row.get("word") or "").strip()
+        reading = str(row.get("reading") or "").strip()
+        if not word and not reading:
+            continue  # an empty row the user never filled
+        if not word or "=" in word:
+            return jsonify({"message": f"Name missing or not allowed: '{word}'"}), 400
+        if not speech_text.is_kana(reading):
+            return jsonify({"message": f"'{word}': write how she says it in katakana or hiragana"}), 400
+        pairs.append((word, reading))
+    saved = speech_text.save_user_names(pairs)
+    return jsonify({"status": "ok", "names": [{"word": w, "reading": r} for w, r in saved]})
 
 
 @application.route("/getContextBudget", methods=["GET"])

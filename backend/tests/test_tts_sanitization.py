@@ -50,8 +50,11 @@ class CleanTtsTextTests(unittest.TestCase):
         self.assertEqual(chat._clean_tts_text(text), text)
 
     def test_short_latin_name_between_japanese_is_kept(self):
-        text = "私はAmadeusよ。何か用があるなら言ってみて。"
+        # An unlisted name stays as written; a name on the shared name list
+        # (Amadeus) becomes its katakana (test_name_list.py).
+        text = "私はAlexよ。何か用があるなら言ってみて。"
         self.assertEqual(chat._clean_tts_text(text), text)
+        self.assertEqual(chat._clean_tts_text("私はAmadeusよ。"), "私はアマデウスよ。")
 
     def test_pure_english_field_is_kept_for_translation_pass(self):
         text = "The air quality is bad today, stay indoors."

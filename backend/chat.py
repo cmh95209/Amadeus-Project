@@ -727,6 +727,9 @@ def _clean_tts_text(text: str) -> str:
                    lambda m: m.group(0) if _has_japanese_script(m.group(0)) else "", t)
         t = re.sub(r"\n{3,}", "\n\n", t)
         t = _strip_inline_english(t)
+        # The shared name list: a listed name still in Latin letters becomes
+        # its katakana, so the screen, the voice and her history agree.
+        t = speech_text.swap_listed_words(t)
     return _collapse_runaway(t).strip()
 
 
@@ -792,7 +795,7 @@ def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
             "content": (
                 "Translate the following Japanese into natural spoken English. "
                 "Output ONLY the English text - no quotes, no commentary.\n"
-                + "".join(h + "\n" for h in _user_hint_lines()) + "\n"
+                + "".join(h + "\n" for h in _user_hint_lines(pack.assistant_reply_JPS or eng)) + "\n"
                 + (pack.assistant_reply_JPS or eng)[:1500]
             ),
         }])
@@ -931,7 +934,7 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
                 "content": (
                     "Translate the following Japanese into natural spoken English. "
                     "Output ONLY the English text - no quotes, no commentary.\n"
-                    + "".join(h + "\n" for h in _user_hint_lines()) + "\n"
+                    + "".join(h + "\n" for h in _user_hint_lines(text)) + "\n"
                     + text[:1500]
                 ),
             }])
@@ -3541,7 +3544,7 @@ def _is_verbatim_echo(text: str, source: str, threshold: float = 0.9) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
 
-def _user_hint_lines() -> list:
+def _user_hint_lines(jps: str = "") -> list:
     """Who the user is, for prompts that turn her Japanese into English:
     the saved name (her line spells it in kana - アレックス - so a translator
     would otherwise romanize it as "Hon"), its Japanese ending kept as
@@ -3560,6 +3563,10 @@ def _user_hint_lines() -> list:
         pronouns = store.pronoun_sentence()
         if pronouns:
             lines.append(pronouns)
+        names = speech_text.names_in(jps)
+        if names:
+            lines.append("Names in her line, with their English spelling: "
+                         + ", ".join(f"{r} = {w}" for w, r in names) + ".")
     except Exception as exc:
         print("[Amadeus] User hints skipped:", repr(exc))
     return lines
@@ -3581,7 +3588,7 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
         "one of Amadeus's replies. Translate her Japanese line into natural, "
         "spoken English in her voice - keep her tone and meaning exactly. "
         "Output ONLY the English text - no quotes, no Japanese, no commentary.",
-    ] + _user_hint_lines()
+    ] + _user_hint_lines(jps)
     for line in context_lines or ():
         if line and line.strip():
             lines.append(line.strip()[:300])
