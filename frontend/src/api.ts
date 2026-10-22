@@ -859,6 +859,35 @@ export async function setUserProfile(profile: UserProfile): Promise<UserProfile>
   return userProfile(data, profile);
 }
 
+/** Settings -> Preferences -> Names she knows: how a name is written in her
+ *  Japanese line (and said by her voice, and spelled in the English line). */
+export type NameEntry = { word: string; reading: string };
+
+function nameEntries(data: Record<string, unknown>): NameEntry[] {
+  const rows = Array.isArray(data.names) ? data.names : [];
+  return rows
+    .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+    .map((r) => ({
+      word: typeof r.word === "string" ? r.word : "",
+      reading: typeof r.reading === "string" ? r.reading : "",
+    }));
+}
+
+export async function getNames(): Promise<NameEntry[]> {
+  return nameEntries(await parseResponse(await fetch(`${API_BASE}/getNames`, { cache: "no-store" })));
+}
+
+export async function setNames(names: NameEntry[]): Promise<NameEntry[]> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/setNames`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names }),
+    })
+  );
+  return nameEntries(data);
+}
+
 /** A suggested reading for a name as typed (not saved yet); saves nothing.
  *  "" = no reading could be made. Used by the Settings "Suggest" button. */
 export async function suggestNameReading(name: string): Promise<string> {

@@ -628,6 +628,41 @@ button {
   white-space: nowrap;
 }
 
+/* Preferences -> Names she knows: name | katakana | Suggest | remove. */
+.modal .name-list {
+  display: grid;
+  gap: 9px;
+}
+
+.modal .name-list-title {
+  color: #99a5b7;
+  font-size: 12px;
+}
+
+.modal .name-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+  gap: 9px;
+  align-items: stretch;
+}
+
+.modal .name-row button {
+  white-space: nowrap;
+}
+
+.modal .name-add {
+  justify-self: start;
+}
+
+@media (max-width: 520px) {
+  .modal .name-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .modal .name-row input:first-child {
+    grid-column: 1 / -1;
+  }
+}
+
 /* Dropdowns (pronouns / what she calls you) match the text inputs. */
 .modal select {
   width: 100%;

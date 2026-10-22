@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
 import { ModelPicker } from "./components/ModelPicker";
+import { NameListEditor, nameListProblem } from "./components/NameListEditor";
 import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
@@ -50,6 +51,8 @@ import {
   suggestNameReading,
   getUserProfile,
   setUserProfile,
+  getNames,
+  setNames,
   testConnection,
   ConnectionStatus,
   BrainMode,
@@ -63,7 +66,7 @@ import {
   getStats,
   StatInfo,
 } from "./api";
-import type { ReasoningInfo, ReasoningKey, ReasoningLevel } from "./api";
+import type { NameEntry, ReasoningInfo, ReasoningKey, ReasoningLevel } from "./api";
 
 import { interactions } from "./interactions";
 import type { InteractionName } from "./interactions";
@@ -151,6 +154,8 @@ export default function App() {
   const [userNameReading, setUserNameReading] = useState("");
   const [readingSuggesting, setReadingSuggesting] = useState(false);
   const [readingNote, setReadingNote] = useState("");
+  // Settings -> Preferences -> Names she knows (saved with the Save button).
+  const [nameRows, setNameRows] = useState<NameEntry[]>([]);
   // Pronouns: "" (not set), a preset, or "custom" + pronounsCustom.
   const [pronounsChoice, setPronounsChoice] = useState("");
   const [pronounsCustom, setPronounsCustom] = useState("");
@@ -193,7 +198,7 @@ export default function App() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
-  const [settingsSection, setSettingsSection] = useState<"connection" | "personality" | "sampling">("connection");
+  const [settingsSection, setSettingsSection] = useState<"connection" | "preferences" | "personality" | "sampling">("connection");
   const [statsInfo, setStatsInfo] = useState<StatInfo[]>([]);
   const [personality, setPersonalityText] = useState("");
   const [savedPersonality, setSavedPersonality] = useState("");
@@ -720,7 +725,7 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, reasoningInfo, convs, voiceCap, budgetInfo, serverAddr, savedName, profile, brainInfo] =
+      const [memory, currentModel, configured, webOn, reasoningInfo, convs, voiceCap, budgetInfo, serverAddr, savedName, profile, brainInfo, names] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
@@ -734,6 +739,7 @@ export default function App() {
           getUsername().catch(() => ({ name: "", reading: "" })),
           getUserProfile().catch(() => ({ pronouns: "", address: "auto" })),
           getBrainMode().catch(() => null),
+          getNames().catch(() => [] as NameEntry[]),
         ]);
 
       setMessages(memory);
@@ -749,6 +755,7 @@ export default function App() {
       setServerAddressState(serverAddr);
       setUserName(savedName.name);
       setUserNameReading(savedName.reading);
+      setNameRows(names);
       if (!profile.pronouns || PRONOUN_PRESETS.includes(profile.pronouns)) {
         setPronounsChoice(profile.pronouns);
       } else {
@@ -958,6 +965,13 @@ export default function App() {
     // user's own model settings (kept for when they switch back).
     if (!nextModel && !builtinMode) {
       setSettingsError("Choose a model in the Model row.");
+      setSettingsSection("connection");
+      return;
+    }
+    const namesProblem = nameListProblem(nameRows);
+    if (namesProblem) {
+      setSettingsError(namesProblem);
+      setSettingsSection("preferences");
       return;
     }
 
@@ -991,6 +1005,11 @@ export default function App() {
       } catch {
         profileSaved = false;
       }
+      try {
+        setNameRows(await setNames(nameRows));
+      } catch {
+        profileSaved = false;
+      }
       void refreshConnection();
       // A name with no reading yet: let the backend suggest how she says it
       // (one short model call). Never overwrites what the user typed meanwhile.
@@ -1012,8 +1031,8 @@ export default function App() {
       setStatus(builtinMode ? "Settings saved" : `Model set to ${nextModel}`);
       setSettingsNotice(
         profileSaved
-          ? "Connection settings saved."
-          : "Connection settings saved, but pronouns / what she calls you were not (restart the backend, then save again)."
+          ? "Settings saved."
+          : "Settings saved, but pronouns / what she calls you / names she knows were not (restart the backend, then save again)."
       );
       // Keep Settings open so drafts in the Personality section are preserved.
     } catch (error) {
@@ -1657,7 +1676,12 @@ export default function App() {
           <div className="toolbar-actions">
             <button
               className="ghost-button"
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => {
+                // First start ("open the settings menu and tell me your
+                // name"): her name box lives in Preferences.
+                if (!userName.trim()) setSettingsSection("preferences");
+                setSettingsOpen(true);
+              }}
             >
               Settings
             </button>
@@ -1990,6 +2014,8 @@ export default function App() {
             <nav className="settings-sections" aria-label="Settings sections">
               <button type="button" aria-pressed={settingsSection === "connection"}
                 onClick={() => setSettingsSection("connection")}>Connection</button>
+              <button type="button" aria-pressed={settingsSection === "preferences"}
+                onClick={() => setSettingsSection("preferences")}>Preferences</button>
               <button type="button" aria-pressed={settingsSection === "personality"}
                 onClick={() => setSettingsSection("personality")}>
                 Personality{personalityDirty && <span className="unsaved-dot" aria-label="Unsaved changes" />}
@@ -2271,153 +2297,6 @@ export default function App() {
               </div>
 
               <label>
-                Your name
-                <input
-                  value={userName}
-                  disabled={settingsBusy}
-                  onChange={(event) => {
-                    setUserName(event.target.value);
-                    // The reading belonged to the old name.
-                    setUserNameReading("");
-                    setReadingNote("");
-                  }}
-                  placeholder="what she should call you"
-                  autoComplete="off"
-                  spellCheck={false}
-                  aria-describedby="your-name-help"
-                />
-              </label>
-              <p className="settings-help" id="your-name-help">
-                Required: she needs to know who she is talking to, and she
-                calls you by this name. She waits for it on her first start.
-              </p>
-
-              <label>
-                How she says it
-                <div className="reading-row">
-                  <input
-                    value={userNameReading}
-                    disabled={settingsBusy || !userName.trim()}
-                    onChange={(event) => {
-                      setUserNameReading(event.target.value);
-                      setReadingNote("");
-                    }}
-                    placeholder={userName.trim() ? "press Suggest, or type katakana" : "set your name first"}
-                    autoComplete="off"
-                    spellCheck={false}
-                    lang="ja"
-                    aria-describedby="name-reading-help"
-                  />
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => void handleSuggestReading()}
-                    disabled={settingsBusy || readingSuggesting || !userName.trim()}
-                  >
-                    {readingSuggesting ? "Suggesting…" : "Suggest"}
-                  </button>
-                </div>
-              </label>
-              {readingNote && <p className="settings-error" role="status">{readingNote}</p>}
-              <p className="settings-help" id="name-reading-help">
-                Her voice speaks Japanese, so your name is said from this
-                katakana (e.g. Alex → アレックス). Press Suggest to fill it in,
-                or leave it empty and it's suggested when you save. Change it
-                if it sounds wrong.
-              </p>
-
-              <label>
-                Your pronouns
-                <select
-                  value={pronounsChoice}
-                  disabled={settingsBusy}
-                  onChange={(event) => setPronounsChoice(event.target.value)}
-                  aria-describedby="pronouns-help"
-                >
-                  <option value="">Not set</option>
-                  {PRONOUN_PRESETS.map((p) => (
-                    <option key={p} value={p}>{p}</option>
-                  ))}
-                  <option value="custom">Custom…</option>
-                </select>
-              </label>
-              {pronounsChoice === "custom" && (
-                <label>
-                  Custom pronouns
-                  <input
-                    value={pronounsCustom}
-                    disabled={settingsBusy}
-                    onChange={(event) => setPronounsCustom(event.target.value)}
-                    placeholder="e.g. xe/xem"
-                    maxLength={40}
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                </label>
-              )}
-              <p className="settings-help" id="pronouns-help">
-                Optional. Used when she, her memory and the translation talk
-                about you. Her spoken Japanese rarely needs them.
-              </p>
-
-              <label>
-                What she calls you
-                <select
-                  value={addressChoice}
-                  disabled={settingsBusy}
-                  onChange={(event) => setAddressChoice(event.target.value)}
-                  aria-describedby="address-help"
-                >
-                  {addressOptions(userName).map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              </label>
-              {addressChoice === "custom" && (
-                <label>
-                  Custom form of address
-                  <input
-                    value={addressCustom}
-                    disabled={settingsBusy}
-                    onChange={(event) => setAddressCustom(event.target.value)}
-                    placeholder="e.g. a nickname, in katakana or kanji"
-                    maxLength={30}
-                    autoComplete="off"
-                    spellCheck={false}
-                    lang="ja"
-                  />
-                </label>
-              )}
-              <p className="settings-help" id="address-help">
-                "Let her decide" starts polite (さん) and gets more familiar as
-                trust grows, taking your pronouns into account. The ending also
-                shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
-              </p>
-
-              <label>
-                Keep last voice recordings
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={voiceRetention}
-                  disabled={settingsBusy}
-                  aria-describedby="voice-retention-help"
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setVoiceRetentionState(
-                      Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
-                    );
-                  }}
-                />
-              </label>
-              <p className="settings-help" id="voice-retention-help">
-                How many voice recordings to keep on disk. 0 keeps everything.
-                Older ones are deleted automatically, but any reply can always be
-                replayed — its line is re-synthesized on demand.
-              </p>
-
-              <label>
                 Conversation memory (tokens)
                 <input
                   type="number"
@@ -2498,70 +2377,10 @@ export default function App() {
                 </p>
               </div>
 
-              <div className="settings-toggle-row" aria-label="Show her Japanese line">
-                <div className="settings-toggle-text">
-                  <span className="settings-toggle-title">Show her Japanese line</span>
-                  <span className="settings-toggle-desc">
-                    Shows the Japanese she actually spoke under each of her
-                    messages - this is also what she remembers. Editing one of
-                    her messages rewrites it to match (her long-term memory may
-                    already have learned the old line). Saved in this browser.
-                    {voiceEarly && " Always on while her voice starts early (below)."}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={`settings-toggle${japaneseShown ? " on" : ""}`}
-                  onClick={() => setShowJapanese((v) => !v)}
-                  aria-pressed={japaneseShown}
-                  disabled={voiceEarly}
-                >
-                  <span className="settings-toggle-knob" aria-hidden="true" />
-                  <span>{japaneseShown ? "On" : "Off"}</span>
-                </button>
-              </div>
-
-              <div className="settings-toggle-row" aria-label="Start her voice early">
-                <div className="settings-toggle-text">
-                  <span className="settings-toggle-title">Start her voice early</span>
-                  <span className="settings-toggle-desc">
-                    She starts speaking as soon as her Japanese line is written,
-                    and the English appears a moment later. Her Japanese line is
-                    shown meanwhile. Off: her voice and the English text arrive
-                    together, a few seconds later. Saved in this browser.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={`settings-toggle${voiceEarly ? " on" : ""}`}
-                  onClick={() => setVoiceEarly((v) => !v)}
-                  aria-pressed={voiceEarly}
-                >
-                  <span className="settings-toggle-knob" aria-hidden="true" />
-                  <span>{voiceEarly ? "On" : "Off"}</span>
-                </button>
-              </div>
-
-              {statsInfo.length > 0 && (
-                <div className="stats-block" aria-label="Relationship stats">
-                  <p className="stats-intro">
-                    How it works: closeness shifts a little at a time across many
-                    messages. Warm, friendly chats slowly raise it a few points; tense
-                    or rude ones lower it. Higher levels unlock warmer, more playful
-                    conversation.
-                  </p>
-                  {statsInfo.map((s) => (
-                    <div key={s.key} className="stat-row">
-                      <div className="stat-line">
-                        <span className="stat-label">{s.label}</span>
-                        <span className="stat-value">
-                          {Math.round(s.value)}/{s.max}{s.tier ? ` — ${s.tier}` : ""}
-                        </span>
-                      </div>
-                      {s.description && <p className="settings-help">{s.description}</p>}
-                    </div>
-                  ))}
-                </div>
+              {!userName.trim() && (
+                <p className="settings-help">
+                  Also tell her your name in the Preferences tab - she waits for it.
+                </p>
               )}
 
               {settingsError && <p className="settings-error" role="alert">{settingsError}</p>}
@@ -2582,6 +2401,267 @@ export default function App() {
                   disabled={settingsBusy || loading}
                 >
                   {savingSettings ? "Saving..." : builtinMode ? "Save" : "Save connection"}
+                </button>
+              </div>
+            </div>
+
+            <div hidden={settingsSection !== "preferences"}>
+              <div className="conn-section">
+                <span className="conn-section-title">About you</span>
+                <label>
+                  Your name
+                  <input
+                    value={userName}
+                    disabled={settingsBusy}
+                    onChange={(event) => {
+                      setUserName(event.target.value);
+                      // The reading belonged to the old name.
+                      setUserNameReading("");
+                      setReadingNote("");
+                    }}
+                    placeholder="what she should call you"
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-describedby="your-name-help"
+                  />
+                </label>
+                <p className="settings-help" id="your-name-help">
+                  Required: she needs to know who she is talking to, and she
+                  calls you by this name. She waits for it on her first start.
+                </p>
+
+                <label>
+                  How she says it
+                  <div className="reading-row">
+                    <input
+                      value={userNameReading}
+                      disabled={settingsBusy || !userName.trim()}
+                      onChange={(event) => {
+                        setUserNameReading(event.target.value);
+                        setReadingNote("");
+                      }}
+                      placeholder={userName.trim() ? "press Suggest, or type katakana" : "set your name first"}
+                      autoComplete="off"
+                      spellCheck={false}
+                      lang="ja"
+                      aria-describedby="name-reading-help"
+                    />
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => void handleSuggestReading()}
+                      disabled={settingsBusy || readingSuggesting || !userName.trim()}
+                    >
+                      {readingSuggesting ? "Suggesting…" : "Suggest"}
+                    </button>
+                  </div>
+                </label>
+                {readingNote && <p className="settings-error" role="status">{readingNote}</p>}
+                <p className="settings-help" id="name-reading-help">
+                  Her voice speaks Japanese, so your name is said from this
+                  katakana (e.g. Alex → アレックス). Press Suggest to fill it in,
+                  or leave it empty and it's suggested when you save. Change it
+                  if it sounds wrong.
+                </p>
+
+                <label>
+                  Your pronouns
+                  <select
+                    value={pronounsChoice}
+                    disabled={settingsBusy}
+                    onChange={(event) => setPronounsChoice(event.target.value)}
+                    aria-describedby="pronouns-help"
+                  >
+                    <option value="">Not set</option>
+                    {PRONOUN_PRESETS.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                    <option value="custom">Custom…</option>
+                  </select>
+                </label>
+                {pronounsChoice === "custom" && (
+                  <label>
+                    Custom pronouns
+                    <input
+                      value={pronounsCustom}
+                      disabled={settingsBusy}
+                      onChange={(event) => setPronounsCustom(event.target.value)}
+                      placeholder="e.g. xe/xem"
+                      maxLength={40}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </label>
+                )}
+                <p className="settings-help" id="pronouns-help">
+                  Optional. Used when she, her memory and the translation talk
+                  about you. Her spoken Japanese rarely needs them.
+                </p>
+
+                <label>
+                  What she calls you
+                  <select
+                    value={addressChoice}
+                    disabled={settingsBusy}
+                    onChange={(event) => setAddressChoice(event.target.value)}
+                    aria-describedby="address-help"
+                  >
+                    {addressOptions(userName).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                {addressChoice === "custom" && (
+                  <label>
+                    Custom form of address
+                    <input
+                      value={addressCustom}
+                      disabled={settingsBusy}
+                      onChange={(event) => setAddressCustom(event.target.value)}
+                      placeholder="e.g. a nickname, in katakana or kanji"
+                      maxLength={30}
+                      autoComplete="off"
+                      spellCheck={false}
+                      lang="ja"
+                    />
+                  </label>
+                )}
+                <p className="settings-help" id="address-help">
+                  "Let her decide" starts polite (さん) and gets more familiar as
+                  trust grows, taking your pronouns into account. The ending also
+                  shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
+                </p>
+
+
+                <NameListEditor
+                  rows={nameRows}
+                  onChange={setNameRows}
+                  disabled={settingsBusy}
+                  suggest={suggestNameReading}
+                />
+                <p className="settings-help" id="names-help">
+                  Names she should write and say the same way every time - friends,
+                  family, pets, characters (e.g. Ineffa → イネファ). Her Japanese line,
+                  her voice and the English line all follow this list. Press Suggest
+                  for a reading, or type it in katakana.
+                </p>
+              </div>
+
+              <div className="conn-section">
+                <span className="conn-section-title">Chat & voice</span>
+                <div className="settings-toggle-row" aria-label="Show her Japanese line">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Show her Japanese line</span>
+                    <span className="settings-toggle-desc">
+                      Shows the Japanese she actually spoke under each of her
+                      messages - this is also what she remembers. Editing one of
+                      her messages rewrites it to match (her long-term memory may
+                      already have learned the old line). Saved in this browser.
+                      {voiceEarly && " Always on while her voice starts early (below)."}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${japaneseShown ? " on" : ""}`}
+                    onClick={() => setShowJapanese((v) => !v)}
+                    aria-pressed={japaneseShown}
+                    disabled={voiceEarly}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{japaneseShown ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+                <div className="settings-toggle-row" aria-label="Start her voice early">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Start her voice early</span>
+                    <span className="settings-toggle-desc">
+                      She starts speaking as soon as her Japanese line is written,
+                      and the English appears a moment later. Her Japanese line is
+                      shown meanwhile. Off: her voice and the English text arrive
+                      together, a few seconds later. Saved in this browser.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${voiceEarly ? " on" : ""}`}
+                    onClick={() => setVoiceEarly((v) => !v)}
+                    aria-pressed={voiceEarly}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{voiceEarly ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+
+                <label>
+                  Keep last voice recordings
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={voiceRetention}
+                    disabled={settingsBusy}
+                    aria-describedby="voice-retention-help"
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setVoiceRetentionState(
+                        Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+                      );
+                    }}
+                  />
+                </label>
+                <p className="settings-help" id="voice-retention-help">
+                  How many voice recordings to keep on disk. 0 keeps everything.
+                  Older ones are deleted automatically, but any reply can always be
+                  replayed — its line is re-synthesized on demand.
+                </p>
+              </div>
+
+              {statsInfo.length > 0 && (
+                <div className="conn-section">
+                  <span className="conn-section-title">Your relationship</span>
+                <div className="stats-block" aria-label="Relationship stats">
+                  <p className="stats-intro">
+                    How it works: closeness shifts a little at a time across many
+                    messages. Warm, friendly chats slowly raise it a few points; tense
+                    or rude ones lower it. Higher levels unlock warmer, more playful
+                    conversation.
+                  </p>
+                  {statsInfo.map((s) => (
+                    <div key={s.key} className="stat-row">
+                      <div className="stat-line">
+                        <span className="stat-label">{s.label}</span>
+                        <span className="stat-value">
+                          {Math.round(s.value)}/{s.max}{s.tier ? ` — ${s.tier}` : ""}
+                        </span>
+                      </div>
+                      {s.description && <p className="settings-help">{s.description}</p>}
+                    </div>
+                  ))}
+                </div>
+                </div>
+              )}
+
+
+              {settingsError && <p className="settings-error" role="alert">{settingsError}</p>}
+              {settingsNotice && <p className="settings-success" role="status">{settingsNotice}</p>}
+
+              <div className="modal-actions">
+                <button
+                  className="ghost-button"
+                  onClick={closeSettings}
+                  disabled={settingsBusy}
+                >
+                  Close
+                </button>
+
+                <button
+                  className="primary-button"
+                  onClick={saveModel}
+                  disabled={settingsBusy || loading}
+                >
+                  {savingSettings ? "Saving..." : "Save"}
                 </button>
               </div>
             </div>
