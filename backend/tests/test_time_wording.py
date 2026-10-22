@@ -223,7 +223,8 @@ class TimingLogLineTests(_FreshAppTests):
         with patch.object(self.chat, "get_llm", lambda *a, **k: Fake()), \
              patch.object(self.chat, "_finalize", lambda p, l: p), \
              patch.object(self.chat, "ja_voice", SimpleNamespace(
-                 build_voice_context=lambda t: {"role": "system", "content": "v"})), \
+                 build_closeness_context=lambda t: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {"role": "system", "content": "v"})), \
              patch.object(self.chat, "stats", SimpleNamespace(load_stat=lambda k: 50.0)), \
              redirect_stdout(buf):
             self.chat.generate_greeting()

@@ -110,7 +110,8 @@ class GreetingGenerationTests(unittest.TestCase):
         mem_db)."""
         fake = _FakeLLM(script=script)
         reset_calls = []
-        fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
+        fake_ja = SimpleNamespace(build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {
             "role": "system", "content": VOICELINE_MARK + " (trust 62)"})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
         # Sidecar out of the test (2026-10-05): generate_greeting now reads

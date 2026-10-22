@@ -176,19 +176,36 @@ def address_rule(tier: str) -> str:
     return rule
 
 
-def build_voice_context(trust_value) -> dict:
-    """System message that governs assistant_reply_JPS for the next reply."""
-    block = load_voice_block()
-    tier = stats.tier_label("trust", trust_value) or "Warming up"
-    head = ("VOICE / 声 (this block governs assistant_reply_JPS only): ")
-    head += "Current closeness tier: " + tier + " trust " + str(int(trust_value)) + " out of 100."
-    head += chr(10) + "Use the register of that tier, and follow the anti-caricature tsundere rules."
+# Prompt order A (2026-10-22): her prompt is split into a FIXED part (the same
+# bytes every reply, so a local server reuses it instead of re-reading it) and
+# the parts that change. The voice rules are fixed; the closeness tier, trust
+# number and address rule change, so they are a separate block placed after
+# every fixed block.
+def build_voice_rules() -> dict:
+    """The fixed voice block: identical every reply (no trust, no tier)."""
+    head = ("VOICE / 声 (this block governs assistant_reply_JPS only): "
+            "Use the register of the current closeness tier (the CLOSENESS "
+            "block below), and follow the anti-caricature tsundere rules.")
     head += chr(10) + FOREIGN_WORDS_RULE
+    return {"role": "system", "content": head + chr(10) + chr(10) + load_voice_block()}
+
+
+def build_closeness_context(trust_value) -> dict:
+    """The changing part of the voice block: tier, trust and how to address the user."""
+    tier = stats.tier_label("trust", trust_value) or "Warming up"
+    text = ("CLOSENESS (for the VOICE block): Current closeness tier: " + tier
+            + " trust " + str(int(trust_value)) + " out of 100.")
     try:
         rule = address_rule(tier)
     except Exception as exc:  # a settings hiccup must never block a reply
         print("[Amadeus] Address rule skipped:", repr(exc))
         rule = ""
     if rule:
-        head += chr(10) + rule
-    return {"role": "system", "content": head + chr(10) + chr(10) + block}
+        text += chr(10) + rule
+    return {"role": "system", "content": text}
+
+
+def build_voice_context(trust_value) -> dict:
+    """Both voice parts in one message (closeness first)."""
+    return {"role": "system", "content": build_closeness_context(trust_value)["content"]
+            + chr(10) + chr(10) + build_voice_rules()["content"]}

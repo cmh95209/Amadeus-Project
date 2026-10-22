@@ -301,7 +301,8 @@ class GreetingPinnedToItsTabTests(_FreshAppTests):
     def run_greeting(self, fake, **kw):
         fake_stats = SimpleNamespace(load_stat=lambda key: 50.0)
         fake_ja = SimpleNamespace(
-            build_voice_context=lambda trust: {"role": "system", "content": "v"})
+            build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {"role": "system", "content": "v"})
         with patch.object(self.chat, "get_llm", lambda *a, **k: fake), \
              patch.object(self.chat, "_finalize", lambda pack, llm: pack), \
              patch.object(self.chat, "ja_voice", fake_ja), \

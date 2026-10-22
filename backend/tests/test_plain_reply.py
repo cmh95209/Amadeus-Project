@@ -120,7 +120,8 @@ class _GreetFake:
 class GreetingTests(unittest.TestCase):
     def test_local_greeting_is_plain_text_plus_translation(self):
         fake = _GreetFake(["おかえり。今日は何をしてたの？", "Welcome back. What were you up to today?"])
-        fake_ja = SimpleNamespace(build_voice_context=lambda trust: {"role": "system", "content": "VOICE"})
+        fake_ja = SimpleNamespace(build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {"role": "system", "content": "VOICE"})
         with tempfile.TemporaryDirectory() as directory:
             mem_db = str(Path(directory) / "memory.db")
             with patch.object(chat, "get_llm", lambda *a, **k: fake), \

@@ -1273,6 +1273,25 @@ def _merge_leading_system_messages(messages):
     return [{"role": "system", "content": "\n\n".join(merged)}] + list(messages[start:])
 
 
+# Prompt order A (2026-10-22). A server skips re-reading a prompt only up to the
+# first byte that changed since the last call (llama-server's prompt cache, cloud
+# prompt caching). So every FIXED block comes first - personality, voice rules,
+# reply rules, web rules - and the blocks that change between replies (closeness,
+# appearance, memories, time, greeting instruction) come after them, right before
+# the conversation. Measured on the built-in model: a changed block at the top
+# re-read all ~7,300 pieces; at the end, ~40.
+def _ordered_prompt(rules_block, web_block, changing, context):
+    return _merge_leading_system_messages(
+        store.load_default_personality_messages()
+        + [ja_voice.build_voice_rules()]
+        + [rules_block]
+        + [web_block]
+        + [ja_voice.build_closeness_context(stats.load_stat("trust"))]
+        + list(changing)
+        + list(context)
+    )
+
+
 # --- Search-failure honesty net -------------------------------------------------
 # When a search turn cannot be completed - the final call failed (rate limit,
 # timeout, dropped connection) or came back empty with no search having run -
@@ -2862,20 +2881,18 @@ def generate_greeting(mode: str = "startup",
         # get, which is how a weak model stops inventing gaps from raw
         # numbers (observed 2026-09-21: handed "about 7 days", still said
         # "yesterday").
-        messages = _merge_leading_system_messages(
-            store.load_default_personality_messages()
-            + [instruction]
+        messages = _ordered_prompt(
+            _PLAIN_RULES_JA if _is_local(client) else _PACK_RULES,
+            NO_WEB_BLOCK,
+            [instruction]
             + ([memory_block] if memory_block else [])
             + [store.load_internal_context(is_greeting=True,
                                            conversation_id=conversation_id,
                                            is_return=not switch,
                                            previous_conversation_id=(
                                                previous_conversation_id
-                                               if switch else None))]
-            + [_PLAIN_RULES_JA if _is_local(client) else _PACK_RULES]
-            + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-            + [NO_WEB_BLOCK]
-            + ctx
+                                               if switch else None))],
+            ctx,
         )
         if _is_local(client):
             # Local model: plain Japanese line + translated English line. An
@@ -3057,15 +3074,13 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     except Exception:
         memory_block = None
 
-    messages = _merge_leading_system_messages(
-        store.load_default_personality_messages()
-        + book_messages
+    messages = _ordered_prompt(
+        pack_rules,
+        PROACTIVE_SEARCH_BLOCK if web_on else NO_WEB_BLOCK,
+        book_messages
         + ([memory_block] if memory_block else [])
-        + [internal_context if internal_context is not None else store.load_internal_context()]
-        + [pack_rules]
-        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-        + ([PROACTIVE_SEARCH_BLOCK] if web_on else [NO_WEB_BLOCK])
-        + message_context
+        + [internal_context if internal_context is not None else store.load_internal_context()],
+        message_context,
     )
 
     def _out(p: "AmadeusPack") -> "AmadeusPack":
@@ -3236,15 +3251,13 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
     except Exception:
         memory_block = None
 
-    messages = _merge_leading_system_messages(
-        store.load_default_personality_messages()
-        + book_messages
+    messages = _ordered_prompt(
+        _PLAIN_RULES_JA if plain else _PACK_RULES_JA_ONLY,
+        NO_WEB_BLOCK,
+        book_messages
         + ([memory_block] if memory_block else [])
-        + [internal_context if internal_context is not None else store.load_internal_context()]
-        + [_PLAIN_RULES_JA if plain else _PACK_RULES_JA_ONLY]
-        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-        + [NO_WEB_BLOCK]
-        + message_context
+        + [internal_context if internal_context is not None else store.load_internal_context()],
+        message_context,
     )
 
     def _attempt(client):

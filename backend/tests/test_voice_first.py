@@ -159,7 +159,8 @@ class VoiceFirstTests(unittest.TestCase):
         """Common patch set. structured_script / plain_script / forced_reply
         may also live on `fake` - these exist so each test can pass them
         explicitly and keep the fake itself simple."""
-        fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
+        fake_ja = SimpleNamespace(build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {
             "role": "system", "content": VOICE_MARK})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
         return [
@@ -395,7 +396,8 @@ class VoiceFirstTests(unittest.TestCase):
 
     def _route(self, web_on, fake):
         """POST / through the Flask test client with the full patch set."""
-        fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
+        fake_ja = SimpleNamespace(build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {
             "role": "system", "content": VOICE_MARK})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
         with tempfile.TemporaryDirectory() as directory:

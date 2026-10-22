@@ -270,7 +270,8 @@ class GreetingNetEndToEndTests(unittest.TestCase):
 
     def _run(self, fake, memory_block=None):
         self.memory_block = memory_block
-        fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
+        fake_ja = SimpleNamespace(build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {
             "role": "system", "content": "VOICE"})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
         with patch.object(chat, "get_llm", lambda *a, **k: fake), \

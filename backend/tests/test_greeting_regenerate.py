@@ -63,7 +63,8 @@ class _Base(_FreshAppTests):
             patch.object(self.chat, "reset_llm", lambda: None),
             patch.object(self.chat, "_finalize", lambda pack, llm: pack),
             patch.object(self.chat, "ja_voice", SimpleNamespace(
-                build_voice_context=lambda trust: {"role": "system", "content": "v"})),
+                build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {"role": "system", "content": "v"})),
             patch.object(self.chat, "stats", SimpleNamespace(load_stat=lambda key: 50.0)),
         ]
 
