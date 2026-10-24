@@ -66,6 +66,12 @@ class StructuredRequestTests(unittest.TestCase):
 
     def test_lan_server_counts_as_local(self):
         self.assertTrue(llm.is_local_server(_Client("http://192.168.0.244:8080/v1")))
+        # every private range, not only 172.16.x (Docker / WSL / routers: 172.17-172.31)
+        for url in ("http://172.20.5.2:8080/v1", "http://10.0.0.7:1234/v1", "http://[::1]:8080/v1",
+                    "http://my-pc.local:8080/v1", "http://localhost:8888/v1"):
+            self.assertTrue(llm.is_local_server(_Client(url)), url)
+        for url in ("https://openrouter.ai/api/v1", "http://172.32.0.1:8080/v1", "http://8.8.8.8/v1"):
+            self.assertFalse(llm.is_local_server(_Client(url)), url)
 
     def test_local_server_without_a_call_gives_none(self):
         client = _Client("http://localhost:8091/v1", AIMessage(content="ただのテキスト"))

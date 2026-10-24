@@ -1,3 +1,4 @@
+import ipaddress
 import socket
 from pathlib import Path
 
@@ -191,11 +192,17 @@ def reset_llm():
 
 def _is_local_host(base_url: str) -> bool:
     """True for localhost / private-LAN addresses (vs. a public cloud host)."""
-    host = base_url.split("//", 1)[-1].split("/")[0].split(":")[0].lower()
-    return (
-        host in ("localhost", "127.0.0.1", "::1")
-        or host.startswith(("192.168.", "10.", "172.16."))
-    )
+    netloc = base_url.split("//", 1)[-1].split("/")[0].lower()
+    host = netloc[1:].split("]")[0] if netloc.startswith("[") else netloc.split(":")[0]
+    if host == "localhost" or host.endswith(".local"):
+        return True
+    try:
+        # Every private range: 10/8, 172.16/12 (172.16-172.31: Docker, WSL,
+        # some routers), 192.168/16, loopback, link-local, IPv6 private.
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback or addr.is_link_local
 
 
 def reasoning_levels() -> dict:
