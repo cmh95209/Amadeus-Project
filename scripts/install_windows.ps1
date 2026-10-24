@@ -1879,6 +1879,16 @@ try {
     # folder exists (fresh-VM test 2026-10-07: her first line failed).
     New-Item -ItemType Directory -Force -Path (Join-Path $dst "fast_langdetect") | Out-Null
     Remove-Item -LiteralPath (Join-Path $InstallDir "downloads\voice") -Recurse -Force -ErrorAction SilentlyContinue
+    # Her Japanese pronunciation dictionary (open_jtalk, ~23 MB): the voice
+    # engine's text library fetches it the first time she speaks, which made
+    # her first line wait (2026-10-24 test). Fetch it now. Best effort: if
+    # this fails, the library still fetches it on first use.
+    $voicePy = Join-Path $condaHome ("envs\" + $EnvVoice + "\python.exe")
+    if (Test-Path -LiteralPath $voicePy) {
+        Invoke-Tool "Preparing her Japanese pronunciation dictionary" $voicePy @("-I", "-c", "import pyopenjtalk; pyopenjtalk.g2p('あ'); print('JTALK_OK')")
+        if ((Get-ToolTail) -match "JTALK_OK") { Log "  Her Japanese pronunciation dictionary is in place." "Green" }
+        else { Log "  Her Japanese pronunciation dictionary could not be prepared right now - it downloads the first time she speaks." "Yellow" }
+    }
     # The old full download (installers before v4.13) in the temp folder:
     # ~13 GB nobody needs any more.
     $oldHf = Join-Path $env:TEMP "GPT-SoVITS-hf"
