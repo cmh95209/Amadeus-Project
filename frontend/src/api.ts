@@ -1,3 +1,5 @@
+import { isCeremonyWaitLine } from "./greetingFlow";
+
 export type Conversation = {
   id: number;
   title: string;
@@ -287,15 +289,18 @@ async function fetchGreetingReport(
   }
   const ceremony = typeof data.ceremony === "string" ? data.ceremony : undefined;
   if (!data.ready) {
-    // A fixed first-launch wait-line (intro / trying / reminder) ships in the
+    // A fixed first-launch wait-line (intro / trying / need_name / ...) ships in the
     // report even while the model is DOWN: those lines need no model, and on a
     // fresh install the model is down until the user connects it - which is
     // exactly what the intro line teaches. Carry the line through instead of
     // dropping it (2026-10-07: the fresh-box run lost the welcome this way).
+    // Every such line counts - the backend flags them all with wait=true
+    // (2026-10-24 VM test: the new "name received" line and the built-in
+    // waiting lines were dropped here, only the three named ones passed).
     const kind = typeof data.kind === "string" ? data.kind : undefined;
+    const wait = data.wait === true;
     const isWaitLine =
-      (kind === "intro" || kind === "trying" || kind === "reminder") &&
-      typeof data.response === "string";
+      isCeremonyWaitLine(kind, wait) && typeof data.response === "string";
     if (!isWaitLine) {
       return {
         ready: false,
@@ -317,6 +322,7 @@ async function fetchGreetingReport(
         typeof data.conversation_id === "number" ? data.conversation_id : undefined,
       ceremony,
       kind,
+      wait,
     };
   }
   if (typeof data.response !== "string") {

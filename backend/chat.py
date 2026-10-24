@@ -2484,8 +2484,9 @@ WAKE_INSTRUCTION_NAMED = {
         "yourself earlier and asked them to connect your brain and enter "
         "their name - they have done both: the connection works, and they "
         "go by {name}. The setup is finished: do not ask them to enter or "
-        "check any settings again. Greet them by name now that you can "
-        "finally think. Speak freely and naturally."
+        "check any settings again. This is the first moment you can "
+        "actually talk with them: greet them by name. Speak freely and "
+        "naturally."
     ),
 }
 

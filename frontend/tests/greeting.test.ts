@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { ConnectionStatus, MemoryMessage } from "../src/api";
+import { getGreeting } from "../src/api";
 import { deriveFooter, isCeremonyWaitLine, NOT_LISTED_GRACE_MS, placeGreeting, waitUntilQuiet } from "../src/greetingFlow";
 import type { GreetPhase } from "../src/greetingFlow";
 
@@ -124,6 +125,33 @@ assert.equal(isCeremonyWaitLine("builtin_intro", true), true, "flagged built-in 
 assert.equal(isCeremonyWaitLine("wake", false), false);
 assert.equal(isCeremonyWaitLine("builtin_fallback", false), false);
 assert.equal(isCeremonyWaitLine(undefined, undefined), false);
+
+// ---- getGreeting keeps EVERY flagged wait line while the model is down ----
+// (2026-10-24 VM test: "need_connection" and the built-in waiting lines were
+// dropped by the reply parser - only intro / trying / reminder got through.)
+{
+  const realFetch = globalThis.fetch;
+  const reply = (body: Record<string, unknown>) => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), { status: 200 })) as typeof fetch;
+  };
+  try {
+    for (const kind of ["need_connection", "need_name", "builtin_waiting", "builtin_need_load"]) {
+      reply({ ready: false, kind, wait: true, response: `line ${kind}`, speech_id: "abc",
+              assistant_id: 2, ceremony: "intro" });
+      const g = await getGreeting(true);
+      assert.equal(g.response, `line ${kind}`, `${kind} reaches the page`);
+      assert.equal(g.kind, kind);
+      assert.equal(g.wait, true);
+      assert.ok(g.speechUrl?.endsWith("/speech/abc"), `${kind} is voiced`);
+    }
+    // Nothing to say (no kind): still no line.
+    reply({ ready: false, reason: "model server unreachable", ceremony: "intro" });
+    assert.equal((await getGreeting()).response, undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 // ---- waitUntilQuiet: a first-launch line never cuts off the previous one ----
 {
