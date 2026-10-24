@@ -859,7 +859,7 @@ function Confirm-LocalModel($hw){
         }
         return (New-CustomChoice)
     }
-    $q = "Download " + $hw.model.label + " (" + $hw.download_gb + " GB) near the end of the install? Type Y (yes) or B (do it myself instead)"
+    $q = "Download " + $hw.model.label + " (" + $hw.download_gb + " GB) while everything else installs? Type Y (yes) or B (do it myself instead)"
     if ((Read-Answer $q @("Y","B")) -eq "B") { return (New-CustomChoice) }
     $c = $hw.choice
     return [pscustomobject]@{
@@ -906,7 +906,7 @@ function Invoke-LlmChoice($hw){
     Log "    B) I'll do it myself (choose this if using a cloud model or your own local model)"
     if ((Read-Answer "Type A or B" @("A","B")) -eq "A") { $choice = Confirm-LocalModel $hw } else { $choice = New-CustomChoice }
     Write-Utf8File $LlmChoiceFile ($choice | ConvertTo-Json -Depth 4)
-    if ($choice.mode -eq "builtin") { Log ("  Chosen: " + $TierTable.models.($choice.model).label + " - it downloads near the end of the install.") "Green" }
+    if ($choice.mode -eq "builtin") { Log ("  Chosen: " + $TierTable.models.($choice.model).label + " - it downloads in the background while everything else installs.") "Green" }
     else { Log "  Chosen: option B - you connect a model yourself in Settings after the install." "Green" }
     return $choice
 }
@@ -1593,6 +1593,12 @@ try {
     # work (launcher.py --setup-memory), so install and launch can never set
     # it up two different ways; the launcher still repairs it at start if
     # this step could not finish. Not fatal: she works without it.
+    # uv, a much faster package installer, for her memory's fully pinned
+    # package list (the same versions as pip, in about a third of the time).
+    # Not for the voice engine: its list is not pinned and uv picks other
+    # versions there (tested 2026-10-24). Not fatal: the launcher falls back
+    # to pip without it.
+    Invoke-PipInEnv $EnvApp @("install", "uv==0.12.24") "Installing uv (a faster package installer)"
     $cmPy = Env-Python $EnvCm
     $launcherPy = Join-Path $proj "scripts\launcher.py"
     $setupArgs = @($launcherPy, "--setup-memory")

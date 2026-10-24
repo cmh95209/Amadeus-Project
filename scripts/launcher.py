@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import shutil
 import signal
@@ -461,6 +462,16 @@ def _pip_install_sidecar(passthrough: bool = False) -> bool:
     pip's "raw" progress mode feeds the progress line; a pip too old to know
     it is asked again without it."""
     req = CM_DIR / "requirements.txt"
+    # uv (installer v4.13 puts it in the app environment): the same pinned
+    # versions as pip (checked package by package, 2026-10-24) in ~50 s
+    # instead of ~140 s. pip stays the fallback when uv is missing or fails.
+    if importlib.util.find_spec("uv") is not None:
+        code = run_tool(CM_SETUP_LABEL, [sys.executable, "-m", "uv", "pip", "install",
+                                         "--no-cache", "--python", str(_cm_python()),
+                                         "-r", str(req)], passthrough=passthrough)
+        if code == 0:
+            return True
+        note("uv could not install her memory packages - trying pip instead.")
     base = [str(_cm_python()), "-m", "pip", "install"]
     rest = ["--no-cache-dir", "-r", str(req)]
     code = run_tool(CM_SETUP_LABEL, base + ["--progress-bar", "raw"] + rest,
