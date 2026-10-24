@@ -954,8 +954,12 @@ function Get-VerifiedFile($url, $dest, [double]$bytes, $sha256, $label){
         Move-Item -LiteralPath $dest -Destination $part -Force
     }
     $gb = [math]::Round($bytes / 1GB, 2)
-    Log ("  Downloading " + $label + " (" + $gb + " GB)...")
-    Log ("  from: " + $url)
+    if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) {
+        Write-LogOnly ("  " + $label + ": already downloaded in the background, from " + $url)
+    } else {
+        Log ("  Downloading " + $label + " (" + $gb + " GB)...")
+        Log ("  from: " + $url)
+    }
     $curl = Join-Path $env:SystemRoot "System32\curl.exe"
     for ($try = 1; $try -le 4; $try++) {
         if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -gt $bytes) { Remove-Item -LiteralPath $part -Force }
@@ -1248,6 +1252,9 @@ function Start-Hidden($name, $exe, [string[]]$argv){
     $psi.Arguments = Join-ProcessArgs $argv
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    # A neutral folder: the installer's own current folder can be the app's
+    # backend, whose files (memory.py, api.py, ...) Python would load first.
+    $psi.WorkingDirectory = Split-Path $pidFile -Parent
     $p = [Diagnostics.Process]::Start($psi)
     Set-Content -LiteralPath $pidFile -Value $p.Id -NoNewline -Encoding ascii
     return $p
@@ -1281,7 +1288,10 @@ function Start-BackgroundDownloads($choice, $hw){
     if (-not (Test-Path (Join-Path $env:SystemRoot "System32\curl.exe"))) { return }   # each step downloads its files as before
     Stop-BackgroundDownloads
     Start-BgCurl "voice" @(Get-VoiceFiles) "Her voice files"
-    if (-not $SkipLlmDownload) { Start-BgCurl "model" @(Get-LocalLlmFiles $choice $hw) "Her model files" }
+    if (-not $SkipLlmDownload) {
+        $label = if ($choice.mode -eq "builtin") { "Her model files" } else { "llama.cpp (to run a model of your own later)" }
+        Start-BgCurl "model" @(Get-LocalLlmFiles $choice $hw) $label
+    }
 }
 
 # When a step needs them: let a still-running background download finish
@@ -1334,8 +1344,16 @@ function Start-EmbedModelDownload($proj){
     if (Test-EmbedModelCached) { return }
     $py = Join-Path $proj "memory_sidecar\venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $py)) { return }
+    # A small script (isolated mode: no current folder on Python's path) that
+    # writes any error to a log, so a failure is never silent.
+    $dl = Join-Path $ModelsDir "downloads"
+    New-Item -ItemType Directory -Force -Path $dl | Out-Null
+    $script = Join-Path $dl "fetch_memory_model.py"
+    $errLog = Join-Path $dl "background_memory.log"
+    Remove-Item -LiteralPath $errLog -Force -ErrorAction SilentlyContinue
+    Write-Utf8File $script ("import sys, traceback`r`ntry:`r`n    from huggingface_hub import snapshot_download`r`n    snapshot_download('" + $EmbedModel + "')`r`nexcept Exception:`r`n    open(sys.argv[1], 'w', encoding='utf-8').write(traceback.format_exc())`r`n    sys.exit(1)`r`n")
     try {
-        $p = Start-Hidden "memory" $py @("-c", "from huggingface_hub import snapshot_download; snapshot_download('" + $EmbedModel + "')")
+        $p = Start-Hidden "memory" $py @("-I", $script, $errLog)
         Log "  Her memory's search model (about 1.2 GB) starts downloading in the background now." "Green"
         Write-LogOnly ("  background download 'memory' (python pid " + $p.Id + "): " + $EmbedModel)
     } catch {
@@ -1343,9 +1361,14 @@ function Start-EmbedModelDownload($proj){
     }
 }
 function Wait-EmbedModelDownload {
+    $script = Join-Path $ModelsDir "downloads\fetch_memory_model.py"
+    if (-not (Test-Path -LiteralPath $script)) { return }   # never started (no memory, or already cached)
     Wait-Background "memory" @() "Downloading her memory's search model"
+    $errLog = Join-Path $ModelsDir "downloads\background_memory.log"
+    if (Test-Path -LiteralPath $errLog) { Write-LogOnly ("  memory model download error: " + (Get-Content -LiteralPath $errLog -Raw)) }
     if (Test-EmbedModelCached) { Log "  Her memory's search model is in place." "Green" }
-    elseif (Test-Path (Join-Path (Get-HfHome) "hub")) { Log "  Her memory's search model could not be downloaded right now - she fetches it at her first start." "Yellow" }
+    else { Log "  Her memory's search model could not be downloaded right now - she fetches it at her first start." "Yellow" }
+    Remove-Item -LiteralPath $script -Force -ErrorAction SilentlyContinue
 }
 
 # The local-model step for whichever option was chosen. Returns $true
