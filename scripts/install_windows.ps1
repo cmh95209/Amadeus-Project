@@ -14,6 +14,10 @@
 #     program that runs it) in the background while everything else
 #     installs, resumable and checked against the official checksums.
 #     Models live in <install folder>\models.
+#   - Her voice downloads only the files it uses (~1.2 GB instead of ~6.5 GB,
+#     and no ~13 GB leftover in the temp folder), also in the background;
+#     her memory's search model (~1.2 GB) downloads during the install
+#     instead of at her first start.
 #   - "Install Amadeus.bat": download it and double-click it - it fetches
 #     this installer and runs it (no PowerShell line to paste).
 #   - No administrator needed: run it in a normal PowerShell window. Git,
@@ -1133,17 +1137,21 @@ function Install-LocalModelRunner($proj, $hw){
     return [bool]$exe
 }
 
-# ---------- the big local-model files download in the background (v4.13) ----------
-# Her model (4-7 GB), its vision file and llama.cpp used to download at the
-# very END, after ~10 minutes of installing that mostly keeps the processor
-# busy, not the internet. They now start right after the A/B question, in
-# Windows' own curl.exe without a window, into the same ".part" files
-# Get-VerifiedFile uses: when the install reaches its local-model step,
-# Get-VerifiedFile finds them finished (or half-finished, and continues
-# them) and checks each one exactly as before. Safe if anything goes wrong:
-# a download that fails or is cut off is simply resumed then; a re-run
-# first stops a background download an earlier run left behind.
-$BgPidFile = Join-Path $ModelsDir "downloads\background_download.pid"
+# ---------- the big downloads start in the background (v4.13) ----------
+# Her voice files (~1.2 GB), her model (4-7 GB), its vision file and
+# llama.cpp used to download one after another, late in the install, after
+# ~10 minutes of installing that mostly keeps the processor busy, not the
+# internet. They now start right after the A/B question, in Windows' own
+# curl.exe without a window, into the same ".part" files Get-VerifiedFile
+# uses: when the install reaches the step that needs them, Get-VerifiedFile
+# finds them finished (or half-finished, and continues them) and checks
+# each one exactly as before. Two separate downloads ("voice" and "model"),
+# so the voice step never waits for the much bigger model. Safe if anything
+# goes wrong: a download that fails or is cut off is simply resumed then;
+# a re-run first stops a background download an earlier run left behind.
+# Her memory's search model (~1.2 GB) also downloads in the background,
+# right after her memory is set up (it used to come at her first start).
+function Get-BgPidFile($name){ return (Join-Path $ModelsDir ("downloads\background_" + $name + ".pid")) }
 
 # Every file the chosen option downloads at its local-model step:
 # [url, dest, bytes, sha256]. Option A: llama.cpp + model + vision file;
@@ -1177,87 +1185,173 @@ function Get-LocalLlmFiles($choice, $hw){
     })
 }
 
-# A background download an earlier (stopped) run left behind: stop it, so
-# two downloads never write the same file. Its ".part" files stay, to resume.
-function Stop-BackgroundDownloads {
-    if (-not (Test-Path -LiteralPath $BgPidFile)) { return }
-    $id = 0
-    try { $id = [int](Get-Content -LiteralPath $BgPidFile -Raw).Trim() } catch {}
-    if ($id) {
-        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if ($p -and $p.ProcessName -eq "curl") { try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch {} }
+# Her voice: ONLY the files the engine loads for her (its "v2" setup -
+# tested 2026-10-24: she speaks with exactly these). The engine's model page
+# holds every engine version (~6.5 GB, and the old full download left a
+# ~13 GB copy in the temp folder). Pinned to one version of that page, each
+# file checked against its published checksum.
+$VoiceRepoUrl = "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/"
+$VoiceFileTable = @(
+    @("chinese-roberta-wwm-ext-large/config.json", 963, "3d57de2fd7e80d0e5c8ff194f0bbb6baa10df7e43fc262a0cc71298a78b0a3e5"),
+    @("chinese-roberta-wwm-ext-large/tokenizer.json", 268962, "173796956820ea27bd14f76bf28162607ff4254807e2948253eb5b46f5bb643b"),
+    @("chinese-roberta-wwm-ext-large/pytorch_model.bin", 651225145, "e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8"),
+    @("chinese-hubert-base/config.json", 1449, "c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103"),
+    @("chinese-hubert-base/preprocessor_config.json", 212, "dcd684124d06722947939d41ea6ae58dbf10968c60a11a29f23ddc602c64a29b"),
+    @("chinese-hubert-base/pytorch_model.bin", 188811417, "24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c"),
+    @("gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt", 155315150, "732f94e63b148066e24c7f9d2637f3374083e637635f07fbdb695dee20ddbe1f"),
+    @("gsv-v2final-pretrained/s2G2333k.pth", 106035259, "924fdccaa3c574bf139c25c9759aa1ed3b3f99e19a7c529ee996c2bc17663695")
+)
+# Her voice's language detector (optional: the engine downloads it itself
+# the first time she speaks if it is missing).
+$VoiceLidFile = @("https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin", "fast_langdetect/lid.176.bin", 131266198, "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e")
+
+# [url, staging dest, bytes, sha256, final path] for each voice file not in
+# place yet. They download into <install folder>\downloads\voice (the voice
+# engine's folder may not exist yet, and an incomplete one is re-downloaded
+# whole) and move into pretrained_models at the voice step.
+function Get-VoiceFiles {
+    $pm = Join-Path $InstallDir "Amadeus-Project\GPT-SoVITS\GPT_SoVITS\pretrained_models"
+    $stage = Join-Path $InstallDir "downloads\voice"
+    $files = @()
+    foreach ($v in @($VoiceFileTable) + ,$VoiceLidFile) {
+        $rel = $v[0]; $url = $VoiceRepoUrl + $rel; $bytes = $v[1]; $sha = $v[2]
+        if ($v.Count -eq 4) { $url = $v[0]; $rel = $v[1]; $bytes = $v[2]; $sha = $v[3] }
+        $rel = $rel.Replace('/', '\')
+        $files += ,@($url, (Join-Path $stage $rel), $bytes, $sha, (Join-Path $pm $rel))
     }
-    Remove-Item -LiteralPath $BgPidFile -Force -ErrorAction SilentlyContinue
+    # Already in place (an earlier install): nothing to fetch.
+    return @($files | Where-Object { -not ((Test-Path -LiteralPath $_[4]) -and (Get-Item -LiteralPath $_[4]).Length -eq $_[2]) })
 }
 
-function Start-BackgroundDownloads($choice, $hw){
-    if ($SkipLlmDownload) { return }
-    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
-    if (-not (Test-Path $curl)) { return }    # the local-model step downloads them as before
-    Stop-BackgroundDownloads
-    $files = @(Get-LocalLlmFiles $choice $hw)
-    if ($files.Count -eq 0) { return }
-    $todo = @()
-    foreach ($f in $files) {
-        if (Test-Path -LiteralPath $f[1]) { continue }          # unchecked file: Get-VerifiedFile decides
-        $part = $f[1] + ".part"
-        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -ge $f[2]) { continue }
-        $todo += ,$f
+# A background download (or memory model fetch) an earlier, stopped run
+# left behind: stop it, so two downloads never write the same file. Its
+# ".part" files stay, to resume.
+function Stop-BackgroundDownloads {
+    $dir = Join-Path $ModelsDir "downloads"
+    foreach ($pf in @(Get-ChildItem -LiteralPath $dir -Filter "background_*.pid" -ErrorAction SilentlyContinue)) {
+        $id = 0
+        try { $id = [int](Get-Content -LiteralPath $pf.FullName -Raw).Trim() } catch {}
+        if ($id) {
+            $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -in @("curl", "python")) { try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch {} }
+        }
+        Remove-Item -LiteralPath $pf.FullName -Force -ErrorAction SilentlyContinue
     }
-    if ($todo.Count -eq 0) { return }
-    New-Item -ItemType Directory -Force -Path (Split-Path $BgPidFile -Parent) | Out-Null
-    $argv = @("-L", "--fail", "--retry", "5", "--retry-delay", "10", "--connect-timeout", "30", "-C", "-",
-              "-s", "-S", "--stderr", (Join-Path $ModelsDir "downloads\background_download.log"))
-    foreach ($f in $todo) { $argv += @("-o", ($f[1] + ".part"), $f[0]) }
+}
+
+# Start one hidden background program; its process id goes to the pid file.
+function Start-Hidden($name, $exe, [string[]]$argv){
+    $pidFile = Get-BgPidFile $name
+    New-Item -ItemType Directory -Force -Path (Split-Path $pidFile -Parent) | Out-Null
     $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $curl
+    $psi.FileName = $exe
     $psi.Arguments = Join-ProcessArgs $argv
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    $p = [Diagnostics.Process]::Start($psi)
+    Set-Content -LiteralPath $pidFile -Value $p.Id -NoNewline -Encoding ascii
+    return $p
+}
+
+# One background curl for a list of [url, dest, bytes, ...] files.
+function Start-BgCurl($name, $files, $label){
+    $todo = @()
+    foreach ($f in @($files)) {
+        if (Test-Path -LiteralPath $f[1]) { continue }          # unchecked file: Get-VerifiedFile decides
+        $part = $f[1] + ".part"
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -ge $f[2]) { continue }
+        New-Item -ItemType Directory -Force -Path (Split-Path $f[1] -Parent) | Out-Null
+        $todo += ,$f
+    }
+    if ($todo.Count -eq 0) { return }
+    $argv = @("-L", "--fail", "--retry", "5", "--retry-delay", "10", "--connect-timeout", "30", "-C", "-",
+              "-s", "-S", "--stderr", (Join-Path $ModelsDir ("downloads\background_" + $name + ".log")))
+    foreach ($f in $todo) { $argv += @("-o", ($f[1] + ".part"), $f[0]) }
     try {
-        $p = [Diagnostics.Process]::Start($psi)
-        Set-Content -LiteralPath $BgPidFile -Value $p.Id -NoNewline -Encoding ascii
+        $p = Start-Hidden $name (Join-Path $env:SystemRoot "System32\curl.exe") $argv
         $gb = [math]::Round((($todo | ForEach-Object { [double]$_[2] }) | Measure-Object -Sum).Sum / 1GB, 1)
-        Log ("  Her model files (" + $gb + " GB) start downloading in the background now, while everything else installs.") "Green"
-        Write-LogOnly ("  background download (curl pid " + $p.Id + "): " + (($todo | ForEach-Object { Split-Path $_[1] -Leaf }) -join ", "))
+        Log ("  " + $label + " (" + $gb + " GB) start downloading in the background now, while everything else installs.") "Green"
+        Write-LogOnly ("  background download '" + $name + "' (curl pid " + $p.Id + "): " + (($todo | ForEach-Object { Split-Path $_[1] -Leaf }) -join ", "))
     } catch {
-        Write-LogOnly ("  background download not started (" + $_.Exception.Message + ") - the local-model step downloads the files.")
+        Write-LogOnly ("  background download '" + $name + "' not started (" + $_.Exception.Message + ") - its step downloads the files.")
     }
 }
 
-# At the local-model step: let a still-running background download finish
+function Start-BackgroundDownloads($choice, $hw){
+    if (-not (Test-Path (Join-Path $env:SystemRoot "System32\curl.exe"))) { return }   # each step downloads its files as before
+    Stop-BackgroundDownloads
+    Start-BgCurl "voice" @(Get-VoiceFiles) "Her voice files"
+    if (-not $SkipLlmDownload) { Start-BgCurl "model" @(Get-LocalLlmFiles $choice $hw) "Her model files" }
+}
+
+# When a step needs them: let a still-running background download finish
 # (showing its progress), then Get-VerifiedFile checks every file as before.
-function Wait-BackgroundDownloads($choice, $hw){
-    if (-not (Test-Path -LiteralPath $BgPidFile)) { return }
+# Without a file list (her memory's model) it shows the time waited.
+function Wait-Background($name, $files, $activity){
+    $pidFile = Get-BgPidFile $name
+    if (-not (Test-Path -LiteralPath $pidFile)) { return }
     $id = 0
-    try { $id = [int](Get-Content -LiteralPath $BgPidFile -Raw).Trim() } catch {}
+    try { $id = [int](Get-Content -LiteralPath $pidFile -Raw).Trim() } catch {}
     $p = if ($id) { Get-Process -Id $id -ErrorAction SilentlyContinue } else { $null }
-    if ($p -and $p.ProcessName -eq "curl" -and -not $p.HasExited) {
-        $files = @(Get-LocalLlmFiles $choice $hw)
+    if ($p -and $p.ProcessName -in @("curl", "python") -and -not $p.HasExited) {
+        $files = @($files)
         $total = (($files | ForEach-Object { [double]$_[2] }) | Measure-Object -Sum).Sum
-        Log "  Her model is still downloading in the background - waiting for it to finish..."
+        Log ("  " + $activity + " - still going in the background, waiting for it to finish...")
         $ProgressPreference = "Continue"
+        $started = Get-Date
         while (-not $p.HasExited) {
-            $have = 0.0
-            foreach ($f in $files) {
-                foreach ($path in @($f[1], ($f[1] + ".part"))) {
-                    if (Test-Path -LiteralPath $path) { $have += (Get-Item -LiteralPath $path).Length; break }
+            if ($total -gt 0) {
+                $have = 0.0
+                foreach ($f in $files) {
+                    foreach ($path in @($f[1], ($f[1] + ".part"))) {
+                        if (Test-Path -LiteralPath $path) { $have += (Get-Item -LiteralPath $path).Length; break }
+                    }
                 }
+                $pct = [int][math]::Min(100, 100 * $have / $total)
+                Write-Progress -Id 2 -ParentId 1 -Activity $activity -Status ("{0:N1} of {1:N1} GB" -f ($have / 1GB), ($total / 1GB)) -PercentComplete $pct
+            } else {
+                Write-Progress -Id 2 -ParentId 1 -Activity $activity -Status ("{0} s" -f [int]((Get-Date) - $started).TotalSeconds)
             }
-            $pct = if ($total -gt 0) { [int][math]::Min(100, 100 * $have / $total) } else { 0 }
-            Write-Progress -Id 2 -ParentId 1 -Activity "Downloading her model" -Status ("{0:N1} of {1:N1} GB" -f ($have / 1GB), ($total / 1GB)) -PercentComplete $pct
             Start-Sleep -Seconds 2
         }
-        Write-Progress -Id 2 -ParentId 1 -Activity "Downloading her model" -Completed
-        Write-LogOnly "  background download finished"
+        Write-Progress -Id 2 -ParentId 1 -Activity $activity -Completed
+        Write-LogOnly ("  background '" + $name + "' finished")
     }
-    Remove-Item -LiteralPath $BgPidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+}
+
+# Her memory's search model (Qwen3-Embedding-0.6B, ~1.2 GB): fetched into
+# the usual model cache by her memory's own Python, in the background, right
+# after her memory is set up. Not fatal: she fetches it at her first start
+# if this could not finish.
+$EmbedModel = "Qwen/Qwen3-Embedding-0.6B"
+function Get-HfHome { if ($env:HF_HOME) { return $env:HF_HOME } return (Join-Path $env:USERPROFILE ".cache\huggingface") }
+function Test-EmbedModelCached {
+    $snap = Join-Path (Get-HfHome) "hub\models--Qwen--Qwen3-Embedding-0.6B\snapshots"
+    return [bool](Get-ChildItem -LiteralPath $snap -Recurse -Filter "model.safetensors" -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+function Start-EmbedModelDownload($proj){
+    if (Test-EmbedModelCached) { return }
+    $py = Join-Path $proj "memory_sidecar\venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $py)) { return }
+    try {
+        $p = Start-Hidden "memory" $py @("-c", "from huggingface_hub import snapshot_download; snapshot_download('" + $EmbedModel + "')")
+        Log "  Her memory's search model (about 1.2 GB) starts downloading in the background now." "Green"
+        Write-LogOnly ("  background download 'memory' (python pid " + $p.Id + "): " + $EmbedModel)
+    } catch {
+        Write-LogOnly ("  memory model download not started (" + $_.Exception.Message + ") - she fetches it at her first start.")
+    }
+}
+function Wait-EmbedModelDownload {
+    Wait-Background "memory" @() "Downloading her memory's search model"
+    if (Test-EmbedModelCached) { Log "  Her memory's search model is in place." "Green" }
+    elseif (Test-Path (Join-Path (Get-HfHome) "hub")) { Log "  Her memory's search model could not be downloaded right now - she fetches it at her first start." "Yellow" }
 }
 
 # The local-model step for whichever option was chosen. Returns $true
 # when option A's model is ready (option B: when llama.cpp is in place).
 function Install-LocalLlm($proj, $choice, $hw){
-    Wait-BackgroundDownloads $choice $hw
+    Wait-Background "model" @(Get-LocalLlmFiles $choice $hw) "Downloading her model"
     if ($choice.mode -eq "builtin") { return (Install-BuiltinLlm $proj $choice) }
     if ($hw.choice.offered) { return (Install-LocalModelRunner $proj $hw) }
     Write-LocalLlmConfig $proj $choice "" $false "" $false   # switches an earlier option-A install off
@@ -1639,7 +1733,7 @@ try {
     if ($cmPy) { $setupArgs += @("--cm-python", $cmPy) }
     if ($amPy) { Invoke-Tool "Setting up her memory (about 1.3 GB)" $amPy $setupArgs }
     else { Invoke-Tool "Setting up her memory (about 1.3 GB)" $conda (@("run", "-n", $EnvApp, "--no-capture-output", "python") + $setupArgs) }
-    if ($LASTEXITCODE -eq 0) { Log "  Her memory is set up." "Green" }
+    if ($LASTEXITCODE -eq 0) { Log "  Her memory is set up." "Green"; Start-EmbedModelDownload $proj }
     else { Log ("  Her memory could not be set up right now - Amadeus finishes it when she starts. The last lines were:`n" + (Get-ToolTail)) "Yellow" }
 
     # ---------- STEP 6: voice env (PyTorch first, then the rest) ----------
@@ -1727,71 +1821,47 @@ try {
         Log "  Running in CPU mode (no GPU detected)." "Yellow"
     }
 
-    # ---------- STEP 8: pretrained voice models ----------
-    Step 8 "Downloading the voice model files (several GB, be patient)"
-    $hf  = Join-Path $env:TEMP "GPT-SoVITS-hf"
-    # NOTE: this HuggingFace repo keeps every model file at its TOP level -
-    # there is no 'pretrained_models' subfolder. So we treat the whole cloned
-    # folder as the set of files to copy, and use one marker file (s2G488k.pth)
-    # to know the download finished, so a re-run does NOT download again.
-    if (-not (Test-Path (Join-Path $hf "s2G488k.pth"))) {
-        if (Test-Path $hf) { Remove-Item -Recurse -Force $hf -ErrorAction SilentlyContinue }
-        Invoke-Tool "Downloading the voice model files" (Resolve-Exe "git") @("clone", "--progress", "https://huggingface.co/lj1995/GPT-SoVITS", $hf)
-        if ($LASTEXITCODE -ne 0) { throw ("Could not download the voice model files. Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
-        Log "  Voice model files downloaded." "Green"
-    } else { Log "  Voice model files already downloaded - reusing them." "Yellow" }
+    # ---------- STEP 8: her voice's model files ----------
+    # v4.13: only the files her voice loads (about 1.2 GB, see $VoiceFileTable),
+    # each checked against its published checksum - they started downloading
+    # in the background right after the first question. Before, this step
+    # cloned the voice engine's whole model page (every engine version, ~6.5
+    # GB) and left a ~13 GB copy in the temp folder.
+    Step 8 "Her voice's model files (about 1.2 GB)"
     $dst = Join-Path $gpt "GPT_SoVITS\pretrained_models"
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
-    # Copy everything from the cloned repo (but skip its hidden .git folder).
-    Get-ChildItem -Path $hf -Force | Where-Object { $_.Name -ne ".git" } | ForEach-Object {
-        Copy-Item -Path $_.FullName -Destination $dst -Recurse -Force
-    }
-    if (-not (Test-Path (Join-Path $dst "s2G488k.pth"))) { throw "The voice model files copied but look incomplete (missing s2G488k.pth). Run the installer again to retry." }
-    Log "  Voice model files copied into place." "Green"
-    # The newer voice engine detects the language of each line with a
-    # language-identification model (about 130 MB) that it fetches ON FIRST
-    # USE - and its downloader refuses to run unless its cache folder already
-    # exists (a fresh clone has none), which made the very first voice line
-    # fail on fresh installs (2026-10-07, fresh-VM test). Pre-download it now
-    # so her first voice line never waits on a network fetch. Best effort: if
-    # this download fails (offline machine, blocked CDN), the launcher creates
-    # the cache folder at start and the engine fetches the model on first use
-    # instead.
-    $fldDir = Join-Path $dst "fast_langdetect"
-    New-Item -ItemType Directory -Force -Path $fldDir | Out-Null
-    $fldFile = Join-Path $fldDir "lid.176.bin"
-    if (Test-Path $fldFile) {
-        Log "  Voice language model already present." "Yellow"
+    $voiceFiles = @(Get-VoiceFiles)
+    if ($voiceFiles.Count -gt 0) {
+        Wait-Background "voice" $voiceFiles "Downloading her voice files"
+        foreach ($f in $voiceFiles) {
+            $leaf = Split-Path $f[4] -Leaf
+            try {
+                Get-VerifiedFile $f[0] $f[1] $f[2] $f[3] ("voice file " + $leaf)
+                New-Item -ItemType Directory -Force -Path (Split-Path $f[4] -Parent) | Out-Null
+                Move-Item -LiteralPath $f[1] -Destination $f[4] -Force
+                Remove-Item -LiteralPath ($f[1] + ".verified") -Force -ErrorAction SilentlyContinue
+            } catch {
+                # The language detector is optional: the engine fetches it
+                # itself the first time she speaks. Every other file is needed.
+                if ($leaf -ne "lid.176.bin") { throw }
+                Log ("  Could not download the voice language model right now (" + $_.Exception.Message + "). No problem - the voice engine downloads it the first time she speaks.") "Yellow"
+            }
+        }
+        Log "  Her voice files are in place." "Green"
     } else {
-        $fldUrl = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
-        # Download with Python (its TLS works on more machines than
-        # PowerShell's - on some PCs Invoke-WebRequest cannot open an SSL
-        # connection at all while Python is fine); PowerShell is the fallback.
-        $fldOk = $false
-        $py = Join-Path $condaHome "python.exe"
-        if (Test-Path $py) {
-            try {
-                Log "  Downloading the voice language model (about 130 MB)..."
-                & $py -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" $fldUrl $fldFile
-                $fldOk = ($LASTEXITCODE -eq 0)
-            } catch { $fldOk = $false }
-        }
-        if (-not $fldOk) {
-            try {
-                Log "  Downloading the voice language model (about 130 MB)..."
-                Invoke-WebRequest $fldUrl -OutFile $fldFile -UseBasicParsing -TimeoutSec 1800
-                $fldOk = ($LASTEXITCODE -eq 0)
-            } catch { $fldOk = $false }
-        }
-        if ($fldOk -and (Test-Path $fldFile)) {
-            Log "  Voice language model pre-downloaded." "Green"
-        } else {
-            # A half-downloaded file would be TRUSTED later (the engine only
-            # fetches when the file is absent), so delete it and fall back to
-            # a fresh automatic download at first use.
-            Remove-Item $fldFile -Force -ErrorAction SilentlyContinue
-            Log "  Could not pre-download the voice language model right now (is your internet reachable?). No problem - the voice engine will download it automatically the first time she speaks." "Yellow"
-        }
+        Log "  Her voice files are already in place." "Yellow"
+    }
+    if (-not (Test-Path (Join-Path $dst "gsv-v2final-pretrained\s2G2333k.pth"))) { throw "Her voice files look incomplete (gsv-v2final-pretrained\s2G2333k.pth is missing). Run the installer again to retry." }
+    # The engine only downloads the language detector itself when this
+    # folder exists (fresh-VM test 2026-10-07: her first line failed).
+    New-Item -ItemType Directory -Force -Path (Join-Path $dst "fast_langdetect") | Out-Null
+    Remove-Item -LiteralPath (Join-Path $InstallDir "downloads\voice") -Recurse -Force -ErrorAction SilentlyContinue
+    # The old full download (installers before v4.13) in the temp folder:
+    # ~13 GB nobody needs any more.
+    $oldHf = Join-Path $env:TEMP "GPT-SoVITS-hf"
+    if (Test-Path -LiteralPath $oldHf) {
+        Remove-Item -LiteralPath $oldHf -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $oldHf)) { Log "  Removed the old full voice-model download from the temp folder (about 13 GB freed)." "Green" }
     }
     # The voice engine reads Western-script words (the name you typed in,
     # "AI", ...) with a separate english text module. That module needs a
@@ -1851,6 +1921,7 @@ try {
         Step 10 "Installing llama.cpp, so you can also run a GGUF model of your own on this PC"
     }
     $llmReady = Install-LocalLlm $proj $llmChoice $hw
+    Wait-EmbedModelDownload
 
     # ---------- DONE ----------
     Step 11 "ALL DONE!"
