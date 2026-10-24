@@ -11,8 +11,14 @@
 #     automatically, or B) your own model / a cloud service (as before).
 #     For A the installer looks at your graphics card and memory, picks the
 #     Gemma 4 model that fits this PC, and downloads it (and llama.cpp, the
-#     program that runs it) at the end, resumable and checked against the
-#     official checksums. Models live in <install folder>\models.
+#     program that runs it) in the background while everything else
+#     installs, resumable and checked against the official checksums.
+#     Models live in <install folder>\models.
+#   - No administrator needed: run it in a normal PowerShell window. Git,
+#     Miniconda and FFmpeg install for your user only; Node.js, when
+#     missing, goes into your own folder (%USERPROFILE%\.amadeus-tools\node).
+#   - Faster: the project downloads only its latest version (~24 MB
+#     instead of ~186 MB), and her model downloads alongside the rest.
 #   - A calm screen: one progress box per step (the current package and its
 #     download percentage) instead of hundreds of scrolling lines.
 #   - install_log.txt now records EVERYTHING the helper programs print (pip,
@@ -181,7 +187,9 @@
 #  HOW TO RUN (same every time - it picks up where it left off):
 #   1) Save this file somewhere you remember, e.g. your Downloads folder.
 #      (If you moved it elsewhere, put its real path in step 3.)
-#   2) Windows key -> type "PowerShell" -> right-click -> "Run as administrator".
+#   2) Windows key -> type "PowerShell" -> open it. (No administrator needed:
+#      everything installs for your own user account. "Run as administrator"
+#      still works too.)
 #   3) Paste this ONE line and press Enter:
 #        Set-ExecutionPolicy -Scope Process Bypass; & "$HOME\Downloads\install_windows.ps1"
 #      (Optional: add  -InstallDir "E:\Some\Place"  at the end to install
@@ -405,6 +413,7 @@ function Resolve-Exe($name){
     return $name
 }
 function Die($msg){
+    Stop-BackgroundDownloads   # its ".part" files stay: the next run continues them
     Log "" "Red"; Log ("INSTALL STOPPED: " + $msg) "Red"
     Log ("Please open and send this file to your helper:  " + $LogPath) "Yellow"
     Read-Host "Press Enter to close this window" | Out-Null
@@ -414,6 +423,9 @@ function Refresh-Path {
     $m = [Environment]::GetEnvironmentVariable("Path","Machine")
     $u = [Environment]::GetEnvironmentVariable("Path","User")
     $env:Path = "$m;$u"
+    # Amadeus' own portable Node.js (v4.13) is on no saved PATH: keep it.
+    $own = Join-Path $env:USERPROFILE ".amadeus-tools\node"
+    if (Test-Path (Join-Path $own "node.exe")) { $env:Path = $own + ";" + $env:Path }
 }
 
 # Prove a folder is a COMPLETE clone by checking that these files exist inside it.
@@ -448,7 +460,10 @@ function Move-ToRewrittenHistory($target, $personalRx){
     return $ok
 }
 
-function Ensure-Clone($url, $dest, $branch, $markers){
+# $shallow (v4.13): only the latest version, not the whole history (the
+# project: ~24 MB instead of ~186 MB). Updates still work - a later fetch
+# brings just the new commits on top.
+function Ensure-Clone($url, $dest, $branch, $markers, $shallow = $false){
     $leaf = Split-Path $dest -Leaf
     if (Test-Complete $dest $markers) { Log ("  Already have " + $leaf + " - skipping download.") "Yellow"; return }
     if (Test-Path $dest) {
@@ -458,6 +473,7 @@ function Ensure-Clone($url, $dest, $branch, $markers){
     }
     $gitArgs = @("clone", "--progress")
     if ($branch) { $gitArgs += @("-b", $branch) }
+    if ($shallow -and -not (Test-Path -LiteralPath $url)) { $gitArgs += @("--depth", "1") }   # a local -Source copies anyway
     Invoke-Tool ("Downloading " + $leaf) (Resolve-Exe "git") ($gitArgs + @($url, $dest))
     if ($LASTEXITCODE -ne 0) { throw ("Could not download " + $leaf + ". Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
     if (-not (Test-Complete $dest $markers)) { throw ("Downloaded " + $leaf + " but it looks incomplete. Run the installer again to retry.") }
@@ -1112,9 +1128,131 @@ function Install-LocalModelRunner($proj, $hw){
     return [bool]$exe
 }
 
+# ---------- the big local-model files download in the background (v4.13) ----------
+# Her model (4-7 GB), its vision file and llama.cpp used to download at the
+# very END, after ~10 minutes of installing that mostly keeps the processor
+# busy, not the internet. They now start right after the A/B question, in
+# Windows' own curl.exe without a window, into the same ".part" files
+# Get-VerifiedFile uses: when the install reaches its local-model step,
+# Get-VerifiedFile finds them finished (or half-finished, and continues
+# them) and checks each one exactly as before. Safe if anything goes wrong:
+# a download that fails or is cut off is simply resumed then; a re-run
+# first stops a background download an earlier run left behind.
+$BgPidFile = Join-Path $ModelsDir "downloads\background_download.pid"
+
+# Every file the chosen option downloads at its local-model step:
+# [url, dest, bytes, sha256]. Option A: llama.cpp + model + vision file;
+# option B on a PC with a graphics card: llama.cpp only.
+function Get-LocalLlmFiles($choice, $hw){
+    $files = @()
+    $build = $null
+    if ($choice.mode -eq "builtin") { $build = $choice.build }
+    elseif ($hw.choice.offered) { $build = $hw.choice.build }
+    if (-not $build) { return $files }
+    $rel = $TierTable.llama_cpp.release
+    $done = Join-Path $ModelsDir ("llama.cpp\" + $rel + "-" + $build + "\install_complete.txt")
+    if (-not (Test-Path -LiteralPath $done)) {
+        foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
+            $files += ,@(("https://github.com/ggml-org/llama.cpp/releases/download/" + $rel + "/" + $f.name),
+                         (Join-Path $ModelsDir ("downloads\" + $f.name)), $f.bytes, $f.sha256)
+        }
+    }
+    if ($choice.mode -eq "builtin") {
+        $m = $TierTable.models.($choice.model)
+        $files += ,@((Get-HfUrl $m $m.file), (Join-Path $ModelsDir $m.file), $m.bytes, $m.sha256)
+        if ($m.mmproj) {
+            $files += ,@((Get-HfUrl $m $m.mmproj.file), (Join-Path $ModelsDir $m.mmproj.save_as), $m.mmproj.bytes, $m.mmproj.sha256)
+        }
+    }
+    # Already downloaded and checked: nothing to fetch.
+    return @($files | Where-Object {
+        $marker = $_[1] + ".verified"
+        -not ((Test-Path -LiteralPath $_[1]) -and (Test-Path -LiteralPath $marker) -and
+              ((Get-Content -LiteralPath $marker -Raw).Trim() -eq ($_[3] + " " + [string][int64]$_[2])))
+    })
+}
+
+# A background download an earlier (stopped) run left behind: stop it, so
+# two downloads never write the same file. Its ".part" files stay, to resume.
+function Stop-BackgroundDownloads {
+    if (-not (Test-Path -LiteralPath $BgPidFile)) { return }
+    $id = 0
+    try { $id = [int](Get-Content -LiteralPath $BgPidFile -Raw).Trim() } catch {}
+    if ($id) {
+        $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+        if ($p -and $p.ProcessName -eq "curl") { try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch {} }
+    }
+    Remove-Item -LiteralPath $BgPidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Start-BackgroundDownloads($choice, $hw){
+    if ($SkipLlmDownload) { return }
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    if (-not (Test-Path $curl)) { return }    # the local-model step downloads them as before
+    Stop-BackgroundDownloads
+    $files = @(Get-LocalLlmFiles $choice $hw)
+    if ($files.Count -eq 0) { return }
+    $todo = @()
+    foreach ($f in $files) {
+        if (Test-Path -LiteralPath $f[1]) { continue }          # unchecked file: Get-VerifiedFile decides
+        $part = $f[1] + ".part"
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -ge $f[2]) { continue }
+        $todo += ,$f
+    }
+    if ($todo.Count -eq 0) { return }
+    New-Item -ItemType Directory -Force -Path (Split-Path $BgPidFile -Parent) | Out-Null
+    $argv = @("-L", "--fail", "--retry", "5", "--retry-delay", "10", "--connect-timeout", "30", "-C", "-",
+              "-s", "-S", "--stderr", (Join-Path $ModelsDir "downloads\background_download.log"))
+    foreach ($f in $todo) { $argv += @("-o", ($f[1] + ".part"), $f[0]) }
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $curl
+    $psi.Arguments = Join-ProcessArgs $argv
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    try {
+        $p = [Diagnostics.Process]::Start($psi)
+        Set-Content -LiteralPath $BgPidFile -Value $p.Id -NoNewline -Encoding ascii
+        $gb = [math]::Round((($todo | ForEach-Object { [double]$_[2] }) | Measure-Object -Sum).Sum / 1GB, 1)
+        Log ("  Her model files (" + $gb + " GB) start downloading in the background now, while everything else installs.") "Green"
+        Write-LogOnly ("  background download (curl pid " + $p.Id + "): " + (($todo | ForEach-Object { Split-Path $_[1] -Leaf }) -join ", "))
+    } catch {
+        Write-LogOnly ("  background download not started (" + $_.Exception.Message + ") - the local-model step downloads the files.")
+    }
+}
+
+# At the local-model step: let a still-running background download finish
+# (showing its progress), then Get-VerifiedFile checks every file as before.
+function Wait-BackgroundDownloads($choice, $hw){
+    if (-not (Test-Path -LiteralPath $BgPidFile)) { return }
+    $id = 0
+    try { $id = [int](Get-Content -LiteralPath $BgPidFile -Raw).Trim() } catch {}
+    $p = if ($id) { Get-Process -Id $id -ErrorAction SilentlyContinue } else { $null }
+    if ($p -and $p.ProcessName -eq "curl" -and -not $p.HasExited) {
+        $files = @(Get-LocalLlmFiles $choice $hw)
+        $total = (($files | ForEach-Object { [double]$_[2] }) | Measure-Object -Sum).Sum
+        Log "  Her model is still downloading in the background - waiting for it to finish..."
+        $ProgressPreference = "Continue"
+        while (-not $p.HasExited) {
+            $have = 0.0
+            foreach ($f in $files) {
+                foreach ($path in @($f[1], ($f[1] + ".part"))) {
+                    if (Test-Path -LiteralPath $path) { $have += (Get-Item -LiteralPath $path).Length; break }
+                }
+            }
+            $pct = if ($total -gt 0) { [int][math]::Min(100, 100 * $have / $total) } else { 0 }
+            Write-Progress -Id 2 -ParentId 1 -Activity "Downloading her model" -Status ("{0:N1} of {1:N1} GB" -f ($have / 1GB), ($total / 1GB)) -PercentComplete $pct
+            Start-Sleep -Seconds 2
+        }
+        Write-Progress -Id 2 -ParentId 1 -Activity "Downloading her model" -Completed
+        Write-LogOnly "  background download finished"
+    }
+    Remove-Item -LiteralPath $BgPidFile -Force -ErrorAction SilentlyContinue
+}
+
 # The local-model step for whichever option was chosen. Returns $true
 # when option A's model is ready (option B: when llama.cpp is in place).
 function Install-LocalLlm($proj, $choice, $hw){
+    Wait-BackgroundDownloads $choice $hw
     if ($choice.mode -eq "builtin") { return (Install-BuiltinLlm $proj $choice) }
     if ($hw.choice.offered) { return (Install-LocalModelRunner $proj $hw) }
     Write-LocalLlmConfig $proj $choice "" $false "" $false   # switches an earlier option-A install off
@@ -1190,6 +1328,7 @@ try {
     Log ""
     Log "Everything else installs now. It downloads several gigabytes, so give it time." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
+    Start-BackgroundDownloads $llmChoice $hw
 
     # ---------- STEP 1: winget ----------
     Step 1 "Checking the Windows installer tool (winget)"
@@ -1201,12 +1340,41 @@ try {
     # ---------- STEP 2: prerequisites ----------
     Step 2 "Installing required programs (only the ones you don't already have)"
 
+    # v4.13: no administrator needed. Each program installs for this user
+    # only (no "allow changes?" prompt); only if winget has no per-user
+    # installer does it fall back to the normal install, which may ask.
     function Install-Pkg($name, $id){
         Log ("  Installing " + $name + " ... (can take a few minutes)")
-        Invoke-Tool ("Installing " + $name) (Resolve-Exe "winget") @("install", "-e", "--id", $id, "--silent", "--accept-source-agreements", "--accept-package-agreements")
+        $common = @("install", "-e", "--id", $id, "--silent", "--accept-source-agreements", "--accept-package-agreements")
+        Invoke-Tool ("Installing " + $name + " (for this user)") (Resolve-Exe "winget") ($common + @("--scope", "user"))
+        if ($LASTEXITCODE -ne 0) {
+            Log ("  " + $name + " has no per-user installer here - trying the normal one (Windows may ask for permission).") "Yellow"
+            Invoke-Tool ("Installing " + $name) (Resolve-Exe "winget") $common
+        }
         if ($LASTEXITCODE -eq 0) { Log ("  Installed " + $name + ".") "Green" }
         else { Log ("  WARNING: " + $name + " install returned code " + $LASTEXITCODE + ". We will double-check below.") "Yellow" }
     }
+
+    # Node.js (her web page). winget only offers it for the whole PC (an
+    # administrator prompt), so when it is missing the official portable zip
+    # goes into this user's own folder instead - the same place the Mac
+    # installer uses; the launcher finds it there.
+    function Install-PortableNode {
+        $ver = "v24.22.1"
+        $zipName = "node-" + $ver + "-win-x64.zip"
+        $zip = Join-Path $env:TEMP ("amadeus-" + $zipName)
+        Get-VerifiedFile ("https://nodejs.org/dist/" + $ver + "/" + $zipName) $zip 37748064 "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5" ("Node.js " + $ver)
+        $tools = Split-Path $NodeDir -Parent
+        $unpack = Join-Path $tools "node-unpack"
+        if (Test-Path -LiteralPath $unpack) { Remove-Item -LiteralPath $unpack -Recurse -Force }
+        Log "  Unpacking Node.js..."
+        Expand-ZipFile $zip $unpack
+        if (Test-Path -LiteralPath $NodeDir) { Remove-Item -LiteralPath $NodeDir -Recurse -Force }
+        Move-Item -LiteralPath (Join-Path $unpack ("node-" + $ver + "-win-x64")) -Destination $NodeDir
+        Remove-Item -LiteralPath $unpack -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $zip, ($zip + ".verified") -Force -ErrorAction SilentlyContinue
+    }
+    $NodeDir = Join-Path $env:USERPROFILE ".amadeus-tools\node"
 
     if (Get-Command git -ErrorAction SilentlyContinue) { Log "  Git already present." "Green" }
     else { Install-Pkg "Git" "Git.Git"; Refresh-Path }
@@ -1264,12 +1432,21 @@ try {
     & $conda config --set notify_outdated_conda false 2>$null | Out-Null
 
     if (Get-Command node -ErrorAction SilentlyContinue) { Log "  Node.js already present." "Green" }
-    else { Install-Pkg "Node.js" "OpenJS.NodeJS.LTS"; Refresh-Path }
+    else {
+        if (-not (Test-Path (Join-Path $NodeDir "node.exe"))) { Install-PortableNode }
+        else { Log "  Node.js already present (Amadeus' own copy)." "Green" }
+        $env:Path = $NodeDir + ";" + $env:Path
+        if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Die "Could not set up Node.js. Look at this window and the log." }
+        Log ("  Node.js ready: " + $NodeDir) "Green"
+    }
 
     if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log "  FFmpeg already present." "Green" }
     else { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
 
-    Invoke-Tool "Installing Git LFS" (Resolve-Exe "winget") @("install", "-e", "--id", "Git.LFS", "--silent", "--accept-source-agreements", "--accept-package-agreements")
+    # Git for Windows already includes Git LFS; the separate (whole-PC)
+    # installer is only needed when it is missing.
+    & (Resolve-Exe "git") lfs version 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { Install-Pkg "Git LFS" "Git.LFS"; Refresh-Path }
     Invoke-Tool "Setting up Git LFS" (Resolve-Exe "git") @("lfs", "install")
     Log "  Git + LFS ready." "Green"
 
@@ -1323,7 +1500,7 @@ try {
             Log "  (Not a git folder - cannot update it; using it as is.)" "Yellow"
         }
     } else {
-        Ensure-Clone $ForkUrl $proj $Branch @("backend\main.py","start_windows.bat")
+        Ensure-Clone $ForkUrl $proj $Branch @("backend\main.py","start_windows.bat") $true
     }
 
     # Which Python environments this install uses. Normally the plain names;

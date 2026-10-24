@@ -40,8 +40,8 @@ a local LLM or a cloud LLM model to connect with the app.
 
 ## Windows
 
-1. Press the Windows key, type **PowerShell**, right-click it and choose
-   **Run as administrator**.
+1. Press the Windows key, type **PowerShell** and open it. No administrator
+   rights are needed: everything installs for your own user account.
 2. Paste this one line and press Enter:
 
    ```powershell

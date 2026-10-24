@@ -627,8 +627,10 @@ def find_npm() -> str | None:
     candidates = [
         "/opt/homebrew/bin/npm",
         "/usr/local/bin/npm",
-        # Node.js the macOS installer may place in the user's home folder
+        # Node.js the installers place in the user's home folder when it is
+        # missing (macOS; Windows since installer v4.13 - no administrator)
         str(Path.home() / ".amadeus-tools" / "node" / "bin" / "npm"),
+        str(Path.home() / ".amadeus-tools" / "node" / "npm.cmd"),
         r"C:\Program Files\nodejs\npm.cmd",
     ]
 
@@ -1296,6 +1298,9 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
         raise RuntimeError(
             "npm was not found. Install Node.js before launching the WebUI."
         )
+    # npm's own folder first on PATH: the web page's tools (vite) start
+    # "node" by name, and Amadeus' own portable Node.js is on no PATH.
+    os.environ["PATH"] = str(Path(npm).parent) + os.pathsep + os.environ.get("PATH", "")
 
     preflight(conda, npm)
     clear_stale_amadeus_processes({"built-in model": LLM_PORT} if builtin else None)
