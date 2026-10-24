@@ -561,6 +561,22 @@ export async function regenerateMessageVoice(messageId: number): Promise<string>
   return data.audio_url;
 }
 
+/** Replay one of her lines: its saved clip when there is one (audioUrl),
+ *  else a stream of the same line (speechUrl) - first sound in seconds,
+ *  and kept as the clip when heard to the end (2026-10-24). */
+export async function speakMessage(
+  messageId: number,
+): Promise<{ audioUrl?: string; speechUrl?: string }> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/memory/${messageId}/speak`, { method: "POST" })
+  );
+  if (typeof data.audio_url === "string") return { audioUrl: data.audio_url };
+  if (typeof data.speech_id === "string") {
+    return { speechUrl: `${API_BASE}/speech/${encodeURIComponent(data.speech_id)}` };
+  }
+  throw new Error("Could not replay the voice line");
+}
+
 export async function getVoiceRetention(): Promise<number> {
   const data = await parseResponse(await fetch(`${API_BASE}/getVoiceRetention`, { cache: "no-store" }));
   return typeof data.limit === "number" ? data.limit : 100;

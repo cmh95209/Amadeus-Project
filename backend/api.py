@@ -662,6 +662,29 @@ def regenerate_voice(message_id):
     return jsonify({"status": "ok", "audio_url": "/message_audio/" + rel})
 
 
+# pre: message_id is one of her lines with a saved Japanese voice line
+# post: Replay without a saved clip (2026-10-24, VM test: an interrupted line
+#       is never saved, and /memory/<id>/voice above renders the WHOLE clip
+#       before the first sound - minutes on a processor). A saved clip ->
+#       {"audio_url"}; otherwise a single-use speech id for the same
+#       streaming voice path her live lines use -> {"speech_id"}. The stream
+#       keeps the clip for the next Replay when it is heard to the end.
+_GENERATED_DIR = Path(__file__).resolve().parent / "generated"
+
+
+@application.route("/memory/<int:message_id>/speak", methods=["POST"])
+def speak_message(message_id):
+    japanese = memory.get_message_japanese(message_id)
+    if japanese is None:
+        return jsonify({"message": "This reply has no saved voice line to re-speak."}), 400
+    rel = f"generated/voice_{message_id}.wav"
+    if (_GENERATED_DIR / f"voice_{message_id}.wav").exists():
+        memory.set_message_audio(message_id, rel)
+        return jsonify({"status": "ok", "audio_url": "/message_audio/" + rel})
+    return jsonify({"status": "ok",
+                    "speech_id": _mint_speech_id_text(japanese, message_id)})
+
+
 @application.route("/getVoiceRetention", methods=["GET"])
 def get_voice_retention():
     """How many voice recordings are kept on disk (0 = unlimited)."""

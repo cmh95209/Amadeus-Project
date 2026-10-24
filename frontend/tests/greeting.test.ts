@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { ConnectionStatus, MemoryMessage } from "../src/api";
-import { getGreeting } from "../src/api";
+import { getGreeting, speakMessage } from "../src/api";
 import { deriveFooter, isCeremonyWaitLine, NOT_LISTED_GRACE_MS, placeGreeting, waitUntilQuiet } from "../src/greetingFlow";
 import type { GreetPhase } from "../src/greetingFlow";
 
@@ -148,6 +148,14 @@ assert.equal(isCeremonyWaitLine(undefined, undefined), false);
     // Nothing to say (no kind): still no line.
     reply({ ready: false, reason: "model server unreachable", ceremony: "intro" });
     assert.equal((await getGreeting()).response, undefined);
+
+    // ---- Replay (2026-10-24): a saved clip plays as is, else a stream ----
+    reply({ status: "ok", audio_url: "/message_audio/generated/voice_7.wav" });
+    assert.deepEqual(await speakMessage(7), { audioUrl: "/message_audio/generated/voice_7.wav" });
+    reply({ status: "ok", speech_id: "s1" });
+    const streamed = await speakMessage(7);
+    assert.ok(streamed.speechUrl?.endsWith("/speech/s1"), "an unsaved line streams");
+    assert.equal(streamed.audioUrl, undefined);
   } finally {
     globalThis.fetch = realFetch;
   }

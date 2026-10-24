@@ -32,7 +32,7 @@ import {
   regenerateGreeting,
   sendPresence,
   activateReplyVersion,
-  regenerateMessageVoice,
+  speakMessage,
   getVoiceRetention,
   setVoiceRetention,
   getContextBudgetInfo,
@@ -1264,26 +1264,37 @@ export default function App() {
 
   // The saved WAV only exists once GPT-SoVITS finished streaming the line.
   // Poll briefly after playback starts so the Replay button can appear.
+  // A voiced line of hers gets its Replay button at once (2026-10-24, VM
+  // test: the button waited for the saved clip, and the page stopped
+  // looking after 40 s - a processor needs up to minutes per line, and an
+  // interrupted line is never saved at all). Replay plays the clip when it
+  // exists, else streams the line again (replayVoice). The clip is saved
+  // only when her voice reaches the end, so look for it once she is quiet.
   function rememberVoiceLine(assistantId: number | undefined) {
     if (assistantId == null) return;
+    setMessages((current) =>
+      current.map((m) => (m.id === assistantId ? { ...m, has_japanese: true } : m))
+    );
     const rel = `/message_audio/generated/voice_${assistantId}.wav`;
-    let tries = 0;
-    const check = async () => {
-      tries += 1;
-      try {
-        const probe = await fetch(API_BASE + rel, { method: "HEAD", cache: "no-store" });
-        if (probe.ok) {
-          setMessages((current) =>
-            current.map((m) => (m.id === assistantId ? { ...m, audio_url: rel } : m))
-          );
-          return;
+    void (async () => {
+      await waitUntilQuiet(() => characterRef.current?.isSpeechBusy() ?? false,
+        { quietMs: 1500, pollMs: 500, maxMs: 15 * 60_000 });
+      for (let tries = 0; tries < 5; tries++) {
+        try {
+          const probe = await fetch(API_BASE + rel, { method: "HEAD", cache: "no-store" });
+          if (probe.ok) {
+            setMessages((current) =>
+              current.map((m) => (m.id === assistantId ? { ...m, audio_url: rel } : m))
+            );
+            return;
+          }
+        } catch {
+          // The backend may still be writing it.
         }
-      } catch {
-        // Not ready yet; the line may still be generating.
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
       }
-      if (tries < 20) window.setTimeout(() => void check(), 2000);
-    };
-    void check();
+      // Not saved (her voice was cut off): Replay streams the line again.
+    })();
   }
 
   async function refreshConversations() {
@@ -1427,16 +1438,28 @@ export default function App() {
           setStatus(error instanceof Error ? error.message : "Replay failed");
         });
       } else {
-        // The voice file was cleared; re-synthesize it from her saved line.
-        setStatus("Generating voice line...");
-        const audioUrl = await regenerateMessageVoice(message.id);
-        setMessages((current) =>
-          current.map((m) => (m.id === message.id ? { ...m, audio_url: audioUrl } : m))
-        );
-        await characterRef.current?.playSpeech(API_BASE + audioUrl).catch((error) => {
-          setStatus(error instanceof Error ? error.message : "Replay failed");
-        });
-        setStatus("Online");
+        // No saved clip (cut off, never played, or cleared by the cap):
+        // stream her saved line again - first sound in seconds, not after
+        // the whole clip is made - and keep it once heard to the end.
+        const replay = await speakMessage(message.id);
+        if (replay.audioUrl) {
+          const audioUrl = replay.audioUrl;
+          setMessages((current) =>
+            current.map((m) => (m.id === message.id ? { ...m, audio_url: audioUrl } : m))
+          );
+          await characterRef.current?.playSpeech(API_BASE + audioUrl).catch((error) => {
+            setStatus(error instanceof Error ? error.message : "Replay failed");
+          });
+        } else if (replay.speechUrl) {
+          setStatus("Voicing her line...");
+          let started = true;
+          await characterRef.current?.playSpeech(replay.speechUrl).catch((error) => {
+            started = false;
+            setStatus(error instanceof Error ? error.message : "Replay failed");
+          });
+          if (started) setStatus("Online");
+          rememberVoiceLine(message.id);
+        }
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Replay failed");
@@ -1764,7 +1787,7 @@ export default function App() {
                         title={
                           message.audio_url
                             ? "Replay voice line"
-                            : "Voice was cleared — it will be re-synthesized"
+                            : "Replay voice line (no saved recording yet - she says it again)"
                         }
                         onClick={() => void replayVoice(message)}
                       >
