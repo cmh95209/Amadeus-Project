@@ -148,8 +148,9 @@ class RouteTests(_BuiltinApp):
 
     def test_no_false_waiting_lines_while_her_model_is_stopped(self):
         # Started without her model / unloaded / could not load: never
-        # "almost awake" or "taking longer than usual" - and she wakes as
-        # soon as it is loaded.
+        # "almost awake" or "taking longer than usual" - she says to press
+        # Load (on each save that still finds it stopped, else once), and
+        # she wakes as soon as it is loaded.
         with self.model(False, "server loading"):
             self.greet()                                   # intro
         self.name()
@@ -157,7 +158,10 @@ class RouteTests(_BuiltinApp):
             with self.subTest(state=stopped):
                 self.server_state = stopped
                 with self.model(False, "unreachable"):
-                    self.assertNotIn("kind", self.greet(just_saved=True).json)
+                    body = self.greet(just_saved=True).json
+                    self.assertEqual((body["kind"], body["wait"]),
+                                     ("builtin_need_load", True))
+                    self.assertNotIn("kind", self.greet().json)   # probe: quiet
         self.server_state = "loaded"
         with self.model(True), self.canned_wake():
             self.assertEqual(self.greet().json["kind"], "wake")
@@ -252,11 +256,16 @@ class WakeWordingTests(_BuiltinApp):
         self.assertNotIn("connected you", text)
         self.assertEqual(messages[-1]["content"], self.chat.WAKE_ARRIVAL_BUILTIN)
 
-    def test_custom_wake_wording_unchanged(self):
+    def test_custom_wake_wording(self):
+        # 2026-10-24: the custom route's wake note says the setup is done
+        # (the old "[Your model just connected...]" made her ask again).
         _write(self.cfg_path, _config(self.base, mode="custom"))
         self.name()
         messages = self.run_wake()
-        self.assertEqual(messages[-1]["content"], self.chat.WAKE_ARRIVAL)
+        self.assertEqual(messages[-1]["content"], self.chat.WAKE_ARRIVAL_NAMED)
+        text = "\n".join(str(m.get("content", "")) for m in messages)
+        self.assertIn("You already introduced yourself", text)
+        self.assertNotIn("runs on the user's own PC", text)
 
 
 class SettingsTests(_BuiltinApp):

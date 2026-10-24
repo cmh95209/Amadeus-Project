@@ -266,6 +266,12 @@ export default function App() {
   );
   const modelWasFound = useRef<boolean | null>(null);
   const greetingInFlight = useRef<boolean>(false);
+  // Save stores its settings one by one: a probe must not ask /greet in
+  // between (it would see e.g. the model but not yet the name and answer
+  // with a "still missing" line). A Save that lands while a greet is in
+  // flight is remembered and re-asked once that call returns.
+  const saveInProgress = useRef<boolean>(false);
+  const pendingSavedGreet = useRef<boolean>(false);
   const switchGreetingInFlight = useRef<boolean>(false);
   // Bumped on every message the user sends. A greeting compares it before
   // and after its request: a change means the user spoke while she was
@@ -452,7 +458,11 @@ export default function App() {
   }
 
   async function fireGreeting(justSaved = false, isRetry = false) {
-    if (greetingInFlight.current || greetedThisSession.current) return;
+    if (greetedThisSession.current) return;
+    if (greetingInFlight.current) {
+      if (justSaved) pendingSavedGreet.current = true; // re-asked when it returns
+      return;
+    }
     if (loading) {
       // Do not interrupt an in-flight turn. A retry that cannot run must
       // still settle the footer (her reply will prove the line works).
@@ -534,6 +544,13 @@ export default function App() {
     } finally {
       greetingInFlight.current = false;
     }
+    if (pendingSavedGreet.current) {
+      // Settings were saved while this call was out: the backend answered
+      // the OLD settings - ask again with the saved ones.
+      pendingSavedGreet.current = false;
+      void fireGreeting(true);
+      return;
+    }
     if (failed) {
       if (isRetry) {
         settleGreetPhase("failed");
@@ -600,7 +617,7 @@ export default function App() {
       // the backend answers with a new line when it has one, or with
       // silence).
       const ceremonialWait = ceremonyPendingRef.current && !greetedThisSession.current;
-      if (!greetedThisSession.current &&
+      if (!greetedThisSession.current && !saveInProgress.current &&
           ((found && modelWasFound.current !== true) || ceremonialWait)) {
         void fireGreeting();
       }
@@ -963,11 +980,10 @@ export default function App() {
     // Built-in mode: her model, server and key come from the installer, so
     // Save stores only the rest (name, pronouns, ...) and never touches the
     // user's own model settings (kept for when they switch back).
-    if (!nextModel && !builtinMode) {
-      setSettingsError("Choose a model in the Model row.");
-      setSettingsSection("connection");
-      return;
-    }
+    // No model chosen yet: everything else is still saved (2026-10-24 -
+    // the name may come before the connection; she then asks for the
+    // connection, and the notice below points at the Model row).
+    const noModelYet = !nextModel && !builtinMode;
     const namesProblem = nameListProblem(nameRows);
     if (namesProblem) {
       setSettingsError(namesProblem);
@@ -976,6 +992,7 @@ export default function App() {
     }
 
     setSavingSettings(true);
+    saveInProgress.current = true;
     setSettingsError("");
     setSettingsNotice("");
     let keySaved = false;
@@ -986,7 +1003,7 @@ export default function App() {
         setHasApiKey(true);
         setApiKeyInput("");
       }
-      if (!builtinMode) await setModel(nextModel);
+      if (!builtinMode && !noModelYet) await setModel(nextModel);
       const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
       setContextBudgetState(await setContextBudget(contextBudget));
@@ -1010,6 +1027,8 @@ export default function App() {
       } catch {
         profileSaved = false;
       }
+      // Everything is stored: from here on a probe may ask /greet again.
+      saveInProgress.current = false;
       void refreshConnection();
       // A name with no reading yet: let the backend suggest how she says it
       // (one short model call). Never overwrites what the user typed meanwhile.
@@ -1028,11 +1047,12 @@ export default function App() {
       // the probe's job).
       void fireGreeting(true);
 
-      setStatus(builtinMode ? "Settings saved" : `Model set to ${nextModel}`);
+      setStatus(builtinMode || noModelYet ? "Settings saved" : `Model set to ${nextModel}`);
       setSettingsNotice(
-        profileSaved
+        (profileSaved
           ? "Settings saved."
-          : "Settings saved, but pronouns / what she calls you / names she knows were not (restart the backend, then save again)."
+          : "Settings saved, but pronouns / what she calls you / names she knows were not (restart the backend, then save again).") +
+        (noModelYet ? " No model chosen yet - pick one in the Model row under Connection." : "")
       );
       // Keep Settings open so drafts in the Personality section are preserved.
     } catch (error) {
@@ -1041,6 +1061,7 @@ export default function App() {
         (error instanceof Error ? error.message : "Could not save settings")
       );
     } finally {
+      saveInProgress.current = false;
       setSavingSettings(false);
     }
   }

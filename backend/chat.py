@@ -2472,18 +2472,28 @@ WAKE_INSTRUCTION_ASK = {
         "one if they like. Speak freely and naturally."
     ),
 }
+# 2026-10-24 (VM test): "Introduce yourself" made her re-introduce herself
+# and copy her own intro line above ("enter the information in the
+# settings") although setup was finished - the wording now says what is
+# already done, like the built-in variant.
 WAKE_INSTRUCTION_NAMED = {
     "role": "system",
     "content": (
-        "The user has just connected you for the first time. Connection "
-        "established, initial boot. Introduce yourself to the user - they "
-        "go by {name}. Speak freely and naturally."
+        "The user has just connected your brain for the first time. "
+        "Connection established, initial boot. You already introduced "
+        "yourself earlier and asked them to connect your brain and enter "
+        "their name - they have done both: the connection works, and they "
+        "go by {name}. The setup is finished: do not ask them to enter or "
+        "check any settings again. Greet them by name now that you can "
+        "finally think. Speak freely and naturally."
     ),
 }
 
 # The synthetic arrival line the wake prompt ends on (prompt-only, never
 # stored) - the same strong steering position the startup greeting uses.
 WAKE_ARRIVAL = "[Your model just connected for the first time.]"
+WAKE_ARRIVAL_NAMED = ("[Your brain was just connected for the first time, and "
+                      "the user has saved their name. Setup is complete.]")
 
 # Built-in-model variant (2026-10-17): nothing was "connected" - her mind
 # runs on the user's PC and has just finished starting for the first time,
@@ -2495,11 +2505,14 @@ WAKE_INSTRUCTION_BUILTIN_NAMED = {
         "Your mind, which runs on the user's own PC, has just finished "
         "starting up for the first time. Initial boot. You already "
         "introduced yourself and asked for their name - they go by {name}. "
-        "Greet them by name now that you are fully awake. Speak freely and "
-        "naturally."
+        "The setup is finished: do not ask them to enter or check any "
+        "settings again. Greet them by name now that you are fully awake. "
+        "Speak freely and naturally."
     ),
 }
-WAKE_ARRIVAL_BUILTIN = "[Your mind just finished starting up for the first time.]"
+WAKE_ARRIVAL_BUILTIN = ("[Your mind just finished starting up for the first "
+                        "time, and the user has saved their name. Setup is "
+                        "complete.]")
 
 _PACK_RULES = {
     "role": "system",
@@ -2921,7 +2934,12 @@ def generate_greeting(mode: str = "startup",
     else:
         # A wake-up is not "opening the app" - it is coming online.
         if wake:
-            arrival = WAKE_ARRIVAL_BUILTIN if builtin_llm.active() else WAKE_ARRIVAL
+            if builtin_llm.active():
+                arrival = WAKE_ARRIVAL_BUILTIN
+            elif store.load_username().strip():
+                arrival = WAKE_ARRIVAL_NAMED
+            else:
+                arrival = WAKE_ARRIVAL
         else:
             arrival = "[The user just opened the app.]"
     # When the prompt tail is a run of her own switch lines (the

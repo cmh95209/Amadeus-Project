@@ -314,10 +314,10 @@ def unload() -> dict:
 def start_at_launch() -> None:
     """Called once when the backend starts: load her model unless the
     launcher said not to (AMADEUS_LOAD_MODEL=0) or built-in mode is off."""
+    if not (builtin_llm.active() or override_config()):
+        return   # custom model: nothing to load (and nothing to report)
     if os.environ.get("AMADEUS_LOAD_MODEL", "1") == "0":
         print("[Amadeus] her built-in model was not loaded (started without it).")
-        return
-    if not (builtin_llm.active() or override_config()):
         return
     try:
         load()

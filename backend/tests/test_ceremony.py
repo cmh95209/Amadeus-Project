@@ -180,6 +180,11 @@ class DecideTableTests(_FreshAppTests):
         self.assertEqual(self.ceremony.decide("", True, True, name_set=False),
                          ("intro", "intro"))
         self.ceremony.note("intro", "intro")
+        # After the intro: the brain answers, so she asks for the name -
+        # once per launch (2026-10-24; it used to be silent).
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=False),
+                         ("need_name", "intro"))
+        self.ceremony.note("need_name", "intro")
         self.assertEqual(self.ceremony.decide("intro", True, True, name_set=False),
                          (None, "intro"))
         self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=False),
@@ -195,7 +200,7 @@ class DecideTableTests(_FreshAppTests):
                          ("trying", "connecting"))
 
     def test_just_saved_is_a_fresh_attempt(self):
-        self.assertEqual(self.ceremony.decide("", False, False, just_saved=True),
+        self.assertEqual(self.ceremony.decide("", False, True, just_saved=True),
                          ("trying", "connecting"))
         # ...and it re-says the line even while already "connecting".
         self.ceremony.note("trying", "connecting")
@@ -205,11 +210,12 @@ class DecideTableTests(_FreshAppTests):
 
     def test_intro_launch_reopens_once_per_launch(self):
         # A fresh launch with persisted "intro" (no settings yet) re-says
-        # the introduction exactly once.
-        self.assertEqual(self.ceremony.decide("intro", False, False),
+        # the introduction exactly once (no name either - with a name it is
+        # "need_connection", see test_reopen_with_only_the_name_saved).
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=False),
                          ("intro", "intro"))
         self.ceremony.note("intro", "intro")
-        self.assertEqual(self.ceremony.decide("intro", False, False),
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=False),
                          (None, "intro"))
 
     def test_intro_becomes_trying_when_settings_appear(self):
@@ -249,6 +255,80 @@ class DecideTableTests(_FreshAppTests):
         self.assertEqual(self.ceremony.decide("connecting", False, True),
                          (None, "connecting"))
 
+    # --- either half first, or both at once (2026-10-24, VM test) ---------
+
+    def test_connection_first_asks_for_the_name(self):
+        self.ceremony.note("intro", "intro")
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=False),
+                         ("need_name", "intro"))
+        self.ceremony.note("need_name", "intro")
+        # The next probes are quiet; a further save without a name re-asks.
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=False),
+                         (None, "intro"))
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=False,
+                                              just_saved=True),
+                         ("need_name", "intro"))
+        # The name arrives: the wake-up.
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=True,
+                                              just_saved=True),
+                         ("wake", "intro"))
+
+    def test_connection_comes_up_after_checking_without_a_name(self):
+        self.ceremony.note("intro", "intro")
+        self.ceremony.note("trying", "connecting")
+        self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=False),
+                         ("need_name", "connecting"))
+        self.ceremony.note("need_name", "connecting")
+        self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=False),
+                         (None, "connecting"))
+        self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=True),
+                         ("wake", "connecting"))
+
+    def test_name_first_asks_for_the_connection(self):
+        self.ceremony.note("intro", "intro")
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=True,
+                                              just_saved=True),
+                         ("need_connection", "intro"))
+        self.ceremony.note("need_connection", "intro")
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=True),
+                         (None, "intro"))
+        # Then the connection: checked (not ready yet) or straight awake.
+        self.assertEqual(self.ceremony.decide("intro", False, True, name_set=True,
+                                              just_saved=True),
+                         ("trying", "connecting"))
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=True,
+                                              just_saved=True),
+                         ("wake", "intro"))
+
+    def test_reopen_with_only_the_name_saved(self):
+        # A new launch: the name is known, the brain is not - she says that
+        # instead of the whole introduction.
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=True),
+                         ("need_connection", "intro"))
+        self.ceremony.note("need_connection", "intro")
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=True),
+                         (None, "intro"))
+
+    def test_everything_in_one_save(self):
+        self.ceremony.note("intro", "intro")
+        # A cloud model answers at once: she wakes.
+        self.assertEqual(self.ceremony.decide("intro", True, True, name_set=True,
+                                              just_saved=True),
+                         ("wake", "intro"))
+        # A local server still starting: "checking the line", then awake.
+        self.assertEqual(self.ceremony.decide("intro", False, True, name_set=True,
+                                              just_saved=True),
+                         ("trying", "connecting"))
+        self.ceremony.note("trying", "connecting")
+        self.assertEqual(self.ceremony.decide("connecting", True, True, name_set=True),
+                         ("wake", "connecting"))
+
+    def test_saving_neither_half_stays_quiet(self):
+        self.ceremony.note("intro", "intro")
+        self.assertEqual(self.ceremony.decide("intro", False, False, name_set=False,
+                                              just_saved=True),
+                         (None, "intro"))
+
     def test_settings_signal_is_the_model_name(self):
         # No model name configured yet -> "settings" is not present, even
         # though a server address could be (auto-detect needs no address).
@@ -286,6 +366,26 @@ class CeremonyLineTextsTests(_FreshAppTests):
         for text in (ja_display, ja_voice):
             self.assertNotIn("牧瀬紅莉栖", text)
             self.assertNotIn("まきせくりす", text)
+
+    def test_setup_halves_lines(self):
+        en, ja_display, ja_voice = self.ceremony.line("need_name")
+        self.assertIn("Connection confirmed", en)
+        self.assertIn("Preferences", en)
+        self.assertIn("「Preferences」", ja_display)
+        self.assertIn("プリファレンス", ja_voice)
+        en, ja_display, ja_voice = self.ceremony.line("need_connection")
+        self.assertIn("I've got your name", en)
+        self.assertIn("Save connection", en)
+        self.assertIn("LLMサーバー", ja_display)
+        self.assertIn("エルエルエムサーバー", ja_voice)
+        self.assertIn("エーピーアイキー", ja_voice)
+        en, ja_display, ja_voice = self.ceremony.line("builtin_need_load")
+        self.assertIn("press Load", en)
+        self.assertIn("ロード", ja_voice)
+        for kind in ("need_name", "need_connection", "builtin_need_load"):
+            self.assertIn(kind, self.ceremony.FIXED_KINDS)
+            # The spoken text has no Latin letters (the voice engine reads kana).
+            self.assertNotRegex(self.ceremony.line(kind)[2], "[A-Za-z]", kind)
 
     def test_fixed_waiting_lines_are_pure_japanese(self):
         for kind in ("trying", "reminder", "fallback"):
@@ -511,14 +611,18 @@ class GreetRouteTests(_FreshAppTests):
 
     def test_no_wake_without_a_name(self):
         # 2026-10-18: the name is required on the DIY route too. A
-        # running model with a key but no name: the intro, then quiet - and
-        # the wake comes as soon as the name is saved.
+        # running model with a key but no name: the intro, then she asks for
+        # the name (2026-10-24) and is quiet after - and the wake comes as
+        # soon as the name is saved.
         self.chat.setKey("sk-test")
         with self.model(True), self._canned_wake():
             res = self.greet()
             self.assertEqual(res.json["kind"], "intro")
             res = self.greet(just_saved=True)
-            self.assertNotIn("kind", res.json)
+            self.assertEqual((res.json["kind"], res.json["wait"]), ("need_name", True))
+            _c, voice, _a = self.api._speech_requests[res.json["speech_id"]]
+            self.assertEqual(voice, self.ceremony.line("need_name")[2])
+            self.assertNotIn("kind", self.greet().json)
             self.assertNotEqual(self.state(), "done")
             self.memory.save_username("Alex")
             res = self.greet(just_saved=True)
@@ -690,6 +794,14 @@ class WakePromptTests(_FreshAppTests):
                   if m["role"] == "system"]
         self.assertIn("they go by Alex", system[0])
         self.assertNotIn("ask for the user's name", system[0])
+        # 2026-10-24 (VM test): she must not re-introduce herself and ask
+        # for the settings again - the setup is said to be finished.
+        self.assertIn("You already introduced yourself", system[0])
+        self.assertIn("do not ask them to enter or check any settings", system[0])
+        self.assertNotIn("Introduce yourself to the user", system[0])
+        self.assertEqual(fake.last_messages[-1],
+                         {"role": "user", "content": self.chat.WAKE_ARRIVAL_NAMED})
+        self.assertIn("Setup is complete", self.chat.WAKE_ARRIVAL_NAMED)
 
     def test_wake_stores_one_greeting_line(self):
         _fake, result, exc = self._run_wake()

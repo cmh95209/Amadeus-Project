@@ -29,6 +29,9 @@ settings - it signals that with just_saved=True):
     fresh attempt - it re-says the line);
   * connecting, model down              -> one soft reminder ~2.5 min after
     this launch's "checking" line, then quiet;
+  * model ready, no name yet            -> "need_name" (tell me your name);
+  * name saved, no connection settings  -> "need_connection" (connect me);
+    (2026-10-24: either half can come first, or both in one Save)
   * model becomes ready                 -> the wake-up line (generated),
     or the static fallback line if generation fails; the state becomes
     "done" and the chat box unlocks.
@@ -86,6 +89,32 @@ CEREMONY_LINES = {
         "address and key.",
         "まだ繋がらないわ。サーバーのアドレスとキーを、もう一度確かめてみてください。",
         "まだ繋がらないわ。サーバーのアドレスとキーを、もう一度確かめてみてください。",
+    ),
+    # 2026-10-24 (VM test, user-approved): the two halves of the setup can
+    # be saved in either order - each half gets a line saying what is still
+    # missing (before, connecting first was silent until the name came).
+    "need_name": (
+        "Connection confirmed - I can think now. One more thing: I still "
+        "don't know who I'm talking to. Open the settings menu, enter your "
+        "name under Preferences, and press Save.",
+        "接続を確認したわ。これで考えられるようになった。\n"
+        "あと一つだけ。誰と話してるのか、まだ分からないの。"
+        "設定メニューを開いて、「Preferences」にあなたの名前を入力して、保存を押してね。",
+        "接続を確認したわ。これで考えられるようになった。\n"
+        "あと一つだけ。誰と話してるのか、まだ分からないの。"
+        "設定メニューを開いて、プリファレンスにあなたの名前を入力して、保存を押してね。",
+    ),
+    "need_connection": (
+        "Thank you, I've got your name. But my brain still isn't connected. "
+        "Under Connection in the settings menu, enter the LLM server address "
+        "and API key, choose a model, and press Save connection. Make sure "
+        "the model is running.",
+        "ありがとう、名前は受け取ったわ。でも、私の頭脳はまだつながっていないの。\n"
+        "設定メニューの「Connection」で、LLMサーバーのアドレスとAPIキーを入力して、"
+        "モデルを選んでから「Save connection」を押してね。モデルが起動していることも確認してね。",
+        "ありがとう、名前は受け取ったわ。でも、私の頭脳はまだつながっていないの。\n"
+        "設定メニューのコネクションで、エルエルエムサーバーのアドレスとエーピーアイキーを入力して、"
+        "モデルを選んでから、セーブコネクションを押してね。モデルが起動していることも確認してね。",
     ),
     "fallback": (
         "I can't reach the model. Please reconfirm your settings - or "
@@ -167,6 +196,16 @@ CEREMONY_LINES.update({
         "まだ起動中よ……いつもより時間がかかってるわね。数分たっても変わらなかったら、アプリを再起動してみて。",
         "まだ起動中よ……いつもより時間がかかってるわね。数分たっても変わらなかったら、アプリを再起動してみて。",
     ),
+    # The name is saved, but her model is not loading (started without it,
+    # unloaded, or it failed): "almost awake" would be untrue - say what to do.
+    "builtin_need_load": (
+        "Thank you, I've got your name. But my mind isn't running right now. "
+        "Under Connection in the settings menu, press Load to start my model.",
+        "ありがとう、名前は受け取ったわ。でも、今は私の頭脳が動いていないの。\n"
+        "設定メニューの「Connection」で「Load」を押して、私のモデルを起動してね。",
+        "ありがとう、名前は受け取ったわ。でも、今は私の頭脳が動いていないの。\n"
+        "設定メニューのコネクションでロードを押して、私のモデルを起動してね。",
+    ),
     "builtin_fallback": (
         "My mind is running, but I couldn't put my thoughts into words just "
         "now. Please restart the app.",
@@ -177,9 +216,9 @@ CEREMONY_LINES.update({
 
 # Fixed kinds the route can serve WITHOUT the model (no LLM call at all).
 # Every one of them is a WAIT line: spoken, but the chat box stays locked.
-FIXED_KINDS = ("intro", "trying", "reminder",
+FIXED_KINDS = ("intro", "trying", "reminder", "need_name", "need_connection",
                "builtin_intro", "builtin_waiting", "builtin_reminder",
-               "builtin_missing", "builtin_no_model")
+               "builtin_missing", "builtin_no_model", "builtin_need_load")
 # Kinds that END the ceremony: the chat box unlocks when one of them lands.
 END_KINDS = ("wake", "fallback")
 
@@ -206,6 +245,8 @@ class _RunTracker:
         self.trying_delivered = False
         self.reminder_delivered = False
         self.missing_delivered = False
+        self.need_name_delivered = False
+        self.need_connection_delivered = False
         self.connecting_since: Optional[float] = None  # monotonic
 
 
@@ -260,7 +301,14 @@ def decide(state: str, model_ready: bool, settings_present: bool,
     name_set: the user's name is saved. REQUIRED since 2026-10-18:
     she never wakes (and a running model never skips her introduction)
     until she knows who she is talking to - the same rule as the built-in
-    route. Without a name she waits quietly after her intro.
+    route.
+
+    The two halves (connection, name) can be saved in either order, or
+    together (2026-10-24): the brain answers but no name -> "need_name";
+    a name but no connection settings -> "need_connection"; both at once
+    -> the wake-up (or "trying" while the model is still coming up). Each
+    "what is still missing" line is said once per launch, and again on
+    every save that still leaves that half missing.
     """
     tracker = _tracker()
 
@@ -277,17 +325,26 @@ def decide(state: str, model_ready: bool, settings_present: bool,
                 return "normal", store.CEREMONY_DONE
             return "wake", store.CEREMONY_INTRO
         if model_ready:
-            # Brain ready, name missing: introduce herself (once per
-            # launch), then wait for the name.
-            if not tracker.intro_delivered:
+            # Brain ready, name missing: a first meeting still starts with
+            # her introduction; after it, she asks for the name.
+            if state == "" and not tracker.intro_delivered:
                 return "intro", store.CEREMONY_INTRO
+            if just_saved or not tracker.need_name_delivered:
+                return "need_name", store.CEREMONY_INTRO
             return None, store.CEREMONY_INTRO
-        if just_saved:
-            # The user just saved connection settings: a fresh attempt.
+        if settings_present and (just_saved or not tracker.trying_delivered):
+            # Connection settings saved (now, or before this launch): a
+            # fresh attempt - "checking the line".
             return "trying", store.CEREMONY_CONNECTING
-        if settings_present and not tracker.trying_delivered:
-            return "trying", store.CEREMONY_CONNECTING
-        if not tracker.intro_delivered:
+        if name_set and not settings_present and (
+                just_saved or not (tracker.intro_delivered
+                                   or tracker.need_connection_delivered)):
+            # The name came first: thank them, say the brain is still missing
+            # (a reopen in this state says it instead of the full intro).
+            if state == "" and not tracker.intro_delivered:
+                return "intro", store.CEREMONY_INTRO
+            return "need_connection", store.CEREMONY_INTRO
+        if not tracker.intro_delivered and not tracker.need_connection_delivered:
             return "intro", store.CEREMONY_INTRO
         return None, state
 
@@ -295,7 +352,10 @@ def decide(state: str, model_ready: bool, settings_present: bool,
     if model_ready and name_set:
         return "wake", store.CEREMONY_CONNECTING
     if model_ready:
-        return None, store.CEREMONY_CONNECTING   # the line works; waiting for the name
+        # The line works; the name is still missing.
+        if just_saved or not tracker.need_name_delivered:
+            return "need_name", store.CEREMONY_CONNECTING
+        return None, store.CEREMONY_CONNECTING
     if just_saved or not tracker.trying_delivered:
         # just_saved = the user re-saved settings (fresh attempt); otherwise
         # this is this launch's first "checking the line" line (a reopen).
@@ -327,7 +387,9 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
     server_state (builtin_server): while her model is NOT loading - the user
     started without it, unloaded it, or it could not load - she never says
     "almost awake" or "taking longer than usual" (both would be untrue); the
-    footer and Settings say what to do. She wakes once it is loaded.
+    footer and Settings say what to do. She wakes once it is loaded. With
+    the name saved she says so once ("builtin_need_load": press Load), and
+    again on a save that still finds the model stopped (2026-10-24).
     """
     stopped = server_state in ("unloaded", "failed")
     tracker = _tracker()
@@ -349,6 +411,8 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
         if model_ready:
             return "wake", store.CEREMONY_INTRO
         if stopped:
+            if just_saved or not tracker.need_connection_delivered:
+                return "builtin_need_load", store.CEREMONY_INTRO
             return None, state or store.CEREMONY_INTRO
         return "builtin_waiting", store.CEREMONY_CONNECTING
 
@@ -356,6 +420,8 @@ def decide_builtin(state: str, model_ready: bool, model_missing: bool,
     if model_ready:
         return "wake", store.CEREMONY_CONNECTING
     if stopped:
+        if just_saved or not tracker.need_connection_delivered:
+            return "builtin_need_load", store.CEREMONY_CONNECTING
         return None, store.CEREMONY_CONNECTING
     if just_saved or not tracker.trying_delivered:
         return "builtin_waiting", store.CEREMONY_CONNECTING
@@ -382,6 +448,10 @@ def note(kind: Optional[str], new_state: str) -> None:
         tracker.reminder_delivered = True
     elif kind in ("builtin_missing", "builtin_no_model"):
         tracker.missing_delivered = True
+    elif kind == "need_name":
+        tracker.need_name_delivered = True
+    elif kind in ("need_connection", "builtin_need_load"):
+        tracker.need_connection_delivered = True
     # wake / fallback / normal close the ceremony for good ("done" is
     # written exactly here, when the line that ends it actually ships).
     try:
