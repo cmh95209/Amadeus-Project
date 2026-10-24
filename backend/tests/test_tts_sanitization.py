@@ -56,6 +56,25 @@ class CleanTtsTextTests(unittest.TestCase):
         self.assertEqual(chat._clean_tts_text(text), text)
         self.assertEqual(chat._clean_tts_text("私はAmadeusよ。"), "私はアマデウスよ。")
 
+    def test_names_and_titles_are_kept_sentences_are_not(self):
+        # 2026-10-24: removing every 3+ word Latin run left holes in web
+        # replies ("『 』という本", "アイフォーン 18 Proと ね").
+        self.assertEqual(chat._clean_tts_text("最新モデルは、iPhone 18 Pro Maxね。"),
+                         "最新モデルは、アイフォーン 18 Pro Maxね。")
+        self.assertEqual(chat._clean_tts_text("『My First Cookie Book』という本よ。"),
+                         "『My First Cookie Book』という本よ。")
+        self.assertEqual(chat._clean_tts_text("そうね。I think this is a really good idea for you."),
+                         "そうね。")
+
+    def test_stray_word_in_another_script_is_removed(self):
+        self.assertEqual(chat._clean_tts_text("アイノちゃん、 বাইরেに出るなら傘を。"),
+                         "アイノちゃん、に出るなら傘を。")
+        self.assertEqual(chat._clean_tts_text("私はこと들을整理したわ。"), "私はこと整理したわ。")
+
+    def test_her_voice_says_a_kept_title_in_katakana(self):
+        spoken = chat.speech_text.to_spoken("『My First Cookie Book』という本よ。")
+        self.assertNotRegex(spoken, "[A-Za-z]")
+
     def test_pure_english_field_is_kept_for_translation_pass(self):
         text = "The air quality is bad today, stay indoors."
         self.assertEqual(chat._clean_tts_text(text), text)

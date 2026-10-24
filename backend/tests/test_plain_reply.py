@@ -77,10 +77,27 @@ class PlainReplyTests(unittest.TestCase):
     def test_two_unusable_replies_give_the_honest_line(self):
         fake = _LocalFake()
         loop = "<|tool_call>call:AmadeusReply{" * 3
-        _, pack, exc, _ = self._run(fake, plain_script=[loop, "Sure, here you go."], call="response")
+        _, pack, exc, _ = self._run(fake, plain_script=[loop, loop], call="response")
         self.assertIsNone(exc)
         self.assertEqual(pack.assistant_reply_JPS, chat._honest_plain_failure_pack().assistant_reply_JPS)
         self.assertEqual(fake.plain_calls, 2)
+
+    def test_english_reply_is_translated_not_refused(self):
+        # "Answer me in English only" (2026-10-24): she agreed and wrote
+        # English - her words become her Japanese line instead of the
+        # honest failure line.
+        fake = _LocalFake()
+        english = "I understand. From now on, I'll answer you in English only, Aino-chan."
+        _, pack, exc, _ = self._run(fake, plain_script=[english, JA], call="response")
+        self.assertIsNone(exc)
+        self.assertEqual(pack.assistant_reply_JPS, JA)
+        self.assertEqual(fake.plain_calls, 2)
+        self.assertTrue(chat._mostly_english("アイノちゃん. I understand, from now on I will."))
+        line = "ふふ、いいよ。そう言ってもらえるのは、私にとっても嬉しいことだから。"
+        history = [{"role": "assistant", "content": line}, {"role": "user", "content": "Tell me something fun!"}]
+        self.assertTrue(chat._repeats_last_line(line, history))
+        self.assertFalse(chat._repeats_last_line("ペンギンの話をしてあげる。実は、とても面白い習性があるの。", history))
+        self.assertFalse(chat._mostly_english("最新モデルは、iPhone 18 Pro Maxね。"))
 
     def test_regenerate_path_two_steps(self):
         fake = _LocalFake()

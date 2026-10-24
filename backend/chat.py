@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import concurrent.futures
+import difflib
 from datetime import datetime
 import stats
 import timing
@@ -669,11 +670,11 @@ def _strip_inline_english(text: str) -> str:
     """
     def _kill(match):
         run = match.group(0)
-        words = sum(1 for part in run.split() if any(c.isalpha() for c in part))
-        letters = sum(1 for c in run if "a" <= c.lower() <= "z")
-        if words >= 3 or letters >= 24:
-            return " "
-        return run
+        # A product name or a title (iPhone 18 Pro Max, 『My First Cookie
+        # Book』) stays: removing it left holes in her line (2026-10-24).
+        if speech_text.keeps_latin_run(text, match.start(), run):
+            return run
+        return " "
     t = _INLINE_RUN_RE.sub(_kill, text)
     if t != text:
         print("[Amadeus] JPS had inline English - stripped before TTS")
@@ -681,10 +682,18 @@ def _strip_inline_english(text: str) -> str:
     # drop punctuation left orphaned where a phrase was removed
     t = re.sub(r"(?<= )[!?,.;:]{1,3}(?= )", "", t)
     t = re.sub(r"[!?,.;:]{1,3} +$", "", t)
+    t = re.sub(r"(?<=[、。！？])\s*[!?,.;:]{1,3}", "", t)
     # glue any leftover spaces back onto CJK punctuation
     t = re.sub(r"\s+([、。，！？；：])", r"\1", t)
     t = re.sub(r"([、。，！？；：])\s+", r"\1", t)
     return t
+
+
+# Scripts her Japanese line never needs: Cyrillic, Hebrew, Arabic, the Indic
+# scripts (Devanagari, Bengali, Tamil, ...), Thai/Lao, Hangul.
+_OTHER_SCRIPT_RE = re.compile(
+    "[Ѐ-ӿ֐-ࣿऀ-෿฀-໿"
+    "ᄀ-ᇿ㄰-㆏가-힯]+")
 
 
 def _clean_tts_text(text: str) -> str:
@@ -710,6 +719,12 @@ def _clean_tts_text(text: str) -> str:
     t = _strip_thinking(text or "").strip()
     if not t:
         return t
+    # A stray word in another script (her 12B model, rarely: Korean 들을,
+    # Bengali বাইরে - 2026-10-22/24) would be read out as noise: drop it.
+    if _OTHER_SCRIPT_RE.search(t):
+        t = _OTHER_SCRIPT_RE.sub("", t).strip()
+        t = re.sub(r"(?<=[、。！？])[ \t]+|[ \t]+(?=[、。！？])", "", t)
+        print("[Amadeus] JPS had a stray word in another script - removed")
     # Pure-English field (no Japanese at all): keep it for the translation pass.
     if _has_latin(t) and not _has_japanese_script(t):
         return _collapse_runaway(t)
@@ -975,6 +990,16 @@ def _ensure_japanese_jps(jps: str, llm) -> str:
         return cleaned
     if not _usable_source(cleaned):
         return cleaned
+    repaired = _translate_to_japanese(llm, cleaned)
+    if repaired:
+        print("[Amadeus] Voice-first: JPS was not Japanese - repaired with a translation pass")
+        return repaired
+    return cleaned
+
+
+def _translate_to_japanese(llm, text: str) -> str:
+    """Her line written in English (or mostly English) -> the same line in her
+    spoken Japanese, cleaned; "" when the pass fails or brings no Japanese."""
     try:
         trans = llm.invoke([{
             "role": "user",
@@ -982,16 +1007,23 @@ def _ensure_japanese_jps(jps: str, llm) -> str:
                 "Translate the following into natural spoken Japanese, in the voice of Amadeus "
                 "(a sharp, confident scientist who speaks casually to close friends). "
                 "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
-                + (cleaned or "")[:1500]
+                + (text or "")[:1500]
             ),
         }])
         jps = _clean_tts_text(_strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)))
-        if _has_japanese_script(jps):
-            print("[Amadeus] Voice-first: JPS was not Japanese - repaired with a translation pass")
-            return jps
+        return jps if _has_japanese_script(jps) else ""
     except Exception as e:
         print("[Amadeus] Voice-first: Japanese repair failed:", repr(e))
-    return cleaned
+        return ""
+
+
+def _mostly_english(text: str) -> bool:
+    """A line that is English prose with at most a few Japanese characters
+    ("アイノちゃん. I understand, from now on ..."): cleaning would leave only
+    scraps of it, so it is translated instead."""
+    ja = len(re.findall(r"[぀-ヿ㐀-鿿]", text or ""))
+    latin = len(re.findall(r"[A-Za-z]", text or ""))
+    return latin >= 20 and ja < latin * 0.25
 
 
 def _salvage_jps_plain_text(raw: str, llm) -> str:
@@ -1158,15 +1190,35 @@ def _plain_jps(client, messages) -> str:
         text = text[1:-1].strip()
     meta = getattr(reply, "response_metadata", None) or {}
     why = _degenerate_field(text)
+    # Asked to "answer in English only", a small model may agree and write
+    # English (2026-10-24, twice in a row -> the honest line). Her words are
+    # kept: translated into her Japanese line (the English line shows anyway).
+    if (text and not why and meta.get("finish_reason") != "length"
+            and (not _has_japanese_script(text) or _mostly_english(text))):
+        repaired = _translate_to_japanese(_translation_llm(), text)
+        if repaired:
+            print("[Amadeus] Plain reply was English - translated into her Japanese line")
+            return repaired
     if not text:
         why = "empty"
     elif meta.get("finish_reason") == "length":
         why = why or "cut off at the output limit"
     elif not _has_japanese_script(text):
         why = why or "no Japanese"
+    elif _repeats_last_line(text, messages):
+        why = why or "repeated her previous line"
     if why:
         raise ValueError(f"plain reply unusable ({why}): {text[:80]!r}")
     return text
+
+
+def _repeats_last_line(text: str, messages) -> bool:
+    """Her new line is (almost) word for word her previous one - a small
+    model did this once in 186 test replies (2026-10-24); worth one retry."""
+    prev = next((m.get("content", "") for m in reversed(messages or [])
+                 if m.get("role") == "assistant"), "")
+    return (len(text) >= 20 and bool(prev)
+            and difflib.SequenceMatcher(None, prev.strip(), text.strip()).ratio() > 0.9)
 
 
 def _plain_reply(client, messages, label):
@@ -2509,7 +2561,9 @@ _PLAIN_RULES_JA = {
         .replace(", in assistant_reply_JPS", "")
         .replace("Write assistant_reply_JPS natively", "Write it natively")
         + " Reply with ONLY her spoken Japanese line as plain text: no English, "
-          "no quotes, no labels, no markup, no JSON."
+          "no quotes, no labels, no markup, no JSON. If the user asks you to "
+          "answer in English, still write Japanese: the app already shows them "
+          "your line in English."
     ),
 }
 

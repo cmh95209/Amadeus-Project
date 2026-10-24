@@ -253,6 +253,44 @@ def _pronunciations() -> dict:
     return merged
 
 
+# ---------- an English sentence, or a name / title? (2026-10-24) ----------
+# Her Japanese line may carry a product name or a title in Latin letters
+# ("iPhone 18 Pro Max", 『My First Cookie Book』) - those stay on screen and her
+# voice says them in katakana. Only real English sentences (a leaked
+# translation) are removed from the line and left out of her voice.
+_FUNCTION_WORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "am", "to", "of",
+    "and", "or", "but", "in", "on", "at", "for", "with", "from", "by", "as",
+    "it", "its", "it's", "this", "that", "these", "those", "i", "i'm", "you",
+    "you're", "your", "we", "they", "he", "she", "my", "me", "our", "their",
+    "do", "does", "did", "not", "so", "if", "what", "how", "can", "will",
+    "just", "have", "has", "there", "here", "about", "like", "very",
+}
+_QUOTED = re.compile(r"『[^』]*』|「[^」]*」|“[^”]*”|【[^】]*】")
+
+
+def is_english_sentence(run: str) -> bool:
+    """True for English prose (40+ letters, or 3+ words with an everyday
+    word such as "the" / "is" / "you"); False for a name or a title."""
+    words = re.findall(r"[A-Za-z][A-Za-z']*", run)
+    if sum(len(w) for w in words) >= 40:
+        return True
+    return len(words) >= 3 and any(w.lower() in _FUNCTION_WORDS for w in words)
+
+
+def quoted_spans(text: str) -> list:
+    """(start, end) of every 『…』「…」“…”【…】 in the text - a title inside
+    Japanese quotes is never a leaked sentence."""
+    return [m.span() for m in _QUOTED.finditer(text or "")]
+
+
+def keeps_latin_run(text: str, start: int, run: str) -> bool:
+    """Whether a Latin run in her Japanese line is a name or title to keep."""
+    if any(a <= start < b for a, b in quoted_spans(text)):
+        return sum(c.isalpha() for c in run) <= 60
+    return not is_english_sentence(run)
+
+
 # ---------- the shared name list (option C, 2026-10-22) ----------
 # The same list also keeps her written line and the English line consistent:
 # Settings -> "Names she knows" edits the user's entries; her prompt asks for
@@ -321,6 +359,8 @@ def swap_listed_words(text: str) -> str:
         return text
     out, last = [], 0
     for m in _PHRASE.finditer(text):
+        if not is_english_sentence(m.group(0)):
+            continue  # a name or title: its listed words are swapped too
         out.append(_apply_list(text[last:m.start()], entries))
         out.append(m.group(0))
         last = m.end()
@@ -392,7 +432,13 @@ def _english_to_kana(text: str) -> str:
     if not re.search(r"[A-Za-z]", text):
         return text
     text = _apply_list(text, _pronunciations())
-    protected = [m.span() for m in _PHRASE.finditer(text)]
+    # Only unquoted English prose stays as it is (the chat cleaning drops it
+    # from her line); a name or title of 3+ words, or anything she quotes
+    # (iPhone 18 Pro Max, 『My First Cookie Book』), is said in katakana.
+    quoted = quoted_spans(text)
+    protected = [m.span() for m in _PHRASE.finditer(text)
+                 if is_english_sentence(m.group(0))
+                 and not any(a <= m.start() < b for a, b in quoted)]
 
     def _repl(m):
         start = m.start()
