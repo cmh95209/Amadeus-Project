@@ -14,6 +14,8 @@
 #     program that runs it) in the background while everything else
 #     installs, resumable and checked against the official checksums.
 #     Models live in <install folder>\models.
+#   - "Install Amadeus.bat": download it and double-click it - it fetches
+#     this installer and runs it (no PowerShell line to paste).
 #   - No administrator needed: run it in a normal PowerShell window. Git,
 #     Miniconda and FFmpeg install for your user only; Node.js, when
 #     missing, goes into your own folder (%USERPROFILE%\.amadeus-tools\node).

@@ -40,6 +40,19 @@ a local LLM or a cloud LLM model to connect with the app.
 
 ## Windows
 
+**The easy way: double-click to install.** No administrator rights are
+needed - everything installs for your own user account.
+
+1. Download [`Install Amadeus.bat`](https://github.com/cmh95209/Amadeus-Project/blob/main/Install%20Amadeus.bat)
+   (on that page, click the **Download raw file** button at the top right).
+2. Double-click it. Windows may first say **"Windows protected your PC"**,
+   because the file is not signed by a company: click **More info**, then
+   **Run anyway**.
+3. A window opens, downloads the latest installer and runs it. Answer its
+   first question (how Amadeus should think), then wait - see step 3 below.
+
+**Or with PowerShell** (the same installer):
+
 1. Press the Windows key, type **PowerShell** and open it. No administrator
    rights are needed: everything installs for your own user account.
 2. Paste this one line and press Enter:
