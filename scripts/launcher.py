@@ -1311,7 +1311,13 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
         )
     # npm's own folder first on PATH: the web page's tools (vite) start
     # "node" by name, and Amadeus' own portable Node.js is on no PATH.
-    os.environ["PATH"] = str(Path(npm).parent) + os.pathsep + os.environ.get("PATH", "")
+    # The same for her own portable FFmpeg (the voice engine reads audio
+    # with it) - installer v4.13 puts it there when Windows has none.
+    tool_dirs = [str(Path(npm).parent)]
+    ffmpeg_dir = Path.home() / ".amadeus-tools" / "ffmpeg" / "bin"
+    if not shutil.which("ffmpeg") and ffmpeg_dir.is_dir():
+        tool_dirs.append(str(ffmpeg_dir))
+    os.environ["PATH"] = os.pathsep.join(tool_dirs + [os.environ.get("PATH", "")])
 
     preflight(conda, npm)
     clear_stale_amadeus_processes({"built-in model": LLM_PORT} if builtin else None)

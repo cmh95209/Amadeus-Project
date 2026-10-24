@@ -425,9 +425,12 @@ function Refresh-Path {
     $m = [Environment]::GetEnvironmentVariable("Path","Machine")
     $u = [Environment]::GetEnvironmentVariable("Path","User")
     $env:Path = "$m;$u"
-    # Amadeus' own portable Node.js (v4.13) is on no saved PATH: keep it.
-    $own = Join-Path $env:USERPROFILE ".amadeus-tools\node"
-    if (Test-Path (Join-Path $own "node.exe")) { $env:Path = $own + ";" + $env:Path }
+    # Amadeus' own portable programs (v4.13) are on no saved PATH: add them.
+    $tools = Join-Path $env:USERPROFILE ".amadeus-tools"
+    foreach ($sub in @("node", "git\cmd", "git-lfs", "ffmpeg\bin")) {
+        $dir = Join-Path $tools $sub
+        if (Test-Path $dir) { $env:Path = $dir + ";" + $env:Path }
+    }
 }
 
 # Prove a folder is a COMPLETE clone by checking that these files exist inside it.
@@ -1342,44 +1345,52 @@ try {
     # ---------- STEP 2: prerequisites ----------
     Step 2 "Installing required programs (only the ones you don't already have)"
 
-    # v4.13: no administrator needed. Each program installs for this user
-    # only (no "allow changes?" prompt); only if winget has no per-user
-    # installer does it fall back to the normal install, which may ask.
+    # v4.13: no administrator needed - nothing in this step ever asks.
+    # winget installs for this user only (--scope user); a program winget has
+    # no per-user installer for (Git, Node.js on a fresh PC - the 2026-10-24
+    # VM test) comes as its official portable zip, checked against its
+    # published checksum, into this user's own folder %USERPROFILE%\.amadeus-tools
+    # (the same place the Mac installer uses). The launcher finds them there.
     function Install-Pkg($name, $id){
-        Log ("  Installing " + $name + " ... (can take a few minutes)")
-        $common = @("install", "-e", "--id", $id, "--silent", "--accept-source-agreements", "--accept-package-agreements")
-        Invoke-Tool ("Installing " + $name + " (for this user)") (Resolve-Exe "winget") ($common + @("--scope", "user"))
-        if ($LASTEXITCODE -ne 0) {
-            Log ("  " + $name + " has no per-user installer here - trying the normal one (Windows may ask for permission).") "Yellow"
-            Invoke-Tool ("Installing " + $name) (Resolve-Exe "winget") $common
-        }
+        Log ("  Installing " + $name + " for this user ... (can take a few minutes)")
+        Invoke-Tool ("Installing " + $name + " (for this user)") (Resolve-Exe "winget") @("install", "-e", "--id", $id, "--silent", "--scope", "user", "--accept-source-agreements", "--accept-package-agreements")
         if ($LASTEXITCODE -eq 0) { Log ("  Installed " + $name + ".") "Green" }
-        else { Log ("  WARNING: " + $name + " install returned code " + $LASTEXITCODE + ". We will double-check below.") "Yellow" }
+        else { Log ("  " + $name + ": winget has no per-user install here (code " + $LASTEXITCODE + ").") "Yellow" }
     }
 
-    # Node.js (her web page). winget only offers it for the whole PC (an
-    # administrator prompt), so when it is missing the official portable zip
-    # goes into this user's own folder instead - the same place the Mac
-    # installer uses; the launcher finds it there.
-    function Install-PortableNode {
-        $ver = "v24.22.1"
-        $zipName = "node-" + $ver + "-win-x64.zip"
-        $zip = Join-Path $env:TEMP ("amadeus-" + $zipName)
-        Get-VerifiedFile ("https://nodejs.org/dist/" + $ver + "/" + $zipName) $zip 37748064 "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5" ("Node.js " + $ver)
-        $tools = Split-Path $NodeDir -Parent
-        $unpack = Join-Path $tools "node-unpack"
+    # One official portable zip -> $dest (replacing an older copy). $inner =
+    # the folder inside the zip that holds the program ("" = the zip's root).
+    function Install-PortableZip($label, $url, [double]$bytes, $sha256, $inner, $dest){
+        $zip = Join-Path $env:TEMP ("amadeus-" + (Split-Path $url -Leaf))
+        Get-VerifiedFile $url $zip $bytes $sha256 $label
+        $unpack = $dest + "-unpack"
         if (Test-Path -LiteralPath $unpack) { Remove-Item -LiteralPath $unpack -Recurse -Force }
-        Log "  Unpacking Node.js..."
+        Log ("  Unpacking " + $label + "...")
         Expand-ZipFile $zip $unpack
-        if (Test-Path -LiteralPath $NodeDir) { Remove-Item -LiteralPath $NodeDir -Recurse -Force }
-        Move-Item -LiteralPath (Join-Path $unpack ("node-" + $ver + "-win-x64")) -Destination $NodeDir
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+        $src = if ($inner) { Join-Path $unpack $inner } else { $unpack }
+        Move-Item -LiteralPath $src -Destination $dest
         Remove-Item -LiteralPath $unpack -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $zip, ($zip + ".verified") -Force -ErrorAction SilentlyContinue
     }
-    $NodeDir = Join-Path $env:USERPROFILE ".amadeus-tools\node"
+    $ToolsDir  = Join-Path $env:USERPROFILE ".amadeus-tools"
+    $NodeDir   = Join-Path $ToolsDir "node"
+    $GitDir    = Join-Path $ToolsDir "git"
+    $LfsDir    = Join-Path $ToolsDir "git-lfs"
+    $FfmpegDir = Join-Path $ToolsDir "ffmpeg"
 
+    # Git (downloads the project): MinGit, Git for Windows' own portable
+    # build for programs like this one. It has no Git LFS (some project
+    # files need it) - that comes next, the same way.
     if (Get-Command git -ErrorAction SilentlyContinue) { Log "  Git already present." "Green" }
-    else { Install-Pkg "Git" "Git.Git"; Refresh-Path }
+    else {
+        if (-not (Test-Path (Join-Path $GitDir "cmd\git.exe"))) {
+            Install-PortableZip "Git 2.56.0.2 (MinGit)" "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip" 39806486 "da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be" "" $GitDir
+        } else { Log "  Git already present (Amadeus' own copy)." "Green" }
+        Refresh-Path
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "Could not set up Git. Look at this window and the log." }
+        Log ("  Git ready: " + $GitDir) "Green"
+    }
 
     $condaHome = Join-Path $env:USERPROFILE "miniconda3"
     function Find-CondaHome {
@@ -1433,22 +1444,43 @@ try {
     # simply ignores the unknown setting.
     & $conda config --set notify_outdated_conda false 2>$null | Out-Null
 
+    # Node.js (her web page): winget only offers it for the whole PC.
     if (Get-Command node -ErrorAction SilentlyContinue) { Log "  Node.js already present." "Green" }
     else {
-        if (-not (Test-Path (Join-Path $NodeDir "node.exe"))) { Install-PortableNode }
-        else { Log "  Node.js already present (Amadeus' own copy)." "Green" }
-        $env:Path = $NodeDir + ";" + $env:Path
+        if (-not (Test-Path (Join-Path $NodeDir "node.exe"))) {
+            Install-PortableZip "Node.js v24.22.1" "https://nodejs.org/dist/v24.22.1/node-v24.22.1-win-x64.zip" 37748064 "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5" "node-v24.22.1-win-x64" $NodeDir
+        } else { Log "  Node.js already present (Amadeus' own copy)." "Green" }
+        Refresh-Path
         if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Die "Could not set up Node.js. Look at this window and the log." }
         Log ("  Node.js ready: " + $NodeDir) "Green"
     }
 
+    # FFmpeg (her voice engine reads audio with it): winget for this user,
+    # else the official portable build.
     if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log "  FFmpeg already present." "Green" }
-    else { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
+    else {
+        if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
+        if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) {
+                Install-PortableZip "FFmpeg 9.0.2" "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" 114768076 "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba" "ffmpeg-9.0.2-essentials_build" $FfmpegDir
+            }
+            Refresh-Path
+            if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log ("  FFmpeg ready: " + $FfmpegDir) "Green" }
+            else { Log "  WARNING: FFmpeg could not be set up - her voice may not work. Run the installer again later." "Yellow" }
+        }
+    }
 
-    # Git for Windows already includes Git LFS; the separate (whole-PC)
-    # installer is only needed when it is missing.
+    # Git LFS: Git for Windows already includes it; MinGit does not - then
+    # its official portable git-lfs.exe goes next to the other tools.
     & (Resolve-Exe "git") lfs version 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { Install-Pkg "Git LFS" "Git.LFS"; Refresh-Path }
+    if ($LASTEXITCODE -ne 0) {
+        if (-not (Test-Path (Join-Path $LfsDir "git-lfs.exe"))) {
+            Install-PortableZip "Git LFS 3.8.0" "https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-windows-amd64-v3.8.0.zip" 5862396 "b62e7b8ceddee635f691233d77de8eaa4b213e9209e0173811d8cfa77f7882c1" "git-lfs-3.8.0" $LfsDir
+        }
+        Refresh-Path
+        & (Resolve-Exe "git") lfs version 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { Die "Could not set up Git LFS. Look at this window and the log." }
+    }
     Invoke-Tool "Setting up Git LFS" (Resolve-Exe "git") @("lfs", "install")
     Log "  Git + LFS ready." "Green"
 
