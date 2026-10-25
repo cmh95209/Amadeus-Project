@@ -244,6 +244,7 @@ NO_WEB_BLOCK = {
 # (2026-10-25: ddgs' single engines mostly returned nothing in a live check;
 # only its mixed "auto" mode still answered).
 FIRECRAWL_TIMEOUT = 6           # seconds, Firecrawl's one attempt
+KEENABLE_TIMEOUT = 5            # seconds, Keenable's one attempt (the second engine)
 SEARCH_ATTEMPT_TIMEOUT = 8      # seconds, per attempt (passed to DDGS as its timeout)
 SEARCH_TOTAL_BUDGET = 15        # seconds, hard ceiling for the whole search (was 15)
 SEARCH_MIN_RETRY_BUDGET = 5     # seconds; don't start another attempt if less is left
@@ -441,6 +442,37 @@ def _firecrawl_results(q: str, freshness, deadline: float) -> list:
     return results
 
 
+def _keenable_call(q: str, timeout: float, freshness=None):
+    """One Keenable search; None when it could not answer (logged)."""
+    try:
+        return websearch.keenable_search(q, max_results=5, timeout=timeout, freshness=freshness)
+    except websearch.KeenableUnavailable as exc:
+        print(f"[Amadeus] Keenable search unavailable: {exc}")
+    except Exception as exc:
+        print(f"[Amadeus] Keenable search failed: {exc!r}")
+    return None
+
+
+def _keenable_results(q: str, freshness, deadline: float) -> list:
+    """Keenable's results for `q` (the second engine); [] when it fails, finds
+    nothing or there is too little time left (ddgs keeps a full attempt).
+    Recent pages first, topped up like _firecrawl_results."""
+    def room():
+        return deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
+    if room() < 1.5:
+        return []
+    results = _keenable_call(q, min(KEENABLE_TIMEOUT, room()), freshness)
+    if results is None:
+        return []
+    if freshness and len(results) < 2 and room() >= 1.5:
+        more = _keenable_call(q, min(KEENABLE_TIMEOUT, room())) or []
+        seen = {r["href"] for r in results}
+        results = (results + [r for r in more if r["href"] not in seen])[:5]
+    if not results:
+        print(f"[Amadeus] Keenable found nothing for {q!r}, trying ddgs")
+    return results
+
+
 def _note_search_engine(name) -> None:
     """Remember which engine answered the latest search in this thread (for
     the log line and the reply's saved sources)."""
@@ -450,10 +482,11 @@ def _note_search_engine(name) -> None:
 def _run_web_search(query: str) -> str:
     """Run a web search and return compact results for the model.
 
-    Firecrawl (websearch.py, keyless) is tried first; when it fails, is slow,
-    finds nothing or is out of free credits, the DuckDuckGo-style `ddgs`
-    search runs (with a couple of bounded retries) on the time that is left.
-    A time-sensitive query is limited to recent pages on both engines.
+    Firecrawl (websearch.py, keyless) is tried first, then Keenable (keyless,
+    the second engine); when both fail, are slow, find nothing or are out of
+    free use, the DuckDuckGo-style `ddgs` search runs (with a couple of
+    bounded retries) on the time that is left. A time-sensitive query is
+    limited to recent pages on every engine.
     See the SEARCH_* constants above for timing."""
     q = (query or "").strip()
     _note_search_engine(None)
@@ -466,7 +499,12 @@ def _run_web_search(query: str) -> str:
     if results:
         _note_search_engine("firecrawl")
         return _format_search_results(results)
-    _progress("retry", "The main search didn't answer, trying the backup search...")
+    _progress("retry", "The main search didn't answer, trying the second search...")
+    results = _keenable_results(q, freshness, deadline)
+    if results:
+        _note_search_engine("keenable")
+        return _format_search_results(results)
+    _progress("retry", "Trying the backup search...")
 
     try:
         from ddgs import DDGS  # noqa: F401  - lazy check; fails fast + clearly

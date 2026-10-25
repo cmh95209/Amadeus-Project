@@ -216,6 +216,65 @@ class FirecrawlClientTests(unittest.TestCase):
                 websearch.firecrawl_search("q")
 
 
+class KeenableClientTests(unittest.TestCase):
+    def setUp(self):
+        websearch.reset_keenable_cooldown()
+        self.sent = []
+
+    def tearDown(self):
+        websearch.reset_keenable_cooldown()
+
+    def _urlopen(self, answer):
+        def fake(req, timeout=None, context=None):
+            self.sent.append((req.full_url, dict(req.header_items()),
+                              json.loads(req.data.decode("utf-8")), timeout))
+            if isinstance(answer, Exception):
+                raise answer
+            return _FakeHTTP(answer)
+        return patch.object(websearch.urllib.request, "urlopen", side_effect=fake)
+
+    def test_request_and_answer(self):
+        answer = {"results": [
+            {"title": "Banner", "url": "https://game8.co/a", "description": "short",
+             "snippet": "# The **7.2** banners", "published_at": "2026-10-23T08:00:00Z"},
+            {"title": "No date", "url": "https://b.example/", "description": "2 days ago · B"},
+            {"title": "no url"}, "junk"]}
+        with self._urlopen(answer):
+            out = websearch.keenable_search("Genshin banner", max_results=5, timeout=4, freshness="w")
+        url, headers, body, timeout = self.sent[0]
+        self.assertEqual(url, websearch.KEENABLE_URL)
+        self.assertEqual(headers.get("X-keenable-title"), "Amadeus")
+        self.assertEqual(body["query"], "Genshin banner")
+        self.assertEqual(body["published_after"], "7d")
+        self.assertEqual(timeout, 4)
+        self.assertEqual([r["href"] for r in out], ["https://game8.co/a", "https://b.example/"])
+        self.assertEqual(out[0]["date"], "2026-10-23")
+        self.assertEqual(out[0]["body"], "The 7.2 banners")
+        self.assertTrue(out[1]["date"])                    # from the snippet's "2 days ago"
+
+    def test_no_freshness_sends_no_date_filter(self):
+        with self._urlopen({"results": []}):
+            self.assertEqual(websearch.keenable_search("cat facts"), [])
+        self.assertNotIn("published_after", self.sent[0][2])
+
+    def test_rate_limit_cools_down_for_an_hour(self):
+        with self._urlopen(http_error(429)):
+            with self.assertRaises(websearch.KeenableUnavailable):
+                websearch.keenable_search("q")
+            with self.assertRaises(websearch.KeenableUnavailable):
+                websearch.keenable_search("q2")
+        self.assertEqual(len(self.sent), 1)
+        left = websearch._keenable_skip_until - websearch.time.monotonic()
+        self.assertGreater(left, websearch.KEENABLE_QUOTA_COOLDOWN - 60)
+
+    def test_other_failures(self):
+        for answer in (http_error(500), TimeoutError("slow"), {"error": "x"}):
+            websearch.reset_keenable_cooldown()
+            with self._urlopen(answer):
+                with self.assertRaises(websearch.KeenableUnavailable):
+                    websearch.keenable_search("q")
+
+
 class _FakeDDGS:
     """Stands in for the ddgs client: answers from a list of replies
     (a list of results, or an exception), recording each call's kwargs."""
@@ -241,9 +300,41 @@ class RunWebSearchTests(unittest.TestCase):
         self.fc_calls = []
         self._sleep = patch.object(chat.time, "sleep")
         self._sleep.start()
+        # Keenable (the second engine) is "down" unless a test says otherwise.
+        self._kn = patch.object(chat.websearch, "keenable_search",
+                                side_effect=websearch.KeenableUnavailable("test"))
+        self.kn = self._kn.start()
 
     def tearDown(self):
+        self._kn.stop()
         self._sleep.stop()
+
+    def test_keenable_answers_when_firecrawl_cannot(self):
+        kn_results = [{"title": "K1", "body": "keen", "href": "https://keen.example/1",
+                       "date": "2026-10-24"}]
+        self.kn.side_effect = None
+        self.kn.return_value = kn_results
+        with self._fc(websearch.FirecrawlUnavailable("free limit")), self._ddgs():
+            out = chat._run_web_search("Genshin current banner")
+        self.assertIn("1. K1\nkeen\nDate: 2026-10-24\nURL: https://keen.example/1", out)
+        self.assertEqual(chat._turn.engine, "keenable")
+        self.assertEqual(self.ddgs.calls, [])
+        self.assertEqual(self.kn.call_args_list[0].kwargs["freshness"], "w")   # then a top-up
+
+    def test_ddgs_answers_when_both_keyless_engines_fail(self):
+        with self._fc([]), self._ddgs(DDG_RESULTS):
+            out = chat._run_web_search("cat facts")
+        self.assertIn("D1", out)
+        self.assertEqual(chat._turn.engine, "ddgs")
+        self.kn.assert_called_once()
+
+    def test_keenable_is_skipped_when_time_is_short(self):
+        start = chat.time.monotonic()
+        clock = iter([start, start + 9.0] + [start + 9.0] * 20)
+        with self._fc(websearch.FirecrawlUnavailable("slow")), self._ddgs(DDG_RESULTS),              patch.object(chat.time, "monotonic", side_effect=lambda: next(clock)):
+            out = chat._run_web_search("cat facts")
+        self.kn.assert_not_called()                 # ddgs keeps its full attempt
+        self.assertIn("D1", out)
 
     def _fc(self, *answers):
         answers = list(answers)

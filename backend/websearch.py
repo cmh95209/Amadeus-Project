@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Firecrawl web search for Amadeus (standard library only).
+"""Keyless web search engines for Amadeus (standard library only).
 
-The first engine her web search tries. Firecrawl's search works without an
-account or an API key ("keyless": free, a daily cap per internet connection),
-answers in about 2 seconds with recent, dated results in English and
-Japanese, and costs 2 of its free credits per search. chat._run_web_search
-falls back to the `ddgs` library whenever this engine fails, is slow, finds
-nothing or is out of free credits.
+Firecrawl is the first engine her web search tries: no account or API key
+("keyless": free, a daily cap per internet connection), about 2 seconds,
+recent dated results in English and Japanese, 2 free credits per search.
+Keenable (keenable_search, below) is the second: keyless, ~1,000 searches an
+hour per connection, every result dated. chat._run_web_search falls back to
+the next engine - and finally to the `ddgs` library - whenever one fails, is
+slow, finds nothing or is out of free use.
 
 Deliberate properties:
   * BOUNDED  - one attempt with a hard timeout; never retried here (the ddgs
@@ -206,6 +207,87 @@ def firecrawl_search(query: str, max_results: int = 5, timeout: float = DEFAULT_
             "href": href,
             "date": snippet_date(raw),
         })
+        if len(results) >= max_results:
+            break
+    return results
+
+
+# --- Keenable: the second engine (2026-10-25) ----------------------------------
+# Keenable's keyless public search: no account, no key, no credits; limited to
+# about 1,000 searches an hour per internet connection. Fast (~0.5 s), and
+# every result carries its publish date. Used when Firecrawl cannot answer
+# (its keyless daily cap is small); ddgs stays the last resort. Results come
+# in many languages (there is no language setting).
+KEENABLE_URL = "https://api.keenable.ai/v1/search/public"
+KEENABLE_APP = "Amadeus"              # the X-Keenable-Title the public endpoint requires
+KEENABLE_TIMEOUT = 5                  # seconds, the single attempt
+KEENABLE_QUOTA_COOLDOWN = 3600        # seconds to skip it after "rate limited" (hourly cap)
+KEENABLE_FRESHNESS = {"d": "1d", "w": "7d", "m": "30d", "y": "365d"}
+_keenable_skip_until = 0.0
+
+
+class KeenableUnavailable(Exception):
+    """Keenable could not answer this time (the reason is in the message)."""
+
+
+def _keenable_cool_down(seconds: float) -> None:
+    global _keenable_skip_until
+    with _lock:
+        _keenable_skip_until = max(_keenable_skip_until, time.monotonic() + seconds)
+
+
+def reset_keenable_cooldown() -> None:
+    global _keenable_skip_until
+    with _lock:
+        _keenable_skip_until = 0.0
+
+
+def keenable_cooling_down() -> bool:
+    return time.monotonic() < _keenable_skip_until
+
+
+def keenable_search(query: str, max_results: int = 5, timeout: float = KEENABLE_TIMEOUT,
+                    freshness=None) -> list:
+    """Search Keenable (keyless) -> [{"title", "body", "href", "date"}] in rank
+    order. `freshness` ("d"/"w"/"m") keeps pages published in the past day /
+    week / month. Raises KeenableUnavailable when it cannot answer."""
+    if keenable_cooling_down():
+        raise KeenableUnavailable("skipped (cooling down after an earlier failure)")
+    body = {"query": query, "max_results": int(max_results), "snippet_max_length": 400}
+    if freshness in KEENABLE_FRESHNESS:
+        body["published_after"] = KEENABLE_FRESHNESS[freshness]
+    req = urllib.request.Request(
+        KEENABLE_URL, data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 "X-Keenable-Title": KEENABLE_APP})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        if e.code in (402, 429):
+            _keenable_cool_down(KEENABLE_QUOTA_COOLDOWN)
+            raise KeenableUnavailable(f"rate limit reached (HTTP {e.code})") from None
+        _keenable_cool_down(ERROR_COOLDOWN)
+        raise KeenableUnavailable(f"HTTP {e.code}") from None
+    except Exception as e:
+        _keenable_cool_down(ERROR_COOLDOWN)
+        raise KeenableUnavailable(repr(e)) from None
+    items = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        _keenable_cool_down(ERROR_COOLDOWN)
+        raise KeenableUnavailable(f"unexpected answer: {str(data)[:120]}")
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        href = str(item.get("url") or "").strip()
+        if not href:
+            continue
+        text = item.get("snippet") or item.get("description") or ""
+        published = str(item.get("published_at") or "")
+        when = published[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", published) else snippet_date(text)
+        results.append({"title": str(item.get("title") or "").strip(),
+                        "body": _clean_snippet(text), "href": href, "date": when})
         if len(results) >= max_results:
             break
     return results
