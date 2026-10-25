@@ -291,3 +291,77 @@ def keenable_search(query: str, max_results: int = 5, timeout: float = KEENABLE_
         if len(results) >= max_results:
             break
     return results
+
+
+# --- Year guard: past years she adds to her own search words (2026-10-25) ------
+# Her sense of "now" comes from training, so she often writes a past year into
+# a search the user never dated ("current banner 2024", "原神 ピックアップ
+# 2025年1月") - in the test set 54 of 124 searches did, and every stale answer
+# about banners / anime / Windows started there. Such a year (with its month,
+# "June 2024", "2025年1月") is removed before the search, so it is about NOW
+# and the recent-pages limit applies. A year the USER mentioned (this message
+# or the recent ones), its neighbours ("the year after"), and relative years
+# ("last year", 去年, "two years ago") stay; the current and future years
+# always stay.
+_MONTHS_RE = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+              r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+_YEAR_ANY_RE = re.compile(r"(?<!\d)((?:19|20)\d\d)(?!\d)")
+_RELATIVE_YEARS = (
+    (re.compile(r"\bthis year\b|今年|本年", re.I), 0),
+    (re.compile(r"\blast year\b|\bprevious year\b|去年|昨年|前年", re.I), -1),
+    (re.compile(r"\byear before last\b|一昨年|おととし", re.I), -2),
+    (re.compile(r"\bnext year\b|来年", re.I), 1),
+)
+_N_YEARS_AGO_RE = re.compile(r"\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago\b"
+                             r"|(\d{1,2})\s*年前", re.I)
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                 "eight": 8, "nine": 9, "ten": 10}
+
+
+def years_the_user_means(texts, today=None) -> set:
+    """Every year the user's words name or point at (plus the neighbours of
+    named years, for "the year after" / "the year before")."""
+    this_year = (today or date.today()).year
+    years = set()
+    for text in texts or []:
+        t = str(text or "")
+        for y in _YEAR_ANY_RE.findall(t):
+            years.update({int(y) - 1, int(y), int(y) + 1})
+        for rx, delta in _RELATIVE_YEARS:
+            if rx.search(t):
+                years.add(this_year + delta)
+        for m in _N_YEARS_AGO_RE.finditer(t):
+            n = m.group(1) or m.group(2)
+            n = _NUMBER_WORDS.get(n.lower(), None) if not n.isdigit() else int(n)
+            if n:
+                years.add(this_year - n)
+    return years
+
+
+def guard_query_years(query, user_texts, today=None):
+    """-> (search words without the past years she added on her own, [removed
+    years]). The words come back unchanged when nothing needs removing (or
+    when removing would leave nothing to search for)."""
+    q = str(query or "")
+    this_year = (today or date.today()).year
+    allowed = years_the_user_means(user_texts, today)
+    removed = sorted({int(y) for y in _YEAR_ANY_RE.findall(q)
+                      if int(y) < this_year and int(y) not in allowed})
+    if not removed:
+        return q, []
+    out = q
+    for y in removed:
+        ys = str(y)
+        # Japanese "2025年1月" / "2025年", English "June 2024", "fall 2024", "2024-2025", plain "2024".
+        out = re.sub(ys + r"\s*年(?:\s*\d{1,2}\s*月)?", " ", out)
+        out = re.sub(r"\b" + _MONTHS_RE + r"\.?\s+" + ys + r"\b", " ", out, flags=re.I)
+        out = re.sub(r"(?<!\d)" + ys + r"(?!\d)", " ", out)
+    out = re.sub(r"\s*[-/~〜]\s*(?=\s|$)", " ", out)       # a range's leftover dash
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,;-")
+    if not _has_words(out):
+        return q, []
+    return out, removed
+
+
+def _has_words(text) -> bool:
+    return bool(re.search(r"\w", str(text or "")))

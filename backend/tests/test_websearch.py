@@ -216,6 +216,62 @@ class FirecrawlClientTests(unittest.TestCase):
                 websearch.firecrawl_search("q")
 
 
+class YearGuardTests(unittest.TestCase):
+    """Past years she adds to her own search words are removed; years the
+    user named or meant stay (2026-10-25: 54 of 124 test searches had one)."""
+
+    def g(self, query, *user):
+        return websearch.guard_query_years(query, list(user), TODAY)
+
+    def test_years_she_added_are_removed(self):
+        self.assertEqual(self.g("Genshin Impact current banner characters 2024", "Who's on the current banner?"),
+                         ("Genshin Impact current banner characters", [2024]))
+        self.assertEqual(self.g("原神 ピックアップ 2025年1月", "原神の今のピックアップは誰？"),
+                         ("原神 ピックアップ", [2025]))
+        self.assertEqual(self.g("latest Windows 11 update September 2024", "latest Windows update?"),
+                         ("latest Windows 11 update", [2024]))
+        self.assertEqual(self.g("new anime season 2024 2025 popular", "anime this season?"),
+                         ("new anime season popular", [2024, 2025]))
+        self.assertEqual(self.g("next F1 race schedule 2024-2025", "next F1 race?"),
+                         ("next F1 race schedule", [2024, 2025]))
+
+    def test_years_the_user_means_stay(self):
+        for query, user in [
+                ("2022 World Cup final result", ["Search the 2022 World Cup final"]),
+                ("World Cup 2023 winner", ["who won the year after?", "Tell me about the 2022 World Cup"]),
+                ("Japan news 2025", ["what happened last year in Japan?"]),
+                ("Japan news 2025", ["去年の日本のニュースは？"]),
+                ("best anime 2023", ["best anime from 3 years ago"]),
+                ("best anime 2024", ["一昨年のアニメ"]),
+                ("Olympics 2024 marathon", ["2024 Olympics marathon winner?"]),
+                ("newest iPhone 2026", ["latest iPhone?"]),
+                ("iPhone 2027 rumours", ["next iPhone?"])]:
+            self.assertEqual(self.g(query, *user), (query, []), query)
+
+    def test_nothing_left_keeps_the_words(self):
+        self.assertEqual(self.g("2024", "current?"), ("2024", []))
+
+    def test_the_search_uses_the_fixed_words(self):
+        chat._begin_turn_sources()
+        chat._turn.question = "Who's on the current Genshin banner?"
+        chat._turn.reply_context = [{"role": "user", "content": "Who's on the current Genshin banner?"}]
+        try:
+            with patch.object(chat, "_run_web_search", return_value="No web results were found.") as run:
+                chat._web_search_with_content("Genshin current banner 2024")
+                chat._turn.question = "And the 2022 one?"
+                chat._web_search_with_content("Genshin banner 2022")
+        finally:
+            chat._turn.question = ""
+            chat._turn.reply_context = None
+            chat.take_turn_sources()
+        self.assertEqual([c.args[0] for c in run.call_args_list],
+                         ["Genshin current banner", "Genshin banner 2022"])
+
+    def test_the_tool_asks_for_no_year(self):
+        self.assertIn("WITHOUT a year unless the user named one",
+                      chat.WEB_SEARCH_TOOL["function"]["description"])
+
+
 class KeenableClientTests(unittest.TestCase):
     def setUp(self):
         websearch.reset_keenable_cooldown()

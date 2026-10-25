@@ -157,7 +157,9 @@ WEB_SEARCH_TOOL = {
             "or game releases, gacha banners or characters, product versions, software updates, "
             "and similar. When the user says they recently saw, played, bought or experienced "
             "something specific, search FIRST and tailor your reply to what you find. "
-            "Do not use it for timeless general knowledge or pure small talk."
+            "Do not use it for timeless general knowledge or pure small talk. "
+            "Write the query WITHOUT a year unless the user named one - today's date is in "
+            "your RIGHT NOW note, and an old year brings back old pages."
         ),
         "parameters": {
             "type": "object",
@@ -1108,6 +1110,29 @@ def _reread_lookup(lookup_id) -> str:
     return _web_search_with_content(lookup["query"], allow_reuse=False)
 
 
+# The user's own recent words: the years they named or meant (year guard).
+YEAR_GUARD_USER_MESSAGES = 3
+
+
+def _user_words_for_years() -> list:
+    """The latest user message + the few before it in this reply's chat."""
+    texts = [getattr(_turn, "question", "") or ""]
+    context = getattr(_turn, "reply_context", None) or []
+    users = [m.get("content") for m in context
+             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    return texts + users[-YEAR_GUARD_USER_MESSAGES:]
+
+
+def _guard_query(query: str) -> str:
+    """Her search words without the past years she added on her own (see
+    websearch.guard_query_years); logged when something was removed."""
+    fixed, removed = websearch.guard_query_years(query, _user_words_for_years())
+    if removed:
+        print(f"[Amadeus] Search words fixed (years the user never said: "
+              f"{', '.join(map(str, removed))}): {query!r} -> {fixed!r}")
+    return fixed
+
+
 def _web_search_with_content(query: str, allow_reuse: bool = True) -> str:
     """web_search plus reading the result pages (reader or quick mode).
 
@@ -1120,6 +1145,7 @@ def _web_search_with_content(query: str, allow_reuse: bool = True) -> str:
     logged, recorded as a source and saved as a lookup; a fresh lookup for the
     same search in this chat is used instead of searching again.
     """
+    query = _guard_query(query)
     if _is_clock_query(query):
         print(f"[Amadeus] Web search skipped (clock query - her RIGHT NOW note has it): {query!r}")
         return CLOCK_SEARCH_SKIPPED
