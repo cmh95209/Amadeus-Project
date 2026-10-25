@@ -2421,9 +2421,51 @@ def _group_reply_turns(rows) -> List[List[int]]:
 #      Assistant rows always carry "japanese" (her spoken line, "" when
 #      none) so the UI can show it under the English when the user turns
 #      that on.
+_SOURCE_TEXT_MAX = 300      # a title / query shown in the sources panel
+
+
+def _safe_link(url) -> str:
+    """The link when it is a plain web address (http/https), else "" - a saved
+    source is shown as a clickable link, so nothing else may get through."""
+    u = str(url or "").strip()
+    return u if re.match(r"(?i)^https?://[^\s/]+", u) and len(u) <= 2000 else ""
+
+
+# pre: sources is a reply's saved sources list (set_message_sources)
+# post: the part the chat screen shows under her reply - searches (query, the
+#       result links + titles + dates, the page she read) and live-weather
+#       fetches; anything malformed or not a web link is left out
+def sources_for_ui(sources) -> list:
+    out = []
+    for entry in sources if isinstance(sources, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        if kind == "search":
+            results = []
+            for r in entry.get("results") or []:
+                if not isinstance(r, dict) or not _safe_link(r.get("url")):
+                    continue
+                item = {"title": str(r.get("title") or "")[:_SOURCE_TEXT_MAX],
+                        "url": _safe_link(r.get("url"))}
+                if r.get("date"):
+                    item["date"] = str(r["date"])[:10]
+                results.append(item)
+            out.append({"kind": "search",
+                        "query": str(entry.get("query") or "")[:_SOURCE_TEXT_MAX],
+                        "results": results,
+                        "read": _safe_link(entry.get("read")) or None})
+        elif kind == "weather":
+            out.append({"kind": "weather",
+                        "place": str(entry.get("place") or "")[:_SOURCE_TEXT_MAX],
+                        "url": _safe_link(entry.get("url")) or None})
+    return out
+
+
 def _message_item(row) -> Dict[str, str]:
     mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row[:9]
     kind = row[10] if len(row) > 10 else None
+    saved_sources = row[11] if len(row) > 11 else None
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
             "active": bool((active if active is not None else 1)),
             "conversation_id": conv_id}
@@ -2436,6 +2478,13 @@ def _message_item(row) -> Dict[str, str]:
         item["japanese"] = (japanese or "").strip()
         if item["japanese"]:
             item["has_japanese"] = True
+        if saved_sources:
+            try:
+                shown = sources_for_ui(json.loads(saved_sources))
+            except (TypeError, ValueError):
+                shown = []
+            if shown:
+                item["sources"] = shown
     return item
 
 
@@ -2457,7 +2506,7 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
     c.execute(
         "SELECT id, role, content, created_at, audio, japanese, active, conversation_id, "
-        "greeting, greeting_group, greeting_kind "
+        "greeting, greeting_group, greeting_kind, sources "
         "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         (conv,),
     )

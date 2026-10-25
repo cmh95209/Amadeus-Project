@@ -274,6 +274,8 @@ def request_message():
             "user_id": user_id,
             "assistant_id": assistant_id,
             "conversation_id": conv_id,
+            # The links she used (shown under her reply); [] when none.
+            "sources": memory.sources_for_ui(memory.load_message_sources(assistant_id)),
         })
 
     # Web access OFF: voice-first (see the doc block above).

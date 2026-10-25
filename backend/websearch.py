@@ -1,0 +1,211 @@
+# -*- coding: utf-8 -*-
+"""Firecrawl web search for Amadeus (standard library only).
+
+The first engine her web search tries. Firecrawl's search works without an
+account or an API key ("keyless": free, a daily cap per internet connection),
+answers in about 2 seconds with recent, dated results in English and
+Japanese, and costs 2 of its free credits per search. chat._run_web_search
+falls back to the `ddgs` library whenever this engine fails, is slow, finds
+nothing or is out of free credits.
+
+Deliberate properties:
+  * BOUNDED  - one attempt with a hard timeout; never retried here (the ddgs
+               fallback is the retry).
+  * QUIET    - when Firecrawl reports its free limit is used up, it is skipped
+               for a few hours (QUOTA_COOLDOWN), and for a short while after
+               any other failure (ERROR_COOLDOWN), so a refusing or dead
+               service never adds its timeout to every search.
+  * SAME SHAPE - results come back as ddgs-style dicts ({"title", "body",
+               "href"}, plus "date" when known), so the caller formats both
+               engines identically.
+  * DATED    - old news must not read as new news (with ddgs she often took a
+               years-old article for today's). A time-sensitive query ("today",
+               "latest", "news", "最新"...) is limited to recent pages
+               (freshness_for), and the age a snippet carries ("2 days ago ·",
+               "Oct 13, 2026 ·", "3日前") becomes a real date (snippet_date).
+
+firecrawl_search() returns a list (possibly empty) or raises
+FirecrawlUnavailable with a short reason.
+"""
+from __future__ import annotations
+
+import json
+import re
+import ssl
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import date, datetime, timedelta
+
+SEARCH_URL = "https://api.firecrawl.dev/v2/search"
+DEFAULT_TIMEOUT = 6             # seconds, the single attempt
+QUOTA_COOLDOWN = 3 * 3600       # seconds to skip Firecrawl after "free limit used up"
+ERROR_COOLDOWN = 120            # seconds to skip it after any other failure
+MAX_SNIPPET_CHARS = 400         # a result's snippet is a hint, not the page
+
+_SSL_CTX = ssl.create_default_context()
+_lock = threading.Lock()
+_skip_until = 0.0               # monotonic time before which Firecrawl is skipped
+
+
+class FirecrawlUnavailable(Exception):
+    """Firecrawl could not answer this time (the reason is in the message)."""
+
+
+def _cool_down(seconds: float) -> None:
+    global _skip_until
+    with _lock:
+        _skip_until = max(_skip_until, time.monotonic() + seconds)
+
+
+def reset_cooldown() -> None:
+    """Forget any cooldown (tests; a fresh start)."""
+    global _skip_until
+    with _lock:
+        _skip_until = 0.0
+
+
+def cooling_down() -> bool:
+    return time.monotonic() < _skip_until
+
+
+# --- freshness: how recent a time-sensitive query's pages must be ------------
+# Checked in order; the first group that matches wins. "d" = past day,
+# "w" = past week, "m" = past month (Firecrawl's tbs=qdr:X, ddgs' timelimit).
+_FRESH_RULES = (
+    ("d", re.compile(
+        r"\b(today'?s?|tonight|this (morning|evening|afternoon)|breaking|right now|"
+        r"live (score|scores|updates?)|yesterday|last night)\b|今日|本日|今夜|今朝|速報|昨日|昨夜", re.I)),
+    ("w", re.compile(
+        r"\b(news|headlines?|latest|current(ly)?|recent(ly)?|this week|just (released|announced|came out)|"
+        r"newest|upcoming)\b|ニュース|最新|今週|現在|最近|発表", re.I)),
+    ("m", re.compile(r"\b(this month|this season|new release|newly)\b|今月|今期|新作", re.I)),
+)
+# A query that names a past year is about the past: never limit it to recent pages.
+_YEAR_RE = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
+
+
+def freshness_for(query, today=None):
+    """"d" / "w" / "m" when the query asks for something current, else None."""
+    q = str(query or "")
+    this_year = (today or date.today()).year
+    if any(int(y) < this_year for y in _YEAR_RE.findall(q)):
+        return None
+    for code, rx in _FRESH_RULES:
+        if rx.search(q):
+            return code
+    return None
+
+
+# --- dates carried by snippets ------------------------------------------------
+_AGO_RE = re.compile(
+    r"^\s*(\d+)\s*(minute|min|hour|hr|day|week|month|year)s?\s+ago\b", re.I)
+_AGO_JA_RE = re.compile(r"^\s*(\d+)\s*(分|時間|日|週間|か月|ヶ月|ヵ月|カ月|年)前")
+_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+_MDY_RE = re.compile(r"^\s*([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),\s*(\d{4})\b")
+_DMY_RE = re.compile(r"^\s*(\d{1,2})\s+([A-Za-z]{3})[a-z]*\.?\s+(\d{4})\b")
+_YMD_RE = re.compile(r"^\s*(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})")
+
+
+def snippet_date(text, now=None):
+    """The date a snippet starts with ("2 days ago ·", "Oct 13, 2026 ·",
+    "2026/10/20", "3日前"), as YYYY-MM-DD; "" when it carries none."""
+    t = str(text or "")[:40]
+    now = now or datetime.now()
+    try:
+        m = _AGO_RE.match(t) or _AGO_JA_RE.match(t)
+        if m:
+            n, unit = int(m.group(1)), m.group(2).lower()
+            if unit in ("minute", "min", "分", "hour", "hr", "時間"):
+                delta = timedelta(hours=n) if unit in ("hour", "hr", "時間") else timedelta(minutes=n)
+            elif unit in ("day", "日"):
+                delta = timedelta(days=n)
+            elif unit in ("week", "週間"):
+                delta = timedelta(weeks=n)
+            elif unit in ("year", "年"):
+                delta = timedelta(days=365 * n)
+            else:  # months
+                delta = timedelta(days=30 * n)
+            return (now - delta).date().isoformat()
+        m = _MDY_RE.match(t)
+        if m and m.group(1).lower() in _MONTHS:
+            return date(int(m.group(3)), _MONTHS[m.group(1).lower()], int(m.group(2))).isoformat()
+        m = _DMY_RE.match(t)
+        if m and m.group(2).lower() in _MONTHS:
+            return date(int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1))).isoformat()
+        m = _YMD_RE.match(t)
+        if m:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+    except ValueError:
+        pass  # an impossible date ("Feb 31") is no date
+    return ""
+
+
+def _clean_snippet(text) -> str:
+    """Firecrawl snippets sometimes carry markdown (headings, links): keep the words."""
+    t = str(text or "")
+    t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)   # [text](url) -> text
+    t = re.sub(r"!?\[([^\]]*)\]\([^)]*$", r"\1", t)    # a link cut off at the end
+    t = re.sub(r"!\[\]", "", t)                         # empty image marks
+    t = re.sub(r"(?m)^\s*#+\s*", "", t)                 # heading marks
+    t = re.sub(r"\*\*|__", "", t)                       # bold marks
+    t = re.sub(r"(\s*\|\s*-*\s*){2,}", " | ", t)        # table rules ("| | |-|")
+    t = re.sub(r"\s+", " ", t).strip(" |")
+    if len(t) > MAX_SNIPPET_CHARS:
+        t = t[:MAX_SNIPPET_CHARS].rstrip() + "..."
+    return t
+
+
+def firecrawl_search(query: str, max_results: int = 5, timeout: float = DEFAULT_TIMEOUT,
+                     freshness=None) -> list:
+    """Search Firecrawl (keyless) and return [{"title", "body", "href", "date"}]
+    in rank order ("date" is "" when unknown). `freshness` ("d"/"w"/"m")
+    limits the search to pages from the past day / week / month."""
+    if cooling_down():
+        raise FirecrawlUnavailable("skipped (cooling down after an earlier failure)")
+    body = {"query": query, "limit": max_results}
+    if freshness in ("d", "w", "m", "y"):
+        body["tbs"] = "qdr:" + freshness
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(SEARCH_URL, data=payload, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        # 429 = the daily keyless cap; 402 = out of credits. Both last for hours.
+        if e.code in (402, 429):
+            _cool_down(QUOTA_COOLDOWN)
+            raise FirecrawlUnavailable(f"free limit reached (HTTP {e.code})") from None
+        _cool_down(ERROR_COOLDOWN)
+        raise FirecrawlUnavailable(f"HTTP {e.code}") from None
+    except Exception as e:
+        _cool_down(ERROR_COOLDOWN)
+        raise FirecrawlUnavailable(repr(e)) from None
+
+    if not isinstance(data, dict) or not data.get("success"):
+        _cool_down(ERROR_COOLDOWN)
+        raise FirecrawlUnavailable(f"unexpected answer: {str(data)[:120]}")
+    block = data.get("data") or {}
+    items = block.get("web") if isinstance(block, dict) else block
+    results = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        href = str(item.get("url") or "").strip()
+        if not href:
+            continue
+        raw = item.get("description")
+        results.append({
+            "title": str(item.get("title") or "").strip(),
+            "body": _clean_snippet(raw),
+            "href": href,
+            "date": snippet_date(raw),
+        })
+        if len(results) >= max_results:
+            break
+    return results

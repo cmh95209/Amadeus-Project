@@ -64,7 +64,7 @@ class SourcesTests(unittest.TestCase):
             "kind": "search", "query": "Genshin banner",
             "results": [{"title": "Big news today", "url": "https://news.example/a"},
                         {"title": "Other story", "url": "https://news.example/b"}],
-            "read": "https://news.example/a"}])
+            "read": "https://news.example/a", "engine": None}])
         self.assertEqual(chat.take_turn_sources(), [])   # handed over once
 
     def test_nothing_is_recorded_outside_a_reply(self):

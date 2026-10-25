@@ -660,6 +660,16 @@ class EmptyResultsHonestyTests(unittest.TestCase):
     zero-result search; only the FAILED path carried the honesty instruction).
     The clean zero-result path must now carry the same instruction."""
 
+    # Firecrawl (tried first since 2026-10-25) is "down" here, so the ddgs
+    # path these tests cover is the one that answers.
+    def setUp(self):
+        self._fc = patch.object(chat.websearch, "firecrawl_search",
+                                side_effect=chat.websearch.FirecrawlUnavailable("test"))
+        self._fc.start()
+
+    def tearDown(self):
+        self._fc.stop()
+
     def test_zero_results_carry_the_honesty_instruction(self):
         with patch.object(chat, "_get_search_client",
                           return_value=_FakeSearchClient([])):

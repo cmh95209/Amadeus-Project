@@ -18,6 +18,7 @@ import timing
 import ja_voice
 import speech_text
 import webfetch
+import websearch
 import weather
 import cm_bridge
 
@@ -140,7 +141,8 @@ class AmadeusReply(BaseModel):
 #  When the web-access toggle is ON, Amadeus is given a "web_search" tool
 #  alongside her normal reply format. She decides for herself when she needs
 #  fresh information (news, today's date, current events...). The search runs
-#  locally on this machine via DuckDuckGo - no API key, no cloud account.
+#  through Firecrawl's free keyless search (DuckDuckGo-style `ddgs` as the
+#  backup) - no API key, no cloud account.
 # =============================================================================
 
 WEB_SEARCH_TOOL = {
@@ -187,6 +189,11 @@ PROACTIVE_SEARCH_BLOCK = {
         "never use web_search for them. "
         "Treat search results as hints, not gospel: if a result seems wrong or you are more "
         "confident in your own knowledge, say so honestly. "
+        # 2026-10-25: with ddgs she often presented a years-old article as
+        # today's news. Results now carry a Date line where one is known.
+        "Check each result's Date against today's date before you use it: never present "
+        "old news as new or a past event as upcoming, and when the newest thing you found "
+        "is not recent, say how old it is. "
         # 2026-10-25 (Amadeus-Fresh test): asked to "confirm" web access, she
         # searched for the current time and believed a stale page over her
         # clock ("14:05 UTC, 20 February 2026").
@@ -225,6 +232,12 @@ NO_WEB_BLOCK = {
 # A search was ALWAYS part of the reply time (it runs before she answers); these
 # knobs just make it more likely to succeed within the SAME time it had before,
 # and guarantee it never meaningfully exceeds it.
+#
+# Firecrawl (websearch.py) answers first, in one bounded attempt; the ddgs
+# search below is its fallback and runs on whatever is left of the budget
+# (2026-10-25: ddgs' single engines mostly returned nothing in a live check;
+# only its mixed "auto" mode still answered).
+FIRECRAWL_TIMEOUT = 6           # seconds, Firecrawl's one attempt
 SEARCH_ATTEMPT_TIMEOUT = 8      # seconds, per attempt (passed to DDGS as its timeout)
 SEARCH_TOTAL_BUDGET = 15        # seconds, hard ceiling for the whole search (was 15)
 SEARCH_MIN_RETRY_BUDGET = 5     # seconds; don't start another attempt if less is left
@@ -367,12 +380,89 @@ def _invalidate_search_client(client):
             _SEARCH_CLIENT = None
 
 
+# Closes every result list: old news must not read as new (with ddgs she often
+# presented a years-old article as today's news, 2026-10-25).
+SEARCH_DATE_NOTE = (
+    "(Today is {today}. A \"Date\" line is when that page was published or "
+    "last updated. A result with an older Date or no Date may be old news: never "
+    "call something new, recent, latest or upcoming unless its Date or text shows "
+    "it is recent, and say how old it is when it is not.)")
+
+
+def _format_search_results(results) -> str:
+    """The numbered "title / snippet / [Date] / URL" text the model (and the
+    source parser below) reads - the same for every engine - closed by
+    SEARCH_DATE_NOTE."""
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = (r.get("title") or "").strip()
+        body = (r.get("body") or "").strip()
+        href = (r.get("href") or "").strip()
+        when = (r.get("date") or "").strip()
+        dated = f"Date: {when}\n" if when else ""
+        lines.append(f"{i}. {title}\n{body}\n{dated}URL: {href}")
+    lines.append(SEARCH_DATE_NOTE.format(today=datetime.now().strftime("%Y-%m-%d")))
+    return "\n\n".join(lines)
+
+
+def _firecrawl_call(q: str, timeout: float, freshness=None):
+    """One Firecrawl search; None when it could not answer (logged)."""
+    try:
+        return websearch.firecrawl_search(q, max_results=5, timeout=timeout, freshness=freshness)
+    except websearch.FirecrawlUnavailable as exc:
+        print(f"[Amadeus] Firecrawl search unavailable: {exc}")
+    except Exception as exc:
+        print(f"[Amadeus] Firecrawl search failed: {exc!r}")
+    return None
+
+
+def _firecrawl_results(q: str, freshness, deadline: float) -> list:
+    """Firecrawl's results for `q`; [] when it fails or finds nothing.
+
+    A time-sensitive query (websearch.freshness_for) is first limited to recent
+    pages; when that leaves fewer than two results, an unlimited search tops
+    them up (the recent ones stay first) - but only on time that still leaves
+    the ddgs fallback a full attempt inside the deadline."""
+    results = _firecrawl_call(q, FIRECRAWL_TIMEOUT, freshness)
+    if results is None:
+        return []
+    if freshness and len(results) < 2:
+        spare = deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
+        if spare >= 1.5:
+            more = _firecrawl_call(q, min(FIRECRAWL_TIMEOUT, spare)) or []
+            seen = {r["href"] for r in results}
+            results = (results + [r for r in more if r["href"] not in seen])[:5]
+    if not results:
+        print(f"[Amadeus] Firecrawl found nothing for {q!r}, trying ddgs")
+    return results
+
+
+def _note_search_engine(name) -> None:
+    """Remember which engine answered the latest search in this thread (for
+    the log line and the reply's saved sources)."""
+    _turn.engine = name
+
+
 def _run_web_search(query: str) -> str:
-    """Run a DuckDuckGo search (with a couple of bounded retries) and return
-    compact results for the model. See the SEARCH_* constants above for timing."""
+    """Run a web search and return compact results for the model.
+
+    Firecrawl (websearch.py, keyless) is tried first; when it fails, is slow,
+    finds nothing or is out of free credits, the DuckDuckGo-style `ddgs`
+    search runs (with a couple of bounded retries) on the time that is left.
+    A time-sensitive query is limited to recent pages on both engines.
+    See the SEARCH_* constants above for timing."""
     q = (query or "").strip()
+    _note_search_engine(None)
     if not q:
         return "No web results were found for that query."
+    deadline = time.monotonic() + SEARCH_TOTAL_BUDGET
+    freshness = websearch.freshness_for(q)
+
+    results = _firecrawl_results(q, freshness, deadline)
+    if results:
+        _note_search_engine("firecrawl")
+        return _format_search_results(results)
+
     try:
         from ddgs import DDGS  # noqa: F401  - lazy check; fails fast + clearly
     except Exception as exc:
@@ -382,7 +472,6 @@ def _run_web_search(query: str) -> str:
             "your own knowledge and be honest that you could not verify it online."
         )
 
-    deadline = time.monotonic() + SEARCH_TOTAL_BUDGET
     backoff = SEARCH_BACKOFF_START
     attempt = 0
     last_err = None
@@ -390,8 +479,11 @@ def _run_web_search(query: str) -> str:
         attempt += 1
         # Attempt 1 reuses the warm client (fast). Retries use a fresh connection.
         client = _get_search_client(force_fresh=(attempt > 1))
+        # Attempt 1 of a time-sensitive query asks for recent pages only;
+        # a retry asks without the limit (ddgs reports "no results" as an error).
+        limit = {"timelimit": freshness} if (freshness and attempt == 1) else {}
         try:
-            results = list(client.text(q, max_results=5))
+            results = list(client.text(q, max_results=5, **limit))
         except Exception as exc:
             last_err = exc
             print(f"[Amadeus] Web search attempt {attempt} failed: {exc!r}")
@@ -410,19 +502,16 @@ def _run_web_search(query: str) -> str:
         # the same honesty instruction (2026-10-08: the failed path had it,
         # this one didn't - a model could read "no results" as "I searched"
         # and present its own knowledge as search-verified).
+        if not results and limit and attempt < SEARCH_MAX_ATTEMPTS:
+            continue  # nothing recent: ask again without the time limit
         if not results:
             return (
                 "No web results were found for that query. Answer from your own "
                 "knowledge and be honest that you could not verify it online "
                 "right now. Do not mention any technical details."
             )
-        lines = []
-        for i, r in enumerate(results, 1):
-            title = (r.get("title") or "").strip()
-            body = (r.get("body") or "").strip()
-            href = (r.get("href") or "").strip()
-            lines.append(f"{i}. {title}\n{body}\nURL: {href}")
-        return "\n\n".join(lines)
+        _note_search_engine("ddgs")
+        return _format_search_results(results)
 
     # Exhausted the budget without results. The raw error is logged above for
     # debugging; the model only gets a clean, human instruction (no technical junk).
@@ -472,14 +561,23 @@ def _lookup_ran() -> bool:
     return bool(getattr(_turn, "sources", None))
 
 
-_RESULT_RE = re.compile(r"^\d+\. (.*)\n(?:.*\n)*?URL: (\S+)\s*$", re.MULTILINE)
+_RESULT_RE = re.compile(r"^\d+\. (.*)\n((?:.*\n)*?)URL: (\S+)\s*$", re.MULTILINE)
+_DATE_LINE_RE = re.compile(r"^Date: (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
 
 
 def _parse_search_results(result_text) -> list:
-    """[{"title", "url"}] in rank order from _run_web_search output."""
+    """[{"title", "url"(, "date")}] in rank order from _run_web_search output
+    ("date" only when the result carried a Date line)."""
     if not isinstance(result_text, str):
         return []
-    return [{"title": t.strip(), "url": u} for t, u in _RESULT_RE.findall(result_text)]
+    out = []
+    for title, between, url in _RESULT_RE.findall(result_text):
+        item = {"title": title.strip(), "url": url}
+        dated = _DATE_LINE_RE.search(between)
+        if dated:
+            item["date"] = dated.group(1)
+        out.append(item)
+    return out
 
 
 # Her own searches for the CURRENT time or date are not run: a search engine
@@ -521,9 +619,11 @@ def _web_search_with_content(query: str) -> str:
     if _is_clock_query(query):
         print(f"[Amadeus] Web search skipped (clock query - her RIGHT NOW note has it): {query!r}")
         return CLOCK_SEARCH_SKIPPED
+    _note_search_engine(None)
     text = _run_web_search(query)
     results = _parse_search_results(text)
-    source = {"kind": "search", "query": query, "results": results[:5], "read": None}
+    source = {"kind": "search", "query": query, "results": results[:5], "read": None,
+              "engine": getattr(_turn, "engine", None)}
     _record_source(source)
     urls = [r["url"] for r in results] or _extract_search_urls(text)
     try:
@@ -543,7 +643,7 @@ def _web_search_with_content(query: str) -> str:
     except Exception as exc:
         print(f"[Amadeus] Page fetch for '{query}' failed: {exc!r}")
     finally:
-        print(f"[Amadeus] Web search: {query!r} -> {len(results)} result(s)"
+        print(f"[Amadeus] Web search ({source['engine'] or 'none'}): {query!r} -> {len(results)} result(s)"
               + (f"; read {source['read']}" if source["read"] else ""))
     return text
 
