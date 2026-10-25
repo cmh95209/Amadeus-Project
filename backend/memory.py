@@ -2532,10 +2532,18 @@ def sources_for_ui(sources) -> list:
                 if r.get("date"):
                     item["date"] = str(r["date"])[:10]
                 results.append(item)
-            out.append({"kind": "search",
-                        "query": str(entry.get("query") or "")[:_SOURCE_TEXT_MAX],
-                        "results": results,
-                        "read": _safe_link(entry.get("read")) or None})
+            item = {"kind": "search",
+                    "query": str(entry.get("query") or "")[:_SOURCE_TEXT_MAX],
+                    "results": results,
+                    "read": _safe_link(entry.get("read")) or None}
+            # Reader mode: the pages that gave notes; a lookup's saved notes
+            # used again (2026-10-25).
+            used = [u for u in (_safe_link(x) for x in entry.get("used") or []) if u]
+            if used:
+                item["used"] = used
+            if entry.get("reused"):
+                item["reused"] = True
+            out.append(item)
         elif kind == "weather":
             out.append({"kind": "weather",
                         "place": str(entry.get("place") or "")[:_SOURCE_TEXT_MAX],
@@ -2810,6 +2818,7 @@ def reset_memory(conversation_id=None) -> None:
     _ensure_messages_table(c)
 
     c.execute("DELETE FROM messages WHERE conversation_id = ?", (conv,))
+    _delete_lookups(c, "conversation_id = ?", (conv,))
 
     conn.commit()
     conn.close()
@@ -2824,6 +2833,119 @@ def set_message_audio(message_id: int, audio_path: str) -> None:
     c.execute("UPDATE messages SET audio = ? WHERE id = ?", (audio_path, message_id))
     conn.commit()
     conn.close()
+
+
+# ---------- WEB LOOKUPS (her lookup memory, 2026-10-25) ----------
+# Every web search she makes is kept per chat: the query, the results (titles,
+# links, dates), the pages read and the notes taken from them. A follow-up
+# question later in the chat can then use the saved notes (instant, no
+# network) or re-read the saved pages, instead of searching from scratch or
+# answering from memory. Deleted with their chat / message / a memory reset.
+def _ensure_lookups_table(c: sqlite3.Cursor) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS web_lookups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            message_id INTEGER,
+            turn INTEGER,
+            created_at TEXT NOT NULL,
+            query TEXT NOT NULL,
+            engine TEXT,
+            mode TEXT,
+            results TEXT,
+            pages TEXT,
+            excerpt TEXT
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS web_lookups_conv ON web_lookups (conversation_id, id)")
+
+
+def _delete_lookups(c: sqlite3.Cursor, where: str, params) -> None:
+    _ensure_lookups_table(c)
+    c.execute("DELETE FROM web_lookups WHERE " + where, params)
+
+
+# pre: pages = [{"url", "title", "date", "notes"}] (notes None = not useful)
+# post: a new lookup row for the chat; returns its id (her "#n")
+def save_lookup(conversation_id: int, turn: int, query: str, engine, mode,
+                results: list, pages: list, excerpt: str = "") -> int:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        c.execute(
+            "INSERT INTO web_lookups (conversation_id, turn, created_at, query, engine, "
+            "mode, results, pages, excerpt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(conversation_id), int(turn or 0),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(query or "")[:500],
+             engine, mode, json.dumps(results or [], ensure_ascii=False),
+             json.dumps(pages or [], ensure_ascii=False), (excerpt or "")[:6000]))
+        new_id = c.lastrowid
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def _lookup_row(row) -> dict:
+    lid, conv, mid, turn, created, query, engine, mode, results, pages, excerpt = row
+
+    def _list(raw):
+        try:
+            value = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            return []
+        return value if isinstance(value, list) else []
+    return {"id": lid, "conversation_id": conv, "message_id": mid, "turn": turn,
+            "created_at": created, "query": query, "engine": engine, "mode": mode,
+            "results": _list(results), "pages": _list(pages), "excerpt": excerpt or ""}
+
+
+_LOOKUP_COLUMNS = ("id, conversation_id, message_id, turn, created_at, query, engine, "
+                   "mode, results, pages, excerpt")
+
+
+# post: the lookup as a dict, or None when it does not exist
+def load_lookup(lookup_id: int):
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        row = c.execute("SELECT " + _LOOKUP_COLUMNS + " FROM web_lookups WHERE id = ?",
+                        (int(lookup_id),)).fetchone()
+    finally:
+        conn.close()
+    return _lookup_row(row) if row else None
+
+
+# post: the chat's newest lookups, newest first
+def recent_lookups(conversation_id: int, limit: int = 5) -> list:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        rows = c.execute("SELECT " + _LOOKUP_COLUMNS + " FROM web_lookups "
+                         "WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+                         (int(conversation_id), int(limit))).fetchall()
+    finally:
+        conn.close()
+    return [_lookup_row(r) for r in rows]
+
+
+# post: the lookups behind a reply point at it (deleted with it later)
+def link_lookups(lookup_ids, message_id: int) -> None:
+    ids = [int(i) for i in lookup_ids or [] if isinstance(i, int)]
+    if not ids:
+        return
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        c.executemany("UPDATE web_lookups SET message_id = ? WHERE id = ? AND message_id IS NULL",
+                      [(int(message_id), i) for i in ids])
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # pre: sources is the list chat.take_turn_sources() handed back for the reply
@@ -2841,6 +2963,7 @@ def set_message_sources(message_id: int, sources: list) -> None:
         conn.commit()
     finally:
         conn.close()
+    link_lookups([e.get("lookup_id") for e in sources if isinstance(e, dict)], message_id)
 
 
 # post: the reply's saved sources ([] when none or unreadable). Never modifies memory.
@@ -2888,6 +3011,7 @@ def delete_message(message_id: int) -> bool:
     _ensure_messages_table(c)
     c.execute("DELETE FROM messages WHERE id = ?", (message_id,))
     ok = c.rowcount > 0
+    _delete_lookups(c, "message_id = ?", (message_id,))
     conn.commit()
     conn.close()
     return ok
@@ -3041,6 +3165,7 @@ def undo_last_assistant(conversation_id=None):
     # The first version is viewed (or it is the only one): remove the whole turn.
     for mid in turn:
         c.execute("DELETE FROM messages WHERE id = ?", (mid,))
+        _delete_lookups(c, "message_id = ?", (mid,))
     conn.commit()
     conn.close()
     return {"action": "deleted", "deleted_id": turn[-1], "deleted_ids": turn}
@@ -3224,6 +3349,7 @@ def delete_conversation(conversation_id: int) -> bool:
         raise ValueError("Cannot delete the last conversation")
     c.execute("DELETE FROM conversations WHERE id = ?", (conv,))
     c.execute("DELETE FROM messages WHERE conversation_id = ?", (conv,))
+    _delete_lookups(c, "conversation_id = ?", (conv,))
     active_saved: int | None = None
     try:
         active_saved = int((load_active_conversation_raw() or "").strip())

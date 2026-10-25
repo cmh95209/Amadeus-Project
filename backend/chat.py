@@ -540,13 +540,17 @@ def _extract_search_urls(result_text) -> list:
 _turn = threading.local()
 
 
-def _begin_turn_sources() -> None:
+def _begin_turn_sources(conversation_id=None) -> None:
     _turn.sources = []
+    # The chat this reply belongs to: lookups are saved / reused only inside
+    # a real reply (searches outside one - tests, tools - leave no trace).
+    _turn.conversation = conversation_id
 
 
 def take_turn_sources() -> list:
     sources = getattr(_turn, "sources", None) or []
     _turn.sources = None
+    _turn.conversation = None
     return sources
 
 
@@ -710,11 +714,11 @@ def _site_list(pages) -> str:
     return ", ".join(webreader._site(p["url"]) for p in pages)
 
 
-def _read_results(query: str, results: list, source: dict) -> str:
-    """Read the result pages (reader or quick mode) -> the text appended after
-    the search results ("" when nothing could be read). Fills the source's
-    "read" (the page she relied on), "used" (pages that gave notes) and
-    "mode"."""
+def _read_results(query: str, results: list, source: dict):
+    """Read the result pages (reader or quick mode) -> (the text appended after
+    the search results, "" when nothing could be read; the pages read). Fills
+    the source's "read" (the page she relied on), "used" (pages that gave
+    notes) and "mode"."""
     mode, parallel, pin, local = web_reading_plan()
     deadline = time.monotonic() + (READ_BUDGET_LOCAL if local else READ_BUDGET_CLOUD)
     question = getattr(_turn, "question", "") or ""
@@ -729,7 +733,7 @@ def _read_results(query: str, results: list, source: dict) -> str:
         max_tries=webreader.MAX_TRIES if mode == "reader" else 2)
     source["mode"] = mode
     if not pages:
-        return ""
+        return "", []
     _progress("reading", "Reading " + _site_list(pages) + "...")
     if mode == "reader":
         today = datetime.now().strftime("%Y-%m-%d")
@@ -739,19 +743,225 @@ def _read_results(query: str, results: list, source: dict) -> str:
         source["used"] = [p["url"] for p in used]
         if used:
             source["read"] = used[0]["url"]
-            return webreader.notes_block(pages)
+            return webreader.notes_block(pages), pages
         if any(p["status"] == "none" for p in pages):
             source["read"] = None
-            return ("(The pages that were read did not answer this. Say so honestly "
-                    "instead of guessing.)")
+            return (PAGES_DID_NOT_ANSWER, pages)
         print("[Amadeus] Reader calls gave nothing in time - quick reading instead.")
         source["mode"] = "quick"
     source["read"] = pages[0]["url"]
     source["used"] = [pages[0]["url"]]
-    return webreader.quick_block(pages[0], query, question, page_chars)
+    return webreader.quick_block(pages[0], query, question, page_chars), pages[:1]
 
 
-def _web_search_with_content(query: str) -> str:
+PAGES_DID_NOT_ANSWER = ("(The pages that were read did not answer this. Say so honestly "
+                        "instead of guessing.)")
+
+
+# --- Lookup memory (2026-10-25) ------------------------------------------------
+# Every search is saved per chat (memory.save_lookup). A later search for the
+# same thing in the same chat uses the saved notes while they are fresh
+# (no network, no credits; "Checking my notes from earlier"); she also sees a
+# short index of the chat's lookups and can reopen one with reread_lookup -
+# old notes on a time-sensitive topic are re-checked by re-reading the saved
+# pages, and only when that fails is the web searched again.
+LOOKUP_INDEX_SIZE = 5
+LOOKUP_REUSE_OVERLAP = 0.6   # share of query terms two searches must have in common
+# How long saved notes count as fresh, by how time-sensitive the query is
+# (websearch.freshness_for: past day / week / month / not time-sensitive).
+LOOKUP_FRESH_SECONDS = {"d": 6 * 3600, "w": 24 * 3600, "m": 7 * 86400, None: 30 * 86400}
+_AGAIN_RE = re.compile(
+    r"\b(again|re-?check|re-?search|refresh|look (it|that) up again|search again)\b"
+    r"|もう一度|もう一回|再検索|改めて|再度", re.IGNORECASE)
+
+REREAD_LOOKUP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "reread_lookup",
+        "description": (
+            "Reopen one of your EARLIER LOOKUPS in this chat (your saved notes from a "
+            "web search you already made) instead of searching again. Use it when the "
+            "user asks a follow-up about something you looked up before. The app "
+            "re-checks the pages if the notes are too old."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lookup": {"type": "integer", "description": "The lookup's number (#n)."},
+            },
+            "required": ["lookup"],
+        },
+    },
+}
+
+
+def _lookup_conversation():
+    return getattr(_turn, "conversation", None) if getattr(_turn, "sources", None) is not None else None
+
+
+def _lookup_age_seconds(lookup) -> float:
+    try:
+        made = datetime.strptime(lookup.get("created_at", ""), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return float("inf")
+    return max(0.0, (datetime.now() - made).total_seconds())
+
+
+def _age_text(seconds: float) -> str:
+    if seconds == float("inf"):
+        return "some time ago"
+    minutes = int(seconds // 60)
+    if minutes < 2:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} minutes ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _lookup_is_fresh(lookup) -> bool:
+    limit = LOOKUP_FRESH_SECONDS.get(websearch.freshness_for(lookup.get("query", "")),
+                                     LOOKUP_FRESH_SECONDS[None])
+    return _lookup_age_seconds(lookup) <= limit
+
+
+def _lookup_sites(lookup) -> str:
+    pages = [p for p in lookup.get("pages") or [] if p.get("notes")] or lookup.get("pages") or []
+    sites = [webreader._site(p.get("url")) for p in pages[:3]]
+    return ", ".join(sites)
+
+
+def _recent_lookups():
+    conv = _lookup_conversation()
+    if conv is None:
+        return []
+    try:
+        return store.recent_lookups(conv, LOOKUP_INDEX_SIZE)
+    except Exception as exc:
+        print(f"[Amadeus] Could not read the chat's lookups: {exc!r}")
+        return []
+
+
+def _lookup_index_message():
+    """EARLIER LOOKUPS: one short line per recent lookup in this chat, or None."""
+    lookups = _recent_lookups()
+    if not lookups:
+        return None
+    lines = []
+    for lk in lookups:
+        sites = _lookup_sites(lk)
+        lines.append(f"#{lk['id']} (turn {lk.get('turn') or 0}, "
+                     f"{_age_text(_lookup_age_seconds(lk))}): \"{lk['query']}\""
+                     + (f" - {sites}" if sites else ""))
+    return {"role": "system", "content": (
+        "EARLIER LOOKUPS in this chat (web searches you already made; your notes are "
+        "saved). For a follow-up about one of them, call reread_lookup with its number "
+        "instead of searching again:\n" + "\n".join(lines))}
+
+
+def _lookup_text(lookup, why: str) -> str:
+    """Saved notes (or the saved excerpt) of a lookup, for her prompt."""
+    age = _age_text(_lookup_age_seconds(lookup))
+    head = (f"Your saved notes from lookup #{lookup['id']} (turn {lookup.get('turn') or 0}, "
+            f"{age}) for '{lookup['query']}' - {why}:")
+    pages = [dict(p, rank=p.get("rank") or i + 1) for i, p in enumerate(lookup.get("pages") or [])]
+    body = webreader.notes_block(pages)
+    if not body and lookup.get("excerpt"):
+        body = webreader.wrap_web_data(lookup["excerpt"])
+    if not body:
+        body = PAGES_DID_NOT_ANSWER
+    return (head + "\n" + body + "\n\n" + SEARCH_DATE_NOTE.format(
+        today=datetime.now().strftime("%Y-%m-%d")))
+
+
+def _record_reused(lookup) -> None:
+    pages = lookup.get("pages") or []
+    used = [p["url"] for p in pages if p.get("notes")] or [p["url"] for p in pages[:1] if p.get("url")]
+    _record_source({"kind": "search", "query": lookup["query"],
+                    "results": lookup.get("results") or [], "read": used[0] if used else None,
+                    "used": used, "engine": lookup.get("engine"), "mode": lookup.get("mode"),
+                    "reused": True, "lookup_id": lookup["id"]})
+
+
+def _matching_lookup(query: str):
+    """A fresh lookup in this chat for (nearly) the same search, or None.
+    Never when the user asks to check again."""
+    if _AGAIN_RE.search(query or "") or _AGAIN_RE.search(getattr(_turn, "question", "") or ""):
+        return None
+    wanted = webreader.terms(query)
+    if not wanted:
+        return None
+    for lk in _recent_lookups():
+        got = webreader.terms(lk.get("query", ""))
+        if not got:
+            continue
+        overlap = len(wanted & got) / len(wanted | got)
+        if overlap >= LOOKUP_REUSE_OVERLAP and _lookup_is_fresh(lk):
+            return lk
+    return None
+
+
+def _save_lookup(query, source, results, pages, extra) -> None:
+    conv = _lookup_conversation()
+    if conv is None:
+        return
+    try:
+        saved_pages = [{"url": p["url"], "title": p.get("title", ""), "date": p.get("date", ""),
+                        "rank": p.get("rank"), "notes": p.get("notes")} for p in pages or []]
+        excerpt = extra if source.get("mode") == "quick" else ""
+        source["lookup_id"] = store.save_lookup(
+            conv, store.current_turn(conv), query, source.get("engine"), source.get("mode"),
+            results, saved_pages, excerpt)
+    except Exception as exc:
+        print(f"[Amadeus] Could not save the lookup for '{query}': {exc!r}")
+
+
+def _reread_lookup(lookup_id) -> str:
+    """reread_lookup: the saved notes when fresh; old notes on a time-sensitive
+    topic -> re-read the saved pages; nothing usable -> a fresh search."""
+    try:
+        lookup = store.load_lookup(int(lookup_id))
+    except (TypeError, ValueError):
+        lookup = None
+    conv = _lookup_conversation()
+    if not lookup or (conv is not None and lookup.get("conversation_id") != conv):
+        return (f"(There is no lookup #{lookup_id} in this chat. Use web_search if you "
+                "need to look something up.)")
+    if _lookup_is_fresh(lookup):
+        _progress("notes", "Checking my notes from earlier...")
+        _record_reused(lookup)
+        print(f"[Amadeus] Lookup #{lookup['id']} reused (fresh): {lookup['query']!r}")
+        return _lookup_text(lookup, "still fresh")
+    # Old notes on a time-sensitive topic: read the saved pages again.
+    urls = [p["url"] for p in lookup.get("pages") or [] if p.get("url")]
+    results = [r for r in lookup.get("results") or [] if r.get("url")]
+    source = {"kind": "search", "query": lookup["query"], "results": results[:5],
+              "read": None, "engine": lookup.get("engine"), "rechecked": lookup["id"]}
+    _record_source(source)
+    if urls or results:
+        _progress("reading", "Re-reading " + ", ".join(webreader._site(u) for u in urls[:3]) + "...")
+        ordered = ([r for r in results if r["url"] in urls]
+                   + [r for r in results if r["url"] not in urls]) or [{"url": u} for u in urls]
+        try:
+            extra, pages = _read_results(lookup["query"], ordered, source)
+        except Exception as exc:
+            print(f"[Amadeus] Re-reading lookup #{lookup['id']} failed: {exc!r}")
+            extra, pages = "", []
+        if extra and extra != PAGES_DID_NOT_ANSWER:
+            _save_lookup(lookup["query"], source, results, pages, extra)
+            _progress("thinking", "Amadeus is thinking...")
+            return (f"Your lookup #{lookup['id']} for '{lookup['query']}' was "
+                    f"{_age_text(_lookup_age_seconds(lookup))}, so the pages were read again "
+                    "just now:\n" + extra + "\n\n" + SEARCH_DATE_NOTE.format(
+                        today=datetime.now().strftime("%Y-%m-%d")))
+    # Nothing usable: search afresh.
+    return _web_search_with_content(lookup["query"], allow_reuse=False)
+
+
+def _web_search_with_content(query: str, allow_reuse: bool = True) -> str:
     """web_search plus reading the result pages (reader or quick mode).
 
     Returns the search results, then the notes from the pages (reader mode) or
@@ -760,11 +970,20 @@ def _web_search_with_content(query: str) -> str:
     defensive: if nothing can be read, the plain results come back unchanged,
     so a fetch or reader problem can never break or hang the reply. A pure
     clock query is not searched at all (CLOCK_SEARCH_SKIPPED). Each search is
-    logged and recorded as a source.
+    logged, recorded as a source and saved as a lookup; a fresh lookup for the
+    same search in this chat is used instead of searching again.
     """
     if _is_clock_query(query):
         print(f"[Amadeus] Web search skipped (clock query - her RIGHT NOW note has it): {query!r}")
         return CLOCK_SEARCH_SKIPPED
+    reuse = _matching_lookup(query) if allow_reuse else None
+    if reuse:
+        _progress("notes", "Checking my notes from earlier...")
+        _record_reused(reuse)
+        print(f"[Amadeus] Web search {query!r}: using lookup #{reuse['id']} "
+              f"({reuse['query']!r}, {_age_text(_lookup_age_seconds(reuse))}) instead")
+        _progress("thinking", "Amadeus is thinking...")
+        return _lookup_text(reuse, "the same search, still fresh")
     _note_search_engine(None)
     _progress("searching", f'Searching the web: "{query}"')
     text = _run_web_search(query)
@@ -774,14 +993,17 @@ def _web_search_with_content(query: str) -> str:
     _record_source(source)
     if results:
         _progress("found", f"Found {len(results)} page{'s' if len(results) != 1 else ''}")
+    extra, pages = "", []
     try:
         if results:
-            extra = _read_results(query, results, source)
+            extra, pages = _read_results(query, results, source)
             if extra:
                 return text + "\n\n---\n\n" + extra
     except Exception as exc:
         print(f"[Amadeus] Reading the pages for '{query}' failed: {exc!r}")
     finally:
+        if results:
+            _save_lookup(query, source, results, pages, extra)
         print(f"[Amadeus] Web search ({source['engine'] or 'none'}, "
               f"{source.get('mode', '-')}): {query!r} -> {len(results)} result(s)"
               + (f"; read {source['read']}" if source["read"] else "")
@@ -2513,7 +2735,9 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     """
     pack_tool = convert_to_openai_tool(AmadeusPack)
     convo = list(messages)
-    tool_llm = llm.bind_tools([pack_tool, WEB_SEARCH_TOOL], tool_choice="required")
+    # reread_lookup only when this chat has earlier lookups to reopen.
+    tools = [pack_tool, WEB_SEARCH_TOOL] + ([REREAD_LOOKUP_TOOL] if _recent_lookups() else [])
+    tool_llm = llm.bind_tools(tools, tool_choice="required")
 
     # The search-judgement calls use her replies' client, which already
     # carries the Settings -> Reasoning level (replaced the separate Deep
@@ -2726,10 +2950,15 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         # with AmadeusPack. This keeps web search working across model families.
         searches = []
         for call in calls:
-            query = (call.get("args") or {}).get("query", "")
+            args = call.get("args") or {}
+            query = args.get("query", "")
             if call.get("name") == "web_search":
                 search_ran = True
                 searches.append((query, _web_search_with_content(query)))
+            elif call.get("name") == "reread_lookup":
+                search_ran = True
+                lid = args.get("lookup", args.get("id"))
+                searches.append((f"your lookup #{lid}", _reread_lookup(lid)))
             else:
                 searches.append((query, "Unknown tool."))
 
@@ -3638,7 +3867,8 @@ def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
 
 def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     llm = _reply_llm()
-    _begin_turn_sources()   # this reply's searches (saved with its row)
+    # This reply's searches (saved with its row) + the chat its lookups go to.
+    _begin_turn_sources(store.load_active_conversation())
 
     web_on = store.load_web_access()
     # Local model, web off: her Japanese line as plain text + the English line
@@ -3663,11 +3893,16 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     except Exception:
         memory_block = None
 
+    # Her earlier lookups in this chat (web ON): a few short lines in the
+    # changing part, so the built-in model's reused prompt is untouched.
+    lookup_index = _lookup_index_message() if web_on else None
+
     messages = _ordered_prompt(
         pack_rules,
         PROACTIVE_SEARCH_BLOCK if web_on else NO_WEB_BLOCK,
         book_messages
         + ([memory_block] if memory_block else [])
+        + ([lookup_index] if lookup_index else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
         right_now=_right_now_note(),

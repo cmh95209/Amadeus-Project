@@ -416,6 +416,7 @@ class SourcesForUiTests(unittest.TestCase):
     def test_only_web_links_get_through(self):
         shown = store.sources_for_ui([
             {"kind": "search", "query": "q", "engine": "firecrawl", "read": "javascript:alert(1)",
+             "used": ["https://ok.example/a", "javascript:x"], "reused": True,
              "results": [{"title": "ok", "url": "https://ok.example/a", "date": "2026-10-24"},
                          {"title": "bad", "url": "javascript:alert(1)"},
                          {"title": "file", "url": "file:///C:/secret"},
@@ -424,7 +425,8 @@ class SourcesForUiTests(unittest.TestCase):
             {"kind": "something-else"}, "junk", None])
         self.assertEqual(shown, [
             {"kind": "search", "query": "q", "read": None,
-             "results": [{"title": "ok", "url": "https://ok.example/a", "date": "2026-10-24"}]},
+             "results": [{"title": "ok", "url": "https://ok.example/a", "date": "2026-10-24"}],
+             "used": ["https://ok.example/a"], "reused": True},
             {"kind": "weather", "place": "Tokyo", "url": "https://open-meteo.com/"}])
 
     def test_garbage_is_an_empty_list(self):
