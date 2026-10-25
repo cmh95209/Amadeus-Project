@@ -1821,6 +1821,10 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
     _add_column(c, "messages", "greeting_kind", "TEXT")
     _add_column(c, "messages", "greeting_from", "INTEGER")
     _add_column(c, "messages", "greeting_group", "INTEGER")
+    # The web sources a reply was written from (2026-10-25): a JSON list of
+    # searches (query, result titles + links, the page read) and live-weather
+    # fetches; NULL = none. Saved now so a later version can show her links.
+    _add_column(c, "messages", "sources", "TEXT")
 
     # Migrate pre-session databases: fold everything into one conversation.
     _ensure_conversations(c)
@@ -2689,6 +2693,40 @@ def set_message_audio(message_id: int, audio_path: str) -> None:
     c.execute("UPDATE messages SET audio = ? WHERE id = ?", (audio_path, message_id))
     conn.commit()
     conn.close()
+
+
+# pre: sources is the list chat.take_turn_sources() handed back for the reply
+#      stored as message_id (each entry a small JSON-safe dict)
+# post: saved in the row's sources column; an empty list stores nothing
+def set_message_sources(message_id: int, sources: list) -> None:
+    if not sources:
+        return
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        c.execute("UPDATE messages SET sources = ? WHERE id = ?",
+                  (json.dumps(sources, ensure_ascii=False), int(message_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# post: the reply's saved sources ([] when none or unreadable). Never modifies memory.
+def load_message_sources(message_id: int) -> list:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute("SELECT sources FROM messages WHERE id = ?",
+                        (int(message_id),)).fetchone()
+    finally:
+        conn.close()
+    try:
+        value = json.loads(row[0]) if row and row[0] else []
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 # pre: message_id may or may not exist

@@ -86,6 +86,7 @@ class TemporalContextTests(unittest.TestCase):
             # machine must not ingest test turns.
             scope = {'store': store, 'AmadeusPack': object, 'getResponsePacked': respond,
                      'maybe_schedule_trust_rescore': lambda: None,
+                     'take_turn_sources': lambda: [],   # this reply searched nothing
                      'cm_bridge': SimpleNamespace(save_turn=lambda *a, **k: None)}
             exec(compile(ast.Module(body=[function], type_ignores=[]), 'chat.py', 'exec'), scope)
             with patch.object(store, 'load_internal_context', side_effect=lambda: original_context(now)):

@@ -186,7 +186,14 @@ PROACTIVE_SEARCH_BLOCK = {
         "Weather and air-quality questions are answered automatically from live data - "
         "never use web_search for them. "
         "Treat search results as hints, not gospel: if a result seems wrong or you are more "
-        "confident in your own knowledge, say so honestly."
+        "confident in your own knowledge, say so honestly. "
+        # 2026-10-25 (Amadeus-Fresh test): asked to "confirm" web access, she
+        # searched for the current time and believed a stale page over her
+        # clock ("14:05 UTC, 20 February 2026").
+        "The current date and time are in your RIGHT NOW note - always use those; never "
+        "search for them, and if a search result shows a different date or time, your "
+        "RIGHT NOW note is right. Never say you looked something up, checked online or "
+        "have “the latest data” unless you actually ran web_search in this reply."
     ),
 }
 
@@ -434,6 +441,73 @@ def _extract_search_urls(result_text) -> list:
     return re.findall(r"^URL:\s*(\S+)\s*$", result_text, re.MULTILINE)
 
 
+# --- The reply's sources (2026-10-25) -----------------------------------------
+# Every web search and live-weather fetch made while ONE reply is written is
+# collected here (query, result titles + links, the page actually read), then
+# saved with the reply's row (memory.set_message_sources) - the base for
+# showing her links in the chat later. Per thread: a reply is written start
+# to finish in one request thread (getResponsePacked begins the list,
+# take_turn_sources hands it over and ends it).
+_turn = threading.local()
+
+
+def _begin_turn_sources() -> None:
+    _turn.sources = []
+
+
+def take_turn_sources() -> list:
+    sources = getattr(_turn, "sources", None) or []
+    _turn.sources = None
+    return sources
+
+
+def _record_source(entry: dict) -> None:
+    sources = getattr(_turn, "sources", None)
+    if sources is not None:
+        sources.append(entry)
+
+
+def _lookup_ran() -> bool:
+    """Did this reply search the web or fetch live data (so far)?"""
+    return bool(getattr(_turn, "sources", None))
+
+
+_RESULT_RE = re.compile(r"^\d+\. (.*)\n(?:.*\n)*?URL: (\S+)\s*$", re.MULTILINE)
+
+
+def _parse_search_results(result_text) -> list:
+    """[{"title", "url"}] in rank order from _run_web_search output."""
+    if not isinstance(result_text, str):
+        return []
+    return [{"title": t.strip(), "url": u} for t, u in _RESULT_RE.findall(result_text)]
+
+
+# Her own searches for the CURRENT time or date are not run: a search engine
+# returns stale clock pages, and she believed one over the clock in her
+# RIGHT NOW note (2026-10-25). Only a pure "what time / date is it" query is
+# caught - "current time in Kuala Lumpur" names a place and still searches.
+_CLOCK_QUERY_RE = re.compile(
+    r"\b(current|today'?s?|what)\s+(local\s+)?(time|date|day)\b|\btime\s+now\b"
+    r"|\bwhat\s+time\s+is\s+it\b|\bdate\s+today\b"
+    r"|今何時|現在(の)?時刻|現在時刻|今日の日付|今日は何日|何曜日|今の時間",
+    re.IGNORECASE)
+_CLOCK_FILLER_RE = re.compile(
+    r"\b(current|currently|today'?s?|what|is|it|the|right|now|local|time|date|day|"
+    r"utc|gmt|clock|exact|precise|of|and|year|month|in|my|zone|timezone|"
+    r"standard|coordinated|universal)\b|[?？!.,、。\s]|何曜日|何日|何時|今日|今|現在|時刻|時間|日付|の|は|です|か",
+    re.IGNORECASE)
+CLOCK_SEARCH_SKIPPED = (
+    "(No search was run: the current date and time are already in your RIGHT "
+    "NOW note - use those. Do not say you looked them up.)")
+
+
+def _is_clock_query(query) -> bool:
+    q = (query or "").strip()
+    if not q or not _CLOCK_QUERY_RE.search(q):
+        return False
+    return not _CLOCK_FILLER_RE.sub("", q).strip()
+
+
 def _web_search_with_content(query: str) -> str:
     """web_search plus an automatic read of the top result page.
 
@@ -441,26 +515,36 @@ def _web_search_with_content(query: str) -> str:
     appended when it can be fetched - the numbers, the details - instead of a
     one-line snippet. Bounded (time + size) and fully defensive: if nothing can
     be read, the plain snippets come back unchanged, so a fetch problem can
-    never break or hang the reply.
+    never break or hang the reply. A pure clock query is not searched at all
+    (CLOCK_SEARCH_SKIPPED). Each search is logged and recorded as a source.
     """
+    if _is_clock_query(query):
+        print(f"[Amadeus] Web search skipped (clock query - her RIGHT NOW note has it): {query!r}")
+        return CLOCK_SEARCH_SKIPPED
     text = _run_web_search(query)
-    urls = _extract_search_urls(text)
-    if not urls:
-        return text
+    results = _parse_search_results(text)
+    source = {"kind": "search", "query": query, "results": results[:5], "read": None}
+    _record_source(source)
+    urls = [r["url"] for r in results] or _extract_search_urls(text)
     try:
-        budget = webfetch.char_budget(store.effective_context_budget())
-        deadline = time.monotonic() + FETCH_TOTAL_BUDGET
-        for url in urls[:FETCH_MAX_URLS]:
-            if time.monotonic() >= deadline:
-                break
-            per = max(1, int(min(FETCH_TIMEOUT, deadline - time.monotonic())))
-            status, page = webfetch.fetch_page_text(url, max_chars=budget, timeout=per)
-            if status == "ok":
-                return (text + "\n\n---\n\n"
-                        "Full readable content of the top result:\n" + page)
-            # blocked / empty / error / unsafe -> try the next result
+        if urls:
+            budget = webfetch.char_budget(store.effective_context_budget())
+            deadline = time.monotonic() + FETCH_TOTAL_BUDGET
+            for url in urls[:FETCH_MAX_URLS]:
+                if time.monotonic() >= deadline:
+                    break
+                per = max(1, int(min(FETCH_TIMEOUT, deadline - time.monotonic())))
+                status, page = webfetch.fetch_page_text(url, max_chars=budget, timeout=per)
+                if status == "ok":
+                    source["read"] = url
+                    return (text + "\n\n---\n\n"
+                            "Full readable content of the top result:\n" + page)
+                # blocked / empty / error / unsafe -> try the next result
     except Exception as exc:
         print(f"[Amadeus] Page fetch for '{query}' failed: {exc!r}")
+    finally:
+        print(f"[Amadeus] Web search: {query!r} -> {len(results)} result(s)"
+              + (f"; read {source['read']}" if source["read"] else ""))
     return text
 
 
@@ -1578,11 +1662,19 @@ _SEARCH_REFUSAL_EN = (
     "don't have access", "don't actually have the capability",
     "can't access the web", "can't look it up", "couldn't look it up",
     "couldn't actually finish the search", "without web access",
+    # "switched off" wordings (2026-10-25, Amadeus-Fresh: "my web search
+    # function is currently turned off" was not recognised)
+    "search is off", "search is currently off", "search is turned off",
+    "search is currently turned off", "search function is turned off",
+    "search function is currently turned off", "search function is off",
+    "web access is off", "web access is currently off", "web access is turned off",
 )
 _SEARCH_REFUSAL_JA = (
     "検索できない", "検索は使えない", "検索を使えない", "検索ができません",
     "ウェブがオフ", "ウェブ検索は使えない", "ウェブ検索が使えない",
     "検索を最後までできなかった", "アクセスできない",
+    "検索機能はオフ", "検索機能がオフ", "検索はオフ", "検索がオフ",
+    "アクセスはオフ", "アクセスがオフ",
 )
 
 
@@ -1598,6 +1690,15 @@ def _recent_search_refusal(messages) -> bool:
                 or any(p in a for p in _SEARCH_REFUSAL_JA)):
             return True
     return False
+
+
+def _last_reply_refused_search(messages) -> bool:
+    """True when her most recent reply said she cannot search."""
+    last = next((m.get("content", "") for m in reversed(messages)
+                 if m.get("role") == "assistant"
+                 and isinstance(m.get("content"), str)), "")
+    return bool(last) and (any(p in last.lower() for p in _SEARCH_REFUSAL_EN)
+                           or any(p in last for p in _SEARCH_REFUSAL_JA))
 
 
 _RETRY_INTENT_RE = re.compile(
@@ -1824,6 +1925,68 @@ def _web_on_false_refusal_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPac
         print("[Amadeus] Web ON: rewrite still refuses - serving the original.")
     return pack
 
+# --- Web-ON pretend-lookup net (2026-10-25) --------------------------------------
+# The opposite of the false-refusal net above: web access is ON, but nothing
+# was searched or fetched for this reply, and the reply still says it looked
+# something up ("according to the latest data..."). ONE corrective rewrite;
+# if that still claims a lookup, a short honest line replaces it.
+_LOOKUP_CLAIM_EN = (
+    "search result", "i searched", "i've searched", "i looked it up", "i looked up",
+    "i've looked", "the latest data", "latest information", "according to the data",
+    "checked online", "i found online", "based on my search", "my search show",
+    "i just pulled", "i just ran a search", "i just performed a search",
+)
+_LOOKUP_CLAIM_JA = (
+    "検索結果", "検索した", "検索してみた", "調べたところ", "調べてみた", "調べた結果",
+    "最新のデータ", "最新の情報によると", "ネットで確認", "ネットで調べ",
+)
+
+
+def _claims_lookup(pack: "AmadeusPack") -> bool:
+    eng = (pack.assistant_reply_ENG or "").lower()
+    jps = pack.assistant_reply_JPS or ""
+    return (any(p in eng for p in _LOOKUP_CLAIM_EN)
+            or any(p in jps for p in _LOOKUP_CLAIM_JA))
+
+
+def _honest_no_lookup_pack() -> "AmadeusPack":
+    return AmadeusPack(
+        assistant_reply_JPS=("ごめんなさい、今のは実際に調べた答えじゃなかったわ。"
+                             "何を調べてほしいか言ってくれたら、ちゃんと検索するから。"),
+        assistant_reply_ENG=("Sorry - that wasn't from an actual search. Tell me what "
+                             "you'd like me to look up, and I'll really search for it."),
+    )
+
+
+def _pretend_lookup_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
+    if _lookup_ran() or not _claims_lookup(pack):
+        return pack
+    print("[Amadeus] Web ON: reply claims a lookup but nothing was searched - "
+          "one corrective rewrite.")
+    rewrite_llm = llm.bind_tools(
+        [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
+    convo = (list(messages)
+             + [{"role": "assistant", "content": pack.assistant_reply_ENG or ""}]
+             + [{"role": "user", "content": (
+                 "(Internal note: you did NOT search the web or fetch any data in "
+                 "this reply, but your last reply says you did. Rewrite it WITHOUT "
+                 "saying you searched, looked anything up, checked online or have "
+                 "'the latest data'. For the date or time, use your RIGHT NOW note. "
+                 "Use the AmadeusPack tool.)"
+             )}])
+    try:
+        reply = _invoke_forced(rewrite_llm, convo)
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusPack":
+            new = _pack_from_args(calls[0].get("args"))
+            if not _claims_lookup(new) and not _degenerate_pack(new):
+                return new
+    except Exception as exc:
+        print("[Amadeus] Web ON: pretend-lookup rewrite failed:", repr(exc))
+    print("[Amadeus] Web ON: rewrite still claims a lookup - serving the honest line.")
+    return _honest_no_lookup_pack()
+
+
 def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     """Web-search turn with a hard honesty guarantee.
 
@@ -1851,7 +2014,8 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
         else:
             print("[Amadeus] Web loop: search turn could not be completed - honest fallback:", repr(exc))
             return _honest_search_failure_pack()
-    return _web_on_false_refusal_net(pack, llm, messages)
+    pack = _web_on_false_refusal_net(pack, llm, messages)
+    return _pretend_lookup_net(pack, llm, messages)
 
 
 # =============================================================================
@@ -1900,6 +2064,12 @@ class WebTriagePack(BaseModel):
         "actual topic, never the request wording. Write \"none\" when the "
         "message only asks to try the previous search again with no new topic, "
         "or when wants_search is \"no\"."))
+    wants_web_check: str = Field(..., description=(
+        "\"yes\" or \"no\". \"yes\" when the user's LATEST message asks whether "
+        "web access / web search works, is on, or asks to test or confirm it - "
+        "including a short follow-up like \"I just turned it on, can you "
+        "confirm?\" right after web access was discussed. \"no\" when they ask "
+        "to look up a specific topic (that is wants_search)."))
 
 
 WEB_TRIAGE_TOOL = convert_to_openai_tool(WebTriagePack)
@@ -1912,8 +2082,33 @@ _TRIAGE_SYSTEM = (
     "when the latest message asks for nothing that needs the web - small talk, "
     "timeless facts, or follow-up comments are NOT search requests. "
     "Never put a place in weather_place unless the message or the recent "
-    "conversation clearly identifies one."
+    "conversation clearly identifies one. "
+    "Set wants_web_check to yes only when the user wants to know whether web "
+    "access itself works (test it, confirm it is on)."
 )
+
+# "Check / test / confirm your web access" (2026-10-25): the app runs a REAL
+# test search on a neutral, always-fresh topic, so she reports what she
+# actually found - never a guess, never the current time (stale clock pages).
+WEB_CHECK_QUERY = "top news today"
+_WEB_CHECK_NOUN_RE = re.compile(
+    r"\b(web|internet|online|search|searching|browsing)\b|ウェブ|ネット|インターネット|検索",
+    re.IGNORECASE)
+_WEB_CHECK_VERB_RE = re.compile(
+    r"\b(check|test|testing|confirm|working|works|enabled|on|access)\b"
+    r"|確認|テスト|使える|動いて|オン", re.IGNORECASE)
+# Keyword fallback only (triage unavailable): "your/the web access ..." phrasing.
+_WEB_CHECK_STRICT_RE = re.compile(
+    r"\b(your|the|my)\s+(web|internet)(\s+(access|search|connection))?\b"
+    r"|\bweb\s+(access|search)\s+(is\s+)?(working|on|enabled)\b"
+    r"|(ウェブ|ネット|インターネット|検索)(機能|アクセス)?(が|は)?(使える|動いて|オン)",
+    re.IGNORECASE)
+
+
+def _web_check_hint(last_user) -> bool:
+    return bool(isinstance(last_user, str)
+                and _WEB_CHECK_NOUN_RE.search(last_user)
+                and _WEB_CHECK_VERB_RE.search(last_user))
 
 # Broad, HIGH-RECALL prefilter: decides whether a message is a CANDIDATE for
 # the triage call. Deliberately a superset of the keyword intent check - plain
@@ -1933,6 +2128,10 @@ def _web_triage_candidate(last_user, messages) -> bool:
     if not isinstance(last_user, str) or not last_user:
         return False
     if _weather_intent(last_user) or _user_explicitly_asks_for_search(messages):
+        return True
+    # A web-access check, or the message right after her LAST reply said web
+    # access was off ("I just turned it on. Could you confirm?").
+    if _web_check_hint(last_user) or _last_reply_refused_search(messages):
         return True
     return bool(_WEB_TRIAGE_HINT_RE.search(last_user))
 
@@ -2011,10 +2210,14 @@ def _web_triage(llm, messages):
                 "place": _opt(args.get("weather_place")),
                 "search": _flag(args.get("wants_search")) and not weather,
                 "topic": None if weather else _topic(args.get("search_topic")),
+                # A named topic wins: its real search answers the check too.
+                "check": (_flag(args.get("wants_web_check")) and not weather
+                          and not (_flag(args.get("wants_search"))
+                                   and _topic(args.get("search_topic")))),
             }
-            print("[Amadeus] Web triage: weather=%s place=%r search=%s topic=%r"
+            print("[Amadeus] Web triage: weather=%s place=%r search=%s topic=%r check=%s"
                   % (route["weather"], route["place"],
-                     route["search"], route["topic"]))
+                     route["search"], route["topic"], route["check"]))
             return route
     except Exception as exc:
         print("[Amadeus] Web triage call failed - falling back to keyword routing:",
@@ -2025,15 +2228,21 @@ def _web_triage(llm, messages):
     return None
 
 
-def _deterministic_route(last_user, messages):
+def _deterministic_route(last_user, messages, allow_check=False):
     """Keyword routing - the FALLBACK when the triage call is unavailable.
 
     Returns {"weather": True, "place": str|None} or
     {"search": True, "topic": str|None}, or None when nothing fast-routes
     (the normal tool loop handles the message). Weather outranks search.
+    allow_check: only when the triage call itself FAILED - a triage "no"
+    is trusted for the web-access check ("I turned your web access on.
+    Could you try again?" is a retry, not a check).
     """
     if isinstance(last_user, str) and _weather_intent(last_user):
         return {"weather": True, "place": _extract_place(last_user) or None}
+    if allow_check and isinstance(last_user, str) and _web_check_hint(last_user) \
+            and _WEB_CHECK_STRICT_RE.search(last_user):
+        return {"check": True}
     explicit_message = _user_explicitly_asks_for_search(messages)
     if explicit_message:
         query = _extract_search_topic(explicit_message)
@@ -2109,18 +2318,22 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         "",
     )
     route = None
+    triaged = None
+    triage_failed = False
     if _web_triage_candidate(last_user, messages):
         try:
             triaged = _web_triage(llm, messages)
         except Exception:
             triaged = None
+        triage_failed = triaged is None
         # Triage wins only when it AFFIRMATIVELY routes (weather or search).
         # A "no/no" answer or a failed call defers to the keyword safety net
         # below, which still catches the classic phrasings.
-        if triaged and (triaged.get("weather") or triaged.get("search")):
+        if triaged and (triaged.get("weather") or triaged.get("search")
+                        or triaged.get("check")):
             route = triaged
     if route is None:
-        route = _deterministic_route(last_user, messages)
+        route = _deterministic_route(last_user, messages, allow_check=triage_failed)
 
     # ---- Weather: live data beats search ----------------------------------
     # Weather outranks the explicit-search route BY DESIGN: text search for a
@@ -2133,6 +2346,8 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         if place:
             search_ran = True
             report = weather.fetch_weather_report(place)
+            _record_source({"kind": "weather", "place": place,
+                            "url": "https://open-meteo.com/"})
             convo.append({
                 "role": "assistant",
                 "content": "I checked the live weather service for: " + place,
@@ -2163,13 +2378,39 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
                 ),
             })
 
+    # ---- Web-access check: a REAL test search -------------------------------
+    # "Is your web search working? / I just turned it on, can you confirm?"
+    # The app runs one test search itself (a neutral, always-fresh topic) and
+    # she reports what came back - or says plainly that the test failed.
+    if not weather_handled and route and route.get("check"):
+        search_ran = True
+        found = _web_search_with_content(WEB_CHECK_QUERY)
+        worked = bool(_parse_search_results(found))
+        print("[Amadeus] Web check: test search %s." % ("worked" if worked else "FAILED"))
+        convo.append({"role": "assistant",
+                      "content": "I ran a test web search for: " + WEB_CHECK_QUERY})
+        convo.append({"role": "user", "content": (
+            f"Test search results for '{WEB_CHECK_QUERY}':\n{found}\n\n"
+            + ("The user asked you to check your web access, and this test search "
+               "WORKED. Tell them it works, and mention one or two real things you "
+               "just found in these results (briefly, in your own voice). Do not "
+               "search for or quote the time or date from them - your RIGHT NOW "
+               "note has those. "
+               if worked else
+               "The user asked you to check your web access, and this test search "
+               "did NOT return any results. Tell them honestly that web access is "
+               "on, but your test search did not work just now - do not claim it "
+               "works. ")
+            + "Answer using the AmadeusPack tool.")})
+
     # ---- Explicit search: run straight away --------------------------------
     # Query = the extracted TOPIC, never the raw message (a keyword-soup query
     # brings back unrelated pages the model papers over with invention). A
     # bare retry has no topic of its own -> reuse the previous explicit topic.
     # Skipped entirely when the weather route above already handled the
     # message (weather wins).
-    if not weather_handled and route and route.get("search"):
+    if not weather_handled and not (route and route.get("check")) \
+            and route and route.get("search"):
         query = route.get("topic") or _find_prior_search_query(messages)
         if query:
             search_ran = True
@@ -3153,6 +3394,7 @@ def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
 
 def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     llm = _reply_llm()
+    _begin_turn_sources()   # this reply's searches (saved with its row)
 
     web_on = store.load_web_access()
     # Local model, web off: her Japanese line as plain text + the English line
@@ -3520,6 +3762,7 @@ def getOutputPacked(user_message: str):
     assistant_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )
+    store.set_message_sources(assistant_id, take_turn_sources())
     # CharacterMemory: mirror the line she actually spoke (prompt-history
     # rule: the japanese column when present, else the English text).
     cm_bridge.save_turn(store.load_active_conversation(), "assistant",
@@ -3820,6 +4063,7 @@ def regenerateReply():
     new_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )
+    store.set_message_sources(new_id, take_turn_sources())
     return pack, new_id
 
 
