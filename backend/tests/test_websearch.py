@@ -248,6 +248,21 @@ class YearGuardTests(unittest.TestCase):
                 ("iPhone 2027 rumours", ["next iPhone?"])]:
             self.assertEqual(self.g(query, *user), (query, []), query)
 
+    def test_last_year_replaces_the_wrong_year(self):
+        self.assertEqual(self.g("Japan biggest news 2023 summary", "What was the biggest news in Japan last year?"),
+                         ("Japan biggest news 2025 summary", [2023]))
+        self.assertEqual(self.g("major news Japan 2023 summary", "去年の日本の大きなニュースは？"),
+                         ("major news Japan 2025 summary", [2023]))
+        self.assertEqual(self.g("news 2024 2023", "last year news?"), ("news 2025", [2023, 2024]))
+
+    def test_words_that_qualify_the_year_go_with_it(self):
+        self.assertEqual(self.g("popular video games release late 2022 early 2023", "Back when Elden Ring came out?"),
+                         ("popular video games release", [2022, 2023]))
+        self.assertEqual(self.g("popular video games released around February 2022", "Back when Elden Ring came out?"),
+                         ("popular video games released", [2022]))
+        self.assertEqual(self.g("games released in 2022", "what else was popular then?"),
+                         ("games released", [2022]))
+
     def test_nothing_left_keeps_the_words(self):
         self.assertEqual(self.g("2024", "current?"), ("2024", []))
 
@@ -329,6 +344,9 @@ class KeenableClientTests(unittest.TestCase):
             with self._urlopen(answer):
                 with self.assertRaises(websearch.KeenableUnavailable):
                     websearch.keenable_search("q")
+            # One hiccup pauses it only briefly (it is usually ~0.5 s).
+            left = websearch._keenable_skip_until - websearch.time.monotonic()
+            self.assertTrue(0 < left <= websearch.KEENABLE_ERROR_COOLDOWN, (answer, left))
 
 
 class _FakeDDGS:

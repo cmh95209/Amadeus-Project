@@ -222,6 +222,8 @@ KEENABLE_URL = "https://api.keenable.ai/v1/search/public"
 KEENABLE_APP = "Amadeus"              # the X-Keenable-Title the public endpoint requires
 KEENABLE_TIMEOUT = 5                  # seconds, the single attempt
 KEENABLE_QUOTA_COOLDOWN = 3600        # seconds to skip it after "rate limited" (hourly cap)
+KEENABLE_ERROR_COOLDOWN = 30          # seconds after one timeout / error (it is usually ~0.5 s;
+                                      # 2 minutes once sent 13 searches in a row to ddgs)
 KEENABLE_FRESHNESS = {"d": "1d", "w": "7d", "m": "30d", "y": "365d"}
 _keenable_skip_until = 0.0
 
@@ -267,14 +269,14 @@ def keenable_search(query: str, max_results: int = 5, timeout: float = KEENABLE_
         if e.code in (402, 429):
             _keenable_cool_down(KEENABLE_QUOTA_COOLDOWN)
             raise KeenableUnavailable(f"rate limit reached (HTTP {e.code})") from None
-        _keenable_cool_down(ERROR_COOLDOWN)
+        _keenable_cool_down(KEENABLE_ERROR_COOLDOWN)
         raise KeenableUnavailable(f"HTTP {e.code}") from None
     except Exception as e:
-        _keenable_cool_down(ERROR_COOLDOWN)
+        _keenable_cool_down(KEENABLE_ERROR_COOLDOWN)
         raise KeenableUnavailable(repr(e)) from None
     items = data.get("results") if isinstance(data, dict) else None
     if not isinstance(items, list):
-        _keenable_cool_down(ERROR_COOLDOWN)
+        _keenable_cool_down(KEENABLE_ERROR_COOLDOWN)
         raise KeenableUnavailable(f"unexpected answer: {str(data)[:120]}")
     results = []
     for item in items:
@@ -318,6 +320,24 @@ _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                  "eight": 8, "nine": 9, "ten": 10}
 
 
+def relative_years(texts, today=None) -> set:
+    """The years the user's words point at WITHOUT naming them ("last year",
+    去年, "two years ago", "this year")."""
+    this_year = (today or date.today()).year
+    years = set()
+    for text in texts or []:
+        t = str(text or "")
+        for rx, delta in _RELATIVE_YEARS:
+            if rx.search(t):
+                years.add(this_year + delta)
+        for m in _N_YEARS_AGO_RE.finditer(t):
+            n = m.group(1) or m.group(2)
+            n = _NUMBER_WORDS.get(n.lower(), None) if not n.isdigit() else int(n)
+            if n:
+                years.add(this_year - n)
+    return years
+
+
 def years_the_user_means(texts, today=None) -> set:
     """Every year the user's words name or point at (plus the neighbours of
     named years, for "the year after" / "the year before")."""
@@ -338,9 +358,16 @@ def years_the_user_means(texts, today=None) -> set:
     return years
 
 
+# Words that only make sense next to the year they qualify ("late 2022",
+# "released around February 2022", "in 2024") go with it.
+_YEAR_LEAD_RE = r"(?:late|early|mid|around|in|of|during|from|since|circa)"
+
+
 def guard_query_years(query, user_texts, today=None):
     """-> (search words without the past years she added on her own, [removed
-    years]). The words come back unchanged when nothing needs removing (or
+    years]). When the user meant one year without naming it ("last year",
+    去年) and she wrote a different past year, the year the user meant takes
+    its place. The words come back unchanged when nothing needs removing (or
     when removing would leave nothing to search for)."""
     q = str(query or "")
     this_year = (today or date.today()).year
@@ -350,12 +377,19 @@ def guard_query_years(query, user_texts, today=None):
     if not removed:
         return q, []
     out = q
+    meant = relative_years(user_texts, today)
+    named = {int(y) for y in _YEAR_ANY_RE.findall(q)}
+    if len(meant) == 1 and not (meant & named):
+        # "What happened last year?" searched as "... 2023": search 2025 instead.
+        target = str(next(iter(meant)))
+        out = re.sub(r"(?<!\d)" + str(removed[0]) + r"(?!\d)", target, out, count=1)
     for y in removed:
         ys = str(y)
+        lead = r"(?:\b" + _YEAR_LEAD_RE + r"[\s-]+)?"
         # Japanese "2025年1月" / "2025年", English "June 2024", "fall 2024", "2024-2025", plain "2024".
         out = re.sub(ys + r"\s*年(?:\s*\d{1,2}\s*月)?", " ", out)
-        out = re.sub(r"\b" + _MONTHS_RE + r"\.?\s+" + ys + r"\b", " ", out, flags=re.I)
-        out = re.sub(r"(?<!\d)" + ys + r"(?!\d)", " ", out)
+        out = re.sub(lead + r"\b" + _MONTHS_RE + r"\.?\s+" + ys + r"\b", " ", out, flags=re.I)
+        out = re.sub(lead + r"(?<!\d)" + ys + r"(?!\d)", " ", out, flags=re.I)
     out = re.sub(r"\s*[-/~〜]\s*(?=\s|$)", " ", out)       # a range's leftover dash
     out = re.sub(r"\s{2,}", " ", out).strip(" ,;-")
     if not _has_words(out):
