@@ -1622,8 +1622,13 @@ try {
                 # (Git's own fast-forward safety still applies: if an update
                 # ever needed to rewrite one of these files, the merge fails
                 # and the files stay exactly as the user left them.)
+                # Extra files nobody committed do not block either (v4.13,
+                # VM test 2026-10-25: "Install Amadeus.bat" saves
+                # install_windows.ps1 next to itself, and testers drop tools
+                # into the folder - every update was refused). An update never
+                # deletes them; one it would overwrite makes git refuse.
                 $personal = "llm_server\.txt|llm_model\.txt|personality\.txt|api_key\.txt"
-                $status   = & git status --porcelain | Where-Object { $_ -notmatch $personal }
+                $status   = & git status --porcelain --untracked-files=no | Where-Object { $_ -notmatch $personal }
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
