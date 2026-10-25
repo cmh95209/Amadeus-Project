@@ -256,12 +256,23 @@ class YearGuardTests(unittest.TestCase):
         self.assertEqual(self.g("news 2024 2023", "last year news?"), ("news 2025", [2023, 2024]))
 
     def test_words_that_qualify_the_year_go_with_it(self):
-        self.assertEqual(self.g("popular video games release late 2022 early 2023", "Back when Elden Ring came out?"),
+        self.assertEqual(self.g("popular video games release late 2022 early 2023", "what other games were popular?"),
                          ("popular video games release", [2022, 2023]))
-        self.assertEqual(self.g("popular video games released around February 2022", "Back when Elden Ring came out?"),
+        self.assertEqual(self.g("popular video games released around February 2022", "what other games were popular?"),
                          ("popular video games released", [2022]))
         self.assertEqual(self.g("games released in 2022", "what else was popular then?"),
                          ("games released", [2022]))
+
+    def test_a_past_time_the_user_points_at_keeps_her_year(self):
+        for query, user in [
+                ("popular games released 2022 Elden Ring", "Back when Elden Ring came out, what else was popular?"),
+                ("当時 人気 ゲーム 2016", "当時人気だったゲームは？"),
+                ("games 2019", "what games were big around the time Death Stranding came out?"),
+                ("anime 2011", "その頃のアニメは？")]:
+            self.assertEqual(self.g(query, user), (query, []), query)
+        # A plain "when was X released?" is not a past-time reference.
+        self.assertEqual(self.g("newest iPhone release date 2025", "When was the newest iPhone released?"),
+                         ("newest iPhone release date", [2025]))
 
     def test_nothing_left_keeps_the_words(self):
         self.assertEqual(self.g("2024", "current?"), ("2024", []))

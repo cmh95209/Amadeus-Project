@@ -316,6 +316,12 @@ _RELATIVE_YEARS = (
 )
 _N_YEARS_AGO_RE = re.compile(r"\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago\b"
                              r"|(\d{1,2})\s*年前", re.I)
+# The user points at a past time without a number ("back when Elden Ring came
+# out", 当時): then the year she works out for it is what they meant - kept.
+_PAST_TIME_RE = re.compile(
+    r"\bback (?:then|when|in the day)\b|\bat (?:that|the) time\b|\bin those days\b"
+    r"|\baround the time\b"
+    r"|当時|その頃|あの頃|その当時|発売された頃|出た頃", re.IGNORECASE)
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
                  "eight": 8, "nine": 9, "ten": 10}
 
@@ -372,6 +378,8 @@ def guard_query_years(query, user_texts, today=None):
     q = str(query or "")
     this_year = (today or date.today()).year
     allowed = years_the_user_means(user_texts, today)
+    if any(_PAST_TIME_RE.search(str(t or "")) for t in user_texts or []):
+        return q, []        # the user means a past time; her year for it stays
     removed = sorted({int(y) for y in _YEAR_ANY_RE.findall(q)
                       if int(y) < this_year and int(y) not in allowed})
     if not removed:
