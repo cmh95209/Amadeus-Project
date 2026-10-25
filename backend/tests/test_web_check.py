@@ -57,20 +57,23 @@ class SourcesTests(unittest.TestCase):
     def test_a_search_is_recorded_with_the_page_read(self):
         chat._begin_turn_sources()
         with patch.object(chat, "_run_web_search", return_value=RESULTS), \
-             patch.object(chat.webfetch, "fetch_page_text", return_value=("ok", "page")), \
+             patch.object(chat.webfetch, "fetch_page", return_value={"status": "ok", "text": "page"}), \
+             patch.object(chat, "web_reading_plan", return_value=("quick", 0, None, True)), \
              patch.object(chat.store, "effective_context_budget", return_value=8000):
             chat._web_search_with_content("Genshin banner")
         self.assertEqual(chat.take_turn_sources(), [{
             "kind": "search", "query": "Genshin banner",
             "results": [{"title": "Big news today", "url": "https://news.example/a"},
                         {"title": "Other story", "url": "https://news.example/b"}],
-            "read": "https://news.example/a", "engine": None}])
+            "read": "https://news.example/a", "engine": None, "mode": "quick",
+            "used": ["https://news.example/a"]}])
         self.assertEqual(chat.take_turn_sources(), [])   # handed over once
 
     def test_nothing_is_recorded_outside_a_reply(self):
         chat.take_turn_sources()          # no reply in progress
         with patch.object(chat, "_run_web_search", return_value=RESULTS), \
-             patch.object(chat.webfetch, "fetch_page_text", return_value=("blocked", "")), \
+             patch.object(chat.webfetch, "fetch_page", return_value={"status": "blocked"}), \
+             patch.object(chat, "web_reading_plan", return_value=("quick", 0, None, True)), \
              patch.object(chat.store, "effective_context_budget", return_value=8000):
             chat._web_search_with_content("x")
         self.assertEqual(chat.take_turn_sources(), [])
@@ -93,7 +96,8 @@ class _Loop(unittest.TestCase):
         chat._begin_turn_sources()
         with patch.object(chat.time, "sleep"), \
              patch.object(chat.store, "load_deep_thinking", return_value=False), \
-             patch.object(chat.webfetch, "fetch_page_text", return_value=("blocked", "")), \
+             patch.object(chat.webfetch, "fetch_page", return_value={"status": "blocked"}), \
+             patch.object(chat, "web_reading_plan", return_value=("quick", 0, None, True)), \
              patch.object(chat.store, "effective_context_budget", return_value=8000), \
              patch.object(chat, "_run_web_search", return_value=search_text) as run:
             pack = chat._getResponsePackedWithWebSearch(

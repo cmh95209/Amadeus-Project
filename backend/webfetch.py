@@ -306,26 +306,170 @@ def _download(url, timeout):
 
 
 # --- public entry -----------------------------------------------------------
-def fetch_page_text(url, max_chars=None, timeout=DEFAULT_TIMEOUT):
-    """Fetch a URL and return (status, text). See module docstring for statuses."""
-    if max_chars is None:
-        max_chars = MAX_PAGE_CHARS
+# --- page details: title + dates (2026-10-25) ---------------------------------
+# Old news must not read as new: a page's own published / updated date (meta
+# tags, JSON-LD, <time>) is read here, plus a "Month YYYY" in its title
+# ("Banner Schedule (October 2026)"), which many live pages carry instead.
+_MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july",
+                "august", "september", "october", "november", "december")
+_META_DATE_KEYS = {
+    "article:published_time": "published", "datepublished": "published",
+    "publishdate": "published", "pubdate": "published", "date": "published",
+    "dc.date": "published", "dc.date.issued": "published",
+    "sailthru.date": "published", "parsely-pub-date": "published",
+    "article:modified_time": "updated", "og:updated_time": "updated",
+    "datemodified": "updated", "last-modified": "updated", "lastmod": "updated",
+}
+_ISO_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def _iso_day(value):
+    """'2026-10-24T09:00:00+09:00' -> '2026-10-24'; '' when it is no real date."""
+    m = _ISO_DATE_RE.search(str(value or ""))
+    if not m:
+        return ""
+    y, mo, d = (int(x) for x in m.groups())
+    if not (1990 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+class _MetaReader(HTMLParser):
+    """Collects <title>, date meta tags, JSON-LD blocks and <time datetime>."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.og_title = ""
+        self.dates = {"published": "", "updated": ""}
+        self.times = []
+        self.jsonld = []
+        self._in = None
+
+    def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "title" and not self.title:
+            self._in = "title"
+        elif tag == "meta":
+            key = (a.get("property") or a.get("name") or a.get("itemprop")
+                   or a.get("http-equiv") or "").lower()
+            if key == "og:title" and not self.og_title:
+                self.og_title = a.get("content", "").strip()
+            kind = _META_DATE_KEYS.get(key)
+            day = _iso_day(a.get("content"))
+            if kind and day and not self.dates[kind]:
+                self.dates[kind] = day
+        elif tag == "time":
+            day = _iso_day(a.get("datetime"))
+            if day:
+                self.times.append(day)
+        elif tag == "script" and "ld+json" in a.get("type", "").lower():
+            self._in = "jsonld"
+            self.jsonld.append("")
+
+    def handle_endtag(self, tag):
+        if tag in ("title", "script"):
+            self._in = None
+
+    def handle_data(self, data):
+        if self._in == "title":
+            self.title += data
+        elif self._in == "jsonld":
+            self.jsonld[-1] += data
+
+
+def _title_month(title):
+    """'Banner Schedule (October 2026)' / '2026年10月' -> '2026-10', else ''."""
+    t = (title or "").lower()
+    m = re.search(r"\b(" + "|".join(_MONTH_NAMES) + r")\s+(\d{4})\b", t)
+    if m:
+        return f"{int(m.group(2)):04d}-{_MONTH_NAMES.index(m.group(1)) + 1:02d}"
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", title or "")
+    if m and 1 <= int(m.group(2)) <= 12:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    return ""
+
+
+def page_details(html):
+    """{"title", "published", "updated", "title_month"} read from a page's HTML
+    (each "" when the page does not say). Never raises."""
+    out = {"title": "", "published": "", "updated": "", "title_month": ""}
+    if not html:
+        return out
+    r = _MetaReader()
+    try:
+        r.feed(html[:400000])
+        r.close()
+    except Exception:
+        pass
+    out["title"] = re.sub(r"\s+", " ", r.og_title or r.title or "").strip()[:300]
+    out["published"], out["updated"] = r.dates["published"], r.dates["updated"]
+    for block in r.jsonld:
+        for kind, key in (("published", "datePublished"), ("updated", "dateModified")):
+            if not out[kind]:
+                m = re.search(r'"' + key + r'"\s*:\s*"([^"]+)"', block)
+                if m:
+                    out[kind] = _iso_day(m.group(1))
+    if not out["published"] and r.times:
+        out["published"] = min(r.times)
+    out["title_month"] = _title_month(out["title"])
+    return out
+
+
+def page_date(details):
+    """The date a page is best known by: updated, else published, else the
+    title's month ("2026-10"); "" when unknown."""
+    d = details or {}
+    return d.get("updated") or d.get("published") or d.get("title_month") or ""
+
+
+# --- public entry -----------------------------------------------------------
+def fetch_page(url, timeout=DEFAULT_TIMEOUT):
+    """Fetch a URL -> {"status", "text", "title", "published", "updated",
+    "title_month"}. status as in fetch_page_text; "text" is the whole readable
+    text (not cut to a budget - the caller picks what it needs)."""
+    out = {"status": "error", "text": "", "title": "", "published": "",
+           "updated": "", "title_month": ""}
     allowed, _why = is_safe_public_url(url)
     if not allowed:
-        return "unsafe", "(this address is on the local network and was not fetched)"
+        out["status"] = "unsafe"
+        return out
     err, body, ctype = _download(url, timeout)
     if body is None:
-        return "error", ""
+        return out
     stripped = body.lstrip()[:200].lower()
     is_html = ("html" in ctype) or stripped.startswith("<!doctype html") \
         or stripped.startswith("<html")
     text = html_to_text(body) if is_html else re.sub(r"\s+", " ", body).strip()
+    if is_html:
+        out.update(page_details(body))
     if looks_bot_walled(text):
-        return "blocked", "(this page blocked automated access)"
+        out["status"] = "blocked"
+        return out
     if err is not None:
-        return "error", ""
+        return out
     if len(text) < MIN_PAGE_CHARS:
+        out["status"] = "empty"
+        return out
+    out["status"] = "ok"
+    out["text"] = text
+    return out
+
+
+def fetch_page_text(url, max_chars=None, timeout=DEFAULT_TIMEOUT):
+    """Fetch a URL and return (status, text). See module docstring for statuses."""
+    if max_chars is None:
+        max_chars = MAX_PAGE_CHARS
+    page = fetch_page(url, timeout=timeout)
+    status, text = page["status"], page["text"]
+    if status == "unsafe":
+        return "unsafe", "(this address is on the local network and was not fetched)"
+    if status == "blocked":
+        return "blocked", "(this page blocked automated access)"
+    if status == "empty":
         return "empty", "(this page had no usable readable text)"
+    if status != "ok":
+        return "error", ""
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n\n... (truncated, {len(text)} chars total)"
     return "ok", text

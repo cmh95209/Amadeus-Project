@@ -18,6 +18,7 @@ import timing
 import ja_voice
 import speech_text
 import webfetch
+import webreader
 import websearch
 import weather
 import cm_bridge
@@ -250,16 +251,13 @@ _SEARCH_CLIENT = None           # shared DDGS client (holds one warm connection 
 _SEARCH_CLIENT_TS = 0.0         # monotonic time the client was last created/used
 _SEARCH_CLIENT_LOCK = threading.Lock()
 
-# --- Page-fetch: the readable-content step on top of web search ----------------
-# After a search, the top result's page is fetched and its readable content is
-# appended, so she reads real data (numbers, details) instead of one-line
-# snippets. Bounded like the search itself: the fetch draws from its own small
-# time budget, and each page is capped to a fraction of the context window
-# (webfetch.char_budget). Any fetch problem degrades to the plain snippets, so
-# it can never break or hang a reply.
-FETCH_TIMEOUT = 8            # seconds, per page (passed to webfetch)
-FETCH_TOTAL_BUDGET = 12      # seconds, hard ceiling for the whole fetch step
-FETCH_MAX_URLS = 2           # try the top result, then the next if it is walled
+# --- Page reading: the readable-content step on top of web search -------------
+# After a search, the result pages are read (reader or quick mode, see
+# _read_results and webreader.py), so she answers from real data (numbers,
+# details) instead of one-line snippets. Bounded by READ_BUDGET_*; each page
+# is capped to a fraction of the context window (webfetch.char_budget). Any
+# fetch or reader problem degrades to the plain results, so it can never
+# break or hang a reply.
 
 # --- Weather fast path (live Open-Meteo data beats search) ------------------
 # A clear weather question is pulled DIRECTLY from the keyless Open-Meteo API
@@ -401,8 +399,9 @@ def _format_search_results(results) -> str:
         when = (r.get("date") or "").strip()
         dated = f"Date: {when}\n" if when else ""
         lines.append(f"{i}. {title}\n{body}\n{dated}URL: {href}")
-    lines.append(SEARCH_DATE_NOTE.format(today=datetime.now().strftime("%Y-%m-%d")))
-    return "\n\n".join(lines)
+    # Titles and snippets come from web pages: data, never instructions.
+    return (webreader.wrap_web_data("\n\n".join(lines)) + "\n\n"
+            + SEARCH_DATE_NOTE.format(today=datetime.now().strftime("%Y-%m-%d")))
 
 
 def _firecrawl_call(q: str, timeout: float, freshness=None):
@@ -462,6 +461,7 @@ def _run_web_search(query: str) -> str:
     if results:
         _note_search_engine("firecrawl")
         return _format_search_results(results)
+    _progress("retry", "The main search didn't answer, trying the backup search...")
 
     try:
         from ddgs import DDGS  # noqa: F401  - lazy check; fails fast + clearly
@@ -606,45 +606,187 @@ def _is_clock_query(query) -> bool:
     return not _CLOCK_FILLER_RE.sub("", q).strip()
 
 
-def _web_search_with_content(query: str) -> str:
-    """web_search plus an automatic read of the top result page.
+# --- Reading the pages: reader mode / quick mode (2026-10-25) ------------------
+# Reader mode (Settings "thorough", the default): the top pages are fetched in
+# parallel and one short reader call per page writes notes (facts + dates +
+# quotes, or NONE); her reply is written from the notes, never from raw page
+# text. Quick mode: the best paragraphs of the top page. See webreader.py.
+# Where reader calls cannot run side by side (a local server with ONE slot),
+# a reader call would also push her saved prompt out of the server's memory
+# -> quick reading there. Her built-in model has 2 slots (-np 2): the reader
+# calls use slot 1 so slot 0 keeps her prompt (fast replies).
+READ_BUDGET_LOCAL = 12       # seconds: fetching + reading, local / built-in
+READ_BUDGET_CLOUD = 10       # seconds: fetching + reading, cloud
+READER_MAX_TOKENS = 300      # one page's notes
+READER_SLOT = 1              # the built-in server's second slot
+_SLOTS_CACHE = {}            # base url -> (slot count or None, checked at)
+_SLOTS_TTL = 600.0
 
-    Returns the search results with the readable content of the best result
-    appended when it can be fetched - the numbers, the details - instead of a
-    one-line snippet. Bounded (time + size) and fully defensive: if nothing can
-    be read, the plain snippets come back unchanged, so a fetch problem can
-    never break or hang the reply. A pure clock query is not searched at all
-    (CLOCK_SEARCH_SKIPPED). Each search is logged and recorded as a source.
+
+def _progress(step: str, text: str) -> None:
+    """Tell the screen what the search is doing right now (only when a
+    progress listener is attached to this reply - the web-ON stream)."""
+    fn = getattr(_turn, "progress", None)
+    if fn:
+        try:
+            fn(step, text)
+        except Exception:
+            pass
+
+
+def _server_slots(base_url: str):
+    """How many requests a llama.cpp-style server runs at once (its /props
+    total_slots), or None when it does not say. Cached for a few minutes."""
+    now = time.monotonic()
+    hit = _SLOTS_CACHE.get(base_url)
+    if hit and now - hit[1] < _SLOTS_TTL:
+        return hit[0]
+    slots = None
+    try:
+        import json as _json
+        import urllib.request as _ur
+        root = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
+        with _ur.urlopen(root + "/props", timeout=2) as resp:
+            slots = int(_json.loads(resp.read().decode("utf-8", "replace")).get("total_slots") or 0) or None
+    except Exception:
+        slots = None
+    _SLOTS_CACHE[base_url] = (slots, now)
+    return slots
+
+
+def web_reading_plan():
+    """(mode, parallel, pin_slot, local) for this search: mode "reader" |
+    "quick"; parallel = reader calls at once; pin_slot = the server slot the
+    reader calls use (built-in only), else None; local = a model server on
+    this PC / network (vs a cloud service). Instant: no port probing."""
+    try:
+        base = _llm_module._configured_server_url()
+        local = bool(_llm_module._is_local_host(base))
+    except Exception:
+        base, local = "", True
+    if store.load_web_reading() == "quick":
+        return "quick", 0, None, local
+    builtin = getattr(_llm_module, "builtin_llm", None)
+    try:
+        if builtin and builtin.active():
+            return "reader", 1, READER_SLOT, True
+    except Exception:
+        pass
+    if not local:
+        return "reader", webreader.MAX_PAGES, None, False
+    if base and _server_slots(base) == 1:
+        return "quick", 0, None, True
+    return "reader", 1, None, True
+
+
+def web_reading_reason() -> str:
+    """One line for Settings about what is used right now, and why."""
+    mode = web_reading_plan()[0]
+    if store.load_web_reading() == "quick":
+        return "Quick reading (your choice)."
+    if mode == "quick":
+        return ("Your model server runs one task at a time, so she uses quick "
+                "reading.")
+    return "She reads the top pages and takes notes before answering."
+
+
+def _reader_call(pin_slot):
+    """The reader call: her model, reasoning off, a short answer; on her
+    built-in server pinned to the second slot."""
+    client = get_llm(API_KEY, LLM_Model)
+
+    def call(messages, timeout):
+        kwargs = {"max_tokens": READER_MAX_TOKENS, "timeout": max(1.0, float(timeout))}
+        if pin_slot is not None:
+            kwargs["extra_body"] = {**(getattr(client, "extra_body", None) or {}),
+                                    "id_slot": pin_slot}
+        reply = client.bind(**kwargs).invoke(messages)
+        content = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+        return _strip_thinking(re.sub(r"(?is)<think>.*?</think>", "", content))
+    return call
+
+
+def _site_list(pages) -> str:
+    return ", ".join(webreader._site(p["url"]) for p in pages)
+
+
+def _read_results(query: str, results: list, source: dict) -> str:
+    """Read the result pages (reader or quick mode) -> the text appended after
+    the search results ("" when nothing could be read). Fills the source's
+    "read" (the page she relied on), "used" (pages that gave notes) and
+    "mode"."""
+    mode, parallel, pin, local = web_reading_plan()
+    deadline = time.monotonic() + (READ_BUDGET_LOCAL if local else READ_BUDGET_CLOUD)
+    question = getattr(_turn, "question", "") or ""
+    page_chars = webfetch.char_budget(store.effective_context_budget())
+    candidates = [{"url": r["url"], "title": r.get("title", ""), "date": r.get("date", "")}
+                  for r in results]
+    _progress("reading", "Opening the top pages...")
+    pages = webreader.fetch_pages(
+        candidates, lambda url, timeout: webfetch.fetch_page(url, timeout=timeout),
+        deadline, progress=_progress,
+        max_pages=webreader.MAX_PAGES if mode == "reader" else 1,
+        max_tries=webreader.MAX_TRIES if mode == "reader" else 2)
+    source["mode"] = mode
+    if not pages:
+        return ""
+    _progress("reading", "Reading " + _site_list(pages) + "...")
+    if mode == "reader":
+        today = datetime.now().strftime("%Y-%m-%d")
+        webreader.read_pages(question, query, pages, _reader_call(pin), deadline, today,
+                             min(page_chars, 10000), parallel=parallel, progress=_progress)
+        used = [p for p in pages if p.get("notes")]
+        source["used"] = [p["url"] for p in used]
+        if used:
+            source["read"] = used[0]["url"]
+            return webreader.notes_block(pages)
+        if any(p["status"] == "none" for p in pages):
+            source["read"] = None
+            return ("(The pages that were read did not answer this. Say so honestly "
+                    "instead of guessing.)")
+        print("[Amadeus] Reader calls gave nothing in time - quick reading instead.")
+        source["mode"] = "quick"
+    source["read"] = pages[0]["url"]
+    source["used"] = [pages[0]["url"]]
+    return webreader.quick_block(pages[0], query, question, page_chars)
+
+
+def _web_search_with_content(query: str) -> str:
+    """web_search plus reading the result pages (reader or quick mode).
+
+    Returns the search results, then the notes from the pages (reader mode) or
+    the best paragraphs of the top page (quick mode) - the numbers, the
+    details - instead of one-line snippets. Bounded (time + size) and fully
+    defensive: if nothing can be read, the plain results come back unchanged,
+    so a fetch or reader problem can never break or hang the reply. A pure
+    clock query is not searched at all (CLOCK_SEARCH_SKIPPED). Each search is
+    logged and recorded as a source.
     """
     if _is_clock_query(query):
         print(f"[Amadeus] Web search skipped (clock query - her RIGHT NOW note has it): {query!r}")
         return CLOCK_SEARCH_SKIPPED
     _note_search_engine(None)
+    _progress("searching", f'Searching the web: "{query}"')
     text = _run_web_search(query)
     results = _parse_search_results(text)
     source = {"kind": "search", "query": query, "results": results[:5], "read": None,
               "engine": getattr(_turn, "engine", None)}
     _record_source(source)
-    urls = [r["url"] for r in results] or _extract_search_urls(text)
+    if results:
+        _progress("found", f"Found {len(results)} page{'s' if len(results) != 1 else ''}")
     try:
-        if urls:
-            budget = webfetch.char_budget(store.effective_context_budget())
-            deadline = time.monotonic() + FETCH_TOTAL_BUDGET
-            for url in urls[:FETCH_MAX_URLS]:
-                if time.monotonic() >= deadline:
-                    break
-                per = max(1, int(min(FETCH_TIMEOUT, deadline - time.monotonic())))
-                status, page = webfetch.fetch_page_text(url, max_chars=budget, timeout=per)
-                if status == "ok":
-                    source["read"] = url
-                    return (text + "\n\n---\n\n"
-                            "Full readable content of the top result:\n" + page)
-                # blocked / empty / error / unsafe -> try the next result
+        if results:
+            extra = _read_results(query, results, source)
+            if extra:
+                return text + "\n\n---\n\n" + extra
     except Exception as exc:
-        print(f"[Amadeus] Page fetch for '{query}' failed: {exc!r}")
+        print(f"[Amadeus] Reading the pages for '{query}' failed: {exc!r}")
     finally:
-        print(f"[Amadeus] Web search ({source['engine'] or 'none'}): {query!r} -> {len(results)} result(s)"
-              + (f"; read {source['read']}" if source["read"] else ""))
+        print(f"[Amadeus] Web search ({source['engine'] or 'none'}, "
+              f"{source.get('mode', '-')}): {query!r} -> {len(results)} result(s)"
+              + (f"; read {source['read']}" if source["read"] else "")
+              + (f"; notes from {len(source.get('used') or [])}" if source.get("mode") == "reader" else ""))
+        _progress("thinking", "Amadeus is thinking...")
     return text
 
 
@@ -2417,6 +2559,8 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
         "",
     )
+    # The reader calls answer THIS question (not just the search words).
+    _turn.question = last_user if isinstance(last_user, str) else ""
     route = None
     triaged = None
     triage_failed = False

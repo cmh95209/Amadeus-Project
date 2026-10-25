@@ -497,6 +497,25 @@ def get_web_access():
     return jsonify({"enabled": memory.load_web_access()})
 
 
+@application.route("/webReading", methods=["GET"])
+def get_web_reading():
+    """How she reads pages after a search: the saved choice and what is used
+    right now ("quick" on a model server that runs one task at a time)."""
+    effective, reason = chat.web_reading_plan()[0], chat.web_reading_reason()
+    return jsonify({"mode": memory.load_web_reading(), "effective": effective,
+                    "reason": reason})
+
+
+@application.route("/webReading", methods=["POST"])
+def set_web_reading():
+    data = request.get_json(silent=True)
+    try:
+        mode = memory.save_web_reading((data or {}).get("mode") if isinstance(data, dict) else None)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    return jsonify({"status": "ok", "mode": mode})
+
+
 @application.route("/setWebAccess", methods=["POST"])
 def set_web_access():
     """Turn the web-access toggle on or off (persisted)."""

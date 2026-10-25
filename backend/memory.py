@@ -119,6 +119,33 @@ def save_web_access(enabled: bool) -> None:
         f.write("1" if enabled else "0")
 
 
+# ---------- HOW SHE READS THE WEB ---------- (NO SQL)
+# "thorough" (default): reader mode - the top pages are read and noted by
+# short reader calls; "quick": the best paragraphs of the top page only.
+# (Settings -> Preferences; a one-task local server always reads quickly.)
+PATH_TO_WEB_READING = os.path.join(DATA_DIR, "web_reading.txt")
+WEB_READING_MODES = ("thorough", "quick")
+
+
+def load_web_reading() -> str:
+    try:
+        with open(PATH_TO_WEB_READING, "r", encoding="utf-8") as f:
+            mode = f.read().strip().lower()
+    except OSError:
+        return "thorough"
+    return mode if mode in WEB_READING_MODES else "thorough"
+
+
+def save_web_reading(mode: str) -> str:
+    mode = str(mode or "").strip().lower()
+    if mode not in WEB_READING_MODES:
+        raise ValueError("mode must be 'thorough' or 'quick'")
+    _ensure_file(PATH_TO_WEB_READING, default_text="thorough")
+    with open(PATH_TO_WEB_READING, "w", encoding="utf-8") as f:
+        f.write(mode)
+    return mode
+
+
 # ---------- DEEP THINKING TOGGLE ---------- (NO SQL)
 # Optional "think before you search" mode for her web-search judgement call.
 # OFF by default (faster + more reliable); can be switched on in Settings.
