@@ -65,6 +65,42 @@ class TermsAndChunksTests(unittest.TestCase):
         self.assertEqual(wr.best_chunks("a\nb", "x", 1000), "a\nb")
 
 
+class TodayFirstTests(unittest.TestCase):
+    """"What is on now": the piece / page whose dates include today wins."""
+    from datetime import date as _d
+    TODAY = _d(2026, 10, 25)
+
+    def test_the_piece_covering_today_is_picked(self):
+        text = "\n".join(
+            ["# Genshin banner schedule"]
+            + [f"Version 7.2 Phase 1 banner news {i}: Mitya banner Nov 4 - Nov 24" for i in range(30)]
+            + ["Current: Skirk and Escoffier banner, Oct 13 - Nov 3."]
+            + [f"filler {i}" for i in range(30)])
+        plain = wr.best_chunks(text, "Genshin current banner", 700, today=self.TODAY)
+        first = wr.best_chunks(text, "Genshin current banner", 700, today_first=True, today=self.TODAY)
+        self.assertNotIn("Skirk", plain)
+        self.assertIn("Skirk and Escoffier banner, Oct 13 - Nov 3", first)
+
+    def test_pages_covering_today_are_read_first(self):
+        pages = {"https://news.example/72": ok_page("7.2 announced: Mitya from November 4", "News"),
+                 "https://sched.example/": ok_page("Running now: Skirk, Oct 13 - Nov 3", "Schedule"),
+                 "https://other.example/": ok_page("Tips and builds", "Tips")}
+        results = [{"url": u, "title": "", "date": ""} for u in pages]
+        got = wr.fetch_pages(results, fake_fetch(pages), time.monotonic() + 5, max_pages=2,
+                             prefer=lambda p: wr.webdates.covers_today(p["text"], self.TODAY))
+        self.assertEqual([p["title"] for p in got], ["Schedule", "News"])
+
+    def test_dates_in_notes_and_excerpts_are_labelled(self):
+        block = wr.notes_block([{"url": "https://x.example/", "title": "X", "date": "", "rank": 1,
+                                 "notes": "- Consoles launch October 29, 2026"}], today=self.TODAY)
+        self.assertIn("October 29, 2026 (upcoming, in 4 days)", block)
+        quick = wr.quick_block({"url": "https://x.example/", "title": "X", "date": "", "rank": 1,
+                                "text": "Steam: August 20, 2026. Consoles: October 29, 2026."},
+                               "release", "when?", 2000, today=self.TODAY)
+        self.assertIn("August 20, 2026 (about 2 months ago)", quick)
+        self.assertIn("October 29, 2026 (upcoming, in 4 days)", quick)
+
+
 class ReaderPromptTests(unittest.TestCase):
     def test_page_is_marked_as_data(self):
         msgs = wr.reader_messages("Who is on the banner?", "Genshin banner",

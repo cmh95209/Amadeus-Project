@@ -26,6 +26,9 @@ import concurrent.futures
 import math
 import re
 import time
+from datetime import date
+
+import webdates
 
 MAX_PAGES = 3            # pages read per search
 MAX_TRIES = 4            # results tried to get MAX_PAGES readable pages
@@ -48,9 +51,10 @@ READER_RULES = (
     "its date or time period when the page gives one (start and end dates for "
     "schedules, release dates, when it happened); and a quote of at most 12 words "
     "from the page in quotation marks. Keep names, numbers and "
-    "dates exactly as written on the page. For a schedule, say which entry is running "
-    "today and which comes next. Call something \"upcoming\" if it has not happened "
-    "yet as of today, and say how old something is when it is not recent.\n"
+    "dates exactly as written on the page. For a schedule, FIRST note the entry that "
+    "is running today (its start and end dates include {today}), THEN what comes next "
+    "with its start date. Call something \"upcoming\" if it has not happened yet as "
+    "of today, and say how old something is when it is not recent.\n"
     "If the page does not help answer the question, reply with only: NONE"
 )
 
@@ -98,7 +102,10 @@ def split_chunks(text, size=CHUNK_CHARS) -> list:
     return chunks
 
 
-def best_chunks(text, query, budget_chars, question="") -> str:
+TODAY_BOOST = 3.0         # a piece whose dates include today, for "what is on now"
+
+
+def best_chunks(text, query, budget_chars, question="", today_first=False, today=None) -> str:
     """The parts of a page that best match the question, in page order, within
     `budget_chars`. The page's opening (it usually says what the page is and
     which version / date it covers) is always kept as a short lead-in.
@@ -116,6 +123,8 @@ def best_chunks(text, query, budget_chars, question="") -> str:
     for i, c in enumerate(chunks):
         low = c.lower()
         s = sum(1.0 / (1.0 + math.log(df[t])) for t in wanted if df[t] and t in low)
+        if today_first and webdates.covers_today(c, today):
+            s += TODAY_BOOST
         scores.append((s, -i))
     # The matching pieces first; the page's opening (what the page is, which
     # version / date it covers) gets a short slot of its own.
@@ -184,10 +193,12 @@ def _remaining(deadline) -> float:
 
 
 def fetch_pages(results, fetch, deadline, progress=None, max_pages=MAX_PAGES,
-                max_tries=MAX_TRIES) -> list:
+                max_tries=MAX_TRIES, prefer=None) -> list:
     """Download the top results in parallel; the first `max_pages` readable
     ones in rank order -> [{"url", "title", "date", "text", "rank"}].
-    `fetch(url, timeout)` returns webfetch.fetch_page's dict."""
+    `fetch(url, timeout)` returns webfetch.fetch_page's dict. `prefer(page)`
+    True puts a page ahead of the others (still in rank order among them) -
+    e.g. pages whose dates include today, for "what is on now"."""
     tries = [r for r in results if r.get("url")][:max_tries]
     if not tries or _remaining(deadline) <= 0.5:
         return []
@@ -214,11 +225,21 @@ def fetch_pages(results, fetch, deadline, progress=None, max_pages=MAX_PAGES,
         pass
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
-    return [got[i] for i in sorted(got)][:max_pages]
+    ordered = [got[i] for i in sorted(got)]
+    if prefer:
+        ordered.sort(key=lambda p: (not _safe_prefer(prefer, p), p["rank"]))
+    return ordered[:max_pages]
+
+
+def _safe_prefer(prefer, page) -> bool:
+    try:
+        return bool(prefer(page))
+    except Exception:
+        return False
 
 
 def read_pages(question, query, pages, reader, deadline, today, page_chars,
-               parallel=1, progress=None) -> list:
+               parallel=1, progress=None, today_first=False) -> list:
     """One reader call per page (at most `parallel` at once) within the
     deadline. Returns the pages, each with "notes" (str or None) and "status"
     ("notes" | "none" | "late" | "failed")."""
@@ -228,7 +249,7 @@ def read_pages(question, query, pages, reader, deadline, today, page_chars,
         return pages
 
     def work(p):
-        excerpt = best_chunks(p["text"], query, page_chars, question)
+        excerpt = best_chunks(p["text"], query, page_chars, question, today_first=today_first)
         msgs = reader_messages(question, query, p, excerpt, today)
         return parse_notes(reader(msgs, max(1.0, _remaining(deadline))))
 
@@ -260,24 +281,29 @@ def _site(url) -> str:
     return m.group(1) if m else "a page"
 
 
-def notes_block(pages) -> str:
+def notes_block(pages, today=None) -> str:
     """The notes her reply is written from, numbered by the page's place in the
-    search results, inside a web-data block."""
+    search results, inside a web-data block. Every date carries its distance
+    from today ("October 29 (upcoming, in 4 days)") - labelled when shown, so
+    saved notes reused later are labelled for THAT day."""
     parts = []
     for p in pages:
         if p.get("notes"):
             parts.append(f"[{p['rank']}] {p.get('title') or _site(p['url'])} "
                          f"({_site(p['url'])}; page date: {p.get('date') or 'unknown'})\n"
-                         f"{p['notes']}")
+                         + webdates.label_dates(p["notes"], today))
     if not parts:
         return ""
     return ("Notes taken from the pages (each [n] is that search result):\n"
             + wrap_web_data("\n\n".join(parts)))
 
 
-def quick_block(page, query, question, page_chars) -> str:
-    """Quick mode: the best paragraphs of one page, wrapped as web data."""
-    excerpt = best_chunks(page.get("text", ""), query, page_chars, question)
+def quick_block(page, query, question, page_chars, today_first=False, today=None) -> str:
+    """Quick mode: the best paragraphs of one page, wrapped as web data, its
+    dates labelled relative to today."""
+    excerpt = webdates.label_dates(
+        best_chunks(page.get("text", ""), query, page_chars, question, today_first=today_first,
+                    today=today), today)
     return (f"The most relevant parts of result [{page.get('rank', 1)}] "
             f"({page.get('title') or _site(page.get('url'))}; "
             f"page date: {page.get('date') or 'unknown'}):\n" + wrap_web_data(excerpt))

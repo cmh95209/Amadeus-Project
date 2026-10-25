@@ -17,6 +17,7 @@ import stats
 import timing
 import ja_voice
 import speech_text
+import webdates
 import webfetch
 import webreader
 import websearch
@@ -455,14 +456,30 @@ def _keenable_call(q: str, timeout: float, freshness=None):
     return None
 
 
-def _keenable_results(q: str, freshness, deadline: float) -> list:
+STATE_MERGE_MAX = 8   # results kept when a "what is on now" search is merged
+
+
+def _keenable_results(q: str, freshness, deadline: float, state: bool = False) -> list:
     """Keenable's results for `q` (the second engine); [] when it fails, finds
     nothing or there is too little time left (ddgs keeps a full attempt).
-    Recent pages first, topped up like _firecrawl_results."""
+    Recent pages first, topped up like _firecrawl_results. A "what is on now"
+    question (state) searches WITHOUT the recent-only limit first - that is
+    where the schedule pages are - then adds the recent pages it lacks."""
     def room():
         return deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
     if room() < 1.5:
         return []
+    if state and freshness:
+        results = _keenable_call(q, min(KEENABLE_TIMEOUT, room()))
+        if results is None:
+            return []
+        if room() >= 1.5:
+            recent = _keenable_call(q, min(KEENABLE_TIMEOUT, room()), freshness) or []
+            seen = {r["href"] for r in results}
+            results = (results + [r for r in recent if r["href"] not in seen])[:STATE_MERGE_MAX]
+        if not results:
+            print(f"[Amadeus] Keenable found nothing for {q!r}, trying ddgs")
+        return results
     results = _keenable_call(q, min(KEENABLE_TIMEOUT, room()), freshness)
     if results is None:
         return []
@@ -496,13 +513,18 @@ def _run_web_search(query: str) -> str:
         return "No web results were found for that query."
     deadline = time.monotonic() + SEARCH_TOTAL_BUDGET
     freshness = websearch.freshness_for(q)
+    # "What is on now" (a banner, a schedule, standings): schedule pages are
+    # updated, not new - no recent-only limit for them (Keenable adds the
+    # recent pages after the others). Remembered for picking the pages.
+    state = websearch.is_state_question(q, getattr(_turn, "question", "") or "")
+    _turn.state_question = state
 
-    results = _firecrawl_results(q, freshness, deadline)
+    results = _firecrawl_results(q, None if state else freshness, deadline)
     if results:
         _note_search_engine("firecrawl")
         return _format_search_results(results)
     _progress("retry", "The main search didn't answer, trying the second search...")
-    results = _keenable_results(q, freshness, deadline)
+    results = _keenable_results(q, freshness, deadline, state=state)
     if results:
         _note_search_engine("keenable")
         return _format_search_results(results)
@@ -526,7 +548,7 @@ def _run_web_search(query: str) -> str:
         client = _get_search_client(force_fresh=(attempt > 1))
         # Attempt 1 of a time-sensitive query asks for recent pages only;
         # a retry asks without the limit (ddgs reports "no results" as an error).
-        limit = {"timelimit": freshness} if (freshness and attempt == 1) else {}
+        limit = {"timelimit": freshness} if (freshness and not state and attempt == 1) else {}
         try:
             results = list(client.text(q, max_results=5, **limit))
         except Exception as exc:
@@ -770,12 +792,16 @@ def _read_results(query: str, results: list, source: dict):
     page_chars = webfetch.char_budget(store.effective_context_budget())
     candidates = [{"url": r["url"], "title": r.get("title", ""), "date": r.get("date", "")}
                   for r in results]
+    # "What is on now": the pages whose dates include today are read first
+    # (a few more results are opened to find them).
+    state = bool(getattr(_turn, "state_question", False))
     _progress("reading", "Opening the top pages...")
     pages = webreader.fetch_pages(
         candidates, lambda url, timeout: webfetch.fetch_page(url, timeout=timeout),
         deadline, progress=_progress,
         max_pages=webreader.MAX_PAGES if mode == "reader" else 1,
-        max_tries=webreader.MAX_TRIES if mode == "reader" else 2)
+        max_tries=(webreader.MAX_TRIES + (2 if state else 0)) if mode == "reader" else (4 if state else 2),
+        prefer=(lambda p: webdates.covers_today(p.get("text", ""))) if state else None)
     source["mode"] = mode
     if not pages:
         return "", []
@@ -783,7 +809,8 @@ def _read_results(query: str, results: list, source: dict):
     if mode == "reader":
         today = datetime.now().strftime("%Y-%m-%d")
         webreader.read_pages(question, query, pages, _reader_call(pin), deadline, today,
-                             min(page_chars, 10000), parallel=parallel, progress=_progress)
+                             min(page_chars, 10000), parallel=parallel, progress=_progress,
+                             today_first=state)
         used = [p for p in pages if p.get("notes")]
         source["used"] = [p["url"] for p in used]
         if used:
@@ -796,7 +823,7 @@ def _read_results(query: str, results: list, source: dict):
         source["mode"] = "quick"
     source["read"] = pages[0]["url"]
     source["used"] = [pages[0]["url"]]
-    return webreader.quick_block(pages[0], query, question, page_chars), pages[:1]
+    return webreader.quick_block(pages[0], query, question, page_chars, today_first=state), pages[:1]
 
 
 PAGES_DID_NOT_ANSWER = ("(The pages that were read did not answer this. Say so honestly "
@@ -2625,6 +2652,47 @@ def _pretend_lookup_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
     return _honest_no_lookup_pack()
 
 
+# --- Web-ON tense net (2026-10-25) -----------------------------------------------
+# On October 25 she said "the console versions were released on October 29"
+# (search test set: ~4 of 150 answers). Her notes already label every date
+# ("upcoming, in 4 days"); this net checks her reply: a date after today in a
+# past-tense sentence (English or Japanese line) gets ONE corrective rewrite.
+# Still wrong -> the original is served (never blocks a reply).
+def _tense_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
+    if not _lookup_ran():
+        return pack
+    wrong = webdates.past_tense_future_dates(pack.assistant_reply_ENG or "",
+                                             pack.assistant_reply_JPS or "")
+    if not wrong:
+        return pack
+    today = datetime.now().strftime("%B %d, %Y")
+    dates = ", ".join(sorted({d.strftime("%B %d, %Y") for d, _ in wrong}))
+    print(f"[Amadeus] Web ON: reply puts upcoming dates ({dates}) in the past tense - "
+          "one corrective rewrite.")
+    rewrite_llm = llm.bind_tools(
+        [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
+    convo = (list(messages)
+             + [{"role": "assistant", "content": pack.assistant_reply_ENG or ""}]
+             + [{"role": "user", "content": (
+                 f"(Internal note: today is {today}. In your last reply, {dates} is still in "
+                 "the FUTURE, but you described it as already past. Rewrite the reply so "
+                 "anything dated after today is upcoming (\"will be released on ...\" / "
+                 "「…に発売予定」), keeping everything else the same. Use the AmadeusPack tool.)"
+             )}])
+    try:
+        reply = _invoke_forced(rewrite_llm, convo)
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusPack":
+            new = _pack_from_args(calls[0].get("args"))
+            if (not _degenerate_pack(new) and not webdates.past_tense_future_dates(
+                    new.assistant_reply_ENG or "", new.assistant_reply_JPS or "")):
+                return new
+    except Exception as exc:
+        print("[Amadeus] Web ON: tense rewrite failed:", repr(exc))
+    print("[Amadeus] Web ON: tense rewrite did not help - serving the original.")
+    return pack
+
+
 def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     """Web-search turn with a hard honesty guarantee.
 
@@ -2653,7 +2721,7 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
             print("[Amadeus] Web loop: search turn could not be completed - honest fallback:", repr(exc))
             return _honest_search_failure_pack()
     pack = _web_on_false_refusal_net(pack, llm, messages)
-    return _pretend_lookup_net(pack, llm, messages)
+    return _tense_net(_pretend_lookup_net(pack, llm, messages), llm, messages)
 
 
 # =============================================================================

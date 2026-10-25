@@ -407,3 +407,25 @@ def guard_query_years(query, user_texts, today=None):
 
 def _has_words(text) -> bool:
     return bool(re.search(r"\w", str(text or "")))
+
+
+# --- "What is on now" vs news (2026-10-25) --------------------------------------
+# One freshness rule served two kinds of question. NEWS ("news", "today",
+# ニュース) wants recent pages. A question about what is current - a game
+# banner, a schedule, standings, the anime season - is best answered by a
+# page that keeps being UPDATED (a schedule page), which a "published in the
+# past week" filter drops: "current Genshin banner" then read only this week's
+# announcements of the NEXT banners. Such questions search without the filter
+# too, and those results come first.
+_STATE_RE = re.compile(
+    r"\b(?:current(?:ly)?|right now|now|running|ongoing|this season|this week|banners?|"
+    r"schedule|standings?|leaderboard|rankings?|line-?up|event)\b"
+    r"|現在|今の|今は|開催中|ピックアップ|ガチャ|今期|今シーズン|配信中|スケジュール", re.IGNORECASE)
+_NEWS_RE = re.compile(r"\b(?:news|headlines?|breaking|announce(?:d|ment)?)\b|ニュース|速報|発表",
+                      re.IGNORECASE)
+
+
+def is_state_question(query, question="") -> bool:
+    """A question about what is current / running (not news)."""
+    text = f"{query or ''} {question or ''}"
+    return bool(_STATE_RE.search(text)) and not _NEWS_RE.search(text)
