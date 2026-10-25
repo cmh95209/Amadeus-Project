@@ -195,6 +195,11 @@ PROACTIVE_SEARCH_BLOCK = {
         "Check each result's Date against today's date before you use it: never present "
         "old news as new or a past event as upcoming, and when the newest thing you found "
         "is not recent, say how old it is. "
+        # 2026-10-25: schedules (game banners, releases, events, fixtures)
+        # were answered with the wrong entry - "current" mixed up with "next".
+        "For schedules (game banners, releases, events, sports fixtures): use the start "
+        "and end dates to say what is running TODAY, name what comes next separately with "
+        "its start date, and call anything that has not happened yet \"upcoming\". "
         # 2026-10-25 (Amadeus-Fresh test): asked to "confirm" web access, she
         # searched for the current time and believed a stale page over her
         # clock ("14:05 UTC, 20 February 2026").
