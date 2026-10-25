@@ -1,0 +1,179 @@
+// The web sources under her reply (2026-10-25): what she searched, the
+// links that came back, the page she actually read, live-weather fetches.
+// Pure helpers only - the chip + panel live in components/SourcesBar.tsx.
+
+export type SearchSource = {
+  kind: "search";
+  query: string;
+  results: { title: string; url: string; date?: string }[];
+  /** The page she read in full (null when none could be read). */
+  read: string | null;
+};
+
+export type WeatherSource = {
+  kind: "weather";
+  place: string;
+  url: string | null;
+};
+
+export type SourceEntry = SearchSource | WeatherSource;
+
+/** One link in the panel: every result of every search, once. */
+export type SourceLink = {
+  url: string;
+  title: string;
+  domain: string;
+  date?: string;
+  /** She read this page in full (not just its snippet). */
+  read: boolean;
+  /** "weather" for the live-weather service, "web" otherwise. */
+  kind: "web" | "weather";
+};
+
+const WEB_LINK = /^https?:\/\/[^\s/]+/i;
+
+/** Only plain web addresses may become clickable links. */
+export function isWebLink(url: unknown): url is string {
+  return typeof url === "string" && WEB_LINK.test(url.trim());
+}
+
+/** The server's sources, checked: anything malformed is dropped. */
+export function normalizeSources(raw: unknown): SourceEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SourceEntry[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    if (e.kind === "search") {
+      const results = Array.isArray(e.results)
+        ? e.results.flatMap((r) => {
+            if (!r || typeof r !== "object") return [];
+            const x = r as Record<string, unknown>;
+            if (!isWebLink(x.url)) return [];
+            return [{
+              title: typeof x.title === "string" ? x.title : "",
+              url: x.url.trim(),
+              ...(typeof x.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x.date)
+                ? { date: x.date } : {}),
+            }];
+          })
+        : [];
+      out.push({
+        kind: "search",
+        query: typeof e.query === "string" ? e.query : "",
+        results,
+        read: isWebLink(e.read) ? e.read.trim() : null,
+      });
+    } else if (e.kind === "weather") {
+      out.push({
+        kind: "weather",
+        place: typeof e.place === "string" ? e.place : "",
+        url: isWebLink(e.url) ? e.url.trim() : null,
+      });
+    }
+  }
+  return out;
+}
+
+/** "www.game8.co" -> "game8.co"; "" when the address cannot be read. */
+export function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** The same page reached twice (trailing slash, #part, http/https) counts once. */
+function linkKey(url: string): string {
+  return url.trim().replace(/^https?:\/\//i, "").replace(/#.*$/, "").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Every link of the reply, in the order she met them, each once; the
+ *  page she read is marked. */
+export function sourceLinks(entries: SourceEntry[]): SourceLink[] {
+  const seen = new Map<string, SourceLink>();
+  for (const entry of entries) {
+    if (entry.kind === "weather") {
+      if (!entry.url) continue;
+      const key = linkKey(entry.url);
+      if (!seen.has(key)) {
+        seen.set(key, {
+          url: entry.url,
+          title: entry.place ? `Live weather for ${entry.place}` : "Live weather",
+          domain: domainOf(entry.url),
+          read: true,
+          kind: "weather",
+        });
+      }
+      continue;
+    }
+    const readKey = entry.read ? linkKey(entry.read) : "";
+    for (const r of entry.results) {
+      const key = linkKey(r.url);
+      const prev = seen.get(key);
+      if (prev) {
+        if (key === readKey) prev.read = true;
+        if (!prev.date && r.date) prev.date = r.date;
+        continue;
+      }
+      seen.set(key, {
+        url: r.url,
+        title: r.title || domainOf(r.url),
+        domain: domainOf(r.url),
+        ...(r.date ? { date: r.date } : {}),
+        read: key === readKey,
+        kind: "web",
+      });
+    }
+  }
+  return [...seen.values()];
+}
+
+/** The searches she ran (non-empty queries, each once). */
+export function searchQueries(entries: SourceEntry[]): string[] {
+  const out: string[] = [];
+  for (const e of entries) {
+    if (e.kind === "search" && e.query.trim() && !out.includes(e.query.trim())) {
+      out.push(e.query.trim());
+    }
+  }
+  return out;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** A page older than this is marked as old news in the panel. */
+export const STALE_DAYS = 180;
+
+/** "today" / "yesterday" / "3 days ago" / "Oct 3, 2025", plus whether the
+ *  page is old enough to be marked (STALE_DAYS). null for no / bad date. */
+export function dateLabel(iso: string | undefined, now: Date = new Date()): { text: string; stale: boolean } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ?? "");
+  if (!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  const day = Date.UTC(y, mo - 1, d);
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((today - day) / 86400000);
+  const full = `${MONTHS[mo - 1]} ${d}, ${y}`;
+  let text: string;
+  if (days < 0) text = full;            // a future date: just show it
+  else if (days === 0) text = "today";
+  else if (days === 1) text = "yesterday";
+  else if (days < 30) text = `${days} days ago`;
+  else text = full;
+  return { text, stale: days > STALE_DAYS };
+}
+
+/** The chip's text: "5 sources" / "1 source" / "Live weather". */
+export function chipLabel(links: SourceLink[]): string {
+  if (links.length === 1 && links[0].kind === "weather") return "Live weather";
+  return `${links.length} source${links.length === 1 ? "" : "s"}`;
+}
+
+/** A steady colour for a site's letter badge (same site, same colour). */
+export function badgeHue(domain: string): number {
+  let h = 0;
+  for (const ch of domain) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}

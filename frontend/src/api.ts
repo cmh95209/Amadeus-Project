@@ -1,4 +1,6 @@
 import { isCeremonyWaitLine } from "./greetingFlow";
+import { normalizeSources } from "./sources";
+import type { SourceEntry } from "./sources";
 
 export type Conversation = {
   id: number;
@@ -25,6 +27,8 @@ export type MemoryMessage = {
   greeting_regenerable?: boolean;
   version_ids?: number[];
   is_greeting?: boolean;
+  /** The web pages / live data her reply used (web access ON); shown under it. */
+  sources?: SourceEntry[];
   /** Screen-only: her voice started before the English line arrived. */
   translating?: boolean;
 };
@@ -37,6 +41,8 @@ export type MessageReply = {
   assistantId?: number;
   audioRelUrl?: string;
   conversationId?: number;
+  /** The web pages / live data the reply used (web-ON replies). */
+  sources?: SourceEntry[];
 };
 
 export const API_BASE = "http://127.0.0.1:5050";
@@ -129,6 +135,7 @@ export async function sendMessage(userInput: string): Promise<MessageTurn> {
     assistantId: typeof data.assistant_id === "number" ? data.assistant_id : undefined,
     conversationId:
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
+    sources: normalizeSources(data.sources),
   };
   return { reply, text: Promise.resolve(reply.response) };
 }
@@ -394,7 +401,10 @@ export async function getMemory(): Promise<MemoryMessage[]> {
   });
 
   const data = await parseResponse(response);
-  return data.messages ?? [];
+  const messages: MemoryMessage[] = Array.isArray(data.messages) ? data.messages : [];
+  return messages.map((m) =>
+    m.sources === undefined ? m : { ...m, sources: normalizeSources(m.sources) }
+  );
 }
 
 export async function resetMemory(conversationId?: number): Promise<void> {

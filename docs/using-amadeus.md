@@ -26,10 +26,13 @@ You can change all of these at any time without reinstalling anything.
 
 ### Web Access, Deep Thinking, and Voice Retention
 
-- **Web access** — a toggleable local web search (DuckDuckGo, no API key)
-  lets her verify recent events; it reads the top result's page for real
+- **Web access** — a toggleable web search (Firecrawl's free keyless search,
+  with DuckDuckGo-style `ddgs` as an automatic backup; no API key, no account)
+  lets her verify recent events; results carry their dates so she does not
+  mistake old news for new, and she reads the top result's page for real
   content, with an optional "deep thinking" mode that enables model reasoning
-  for the search decision only. Disabled by default on fresh installs.
+  for the search decision only. A **sources** chip under her reply opens the
+  pages she used. Disabled by default on fresh installs.
 - **Live weather & air quality** — keyless, from public feeds.
 - **Voice retention** — keep the last N generated voice recordings, freeing
   disk space automatically.

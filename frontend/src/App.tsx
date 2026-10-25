@@ -3,6 +3,7 @@ import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
 import { ModelPicker } from "./components/ModelPicker";
 import { NameListEditor, nameListProblem } from "./components/NameListEditor";
+import { SourcesBar } from "./components/SourcesBar";
 import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
@@ -886,6 +887,7 @@ export default function App() {
           japanese: reply.japanese,
           id: reply.assistantId,
           translating: !reply.response,
+          ...(reply.sources && reply.sources.length > 0 ? { sources: reply.sources } : {}),
         });
         return next;
       });
@@ -1917,6 +1919,11 @@ export default function App() {
                     </span>
                   )}
                 </div>
+              )}
+
+              {message.role !== "user" && message.sources && message.sources.length > 0 &&
+                editingId !== message.id && (
+                <SourcesBar sources={message.sources} />
               )}
             </article>
           ))}

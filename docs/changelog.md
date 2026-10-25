@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — Fresher Web Search, and Her Sources Under Each Reply
+
+**A better search engine.** Her web search now asks Firecrawl's free search
+first (no account, no API key; about 2 seconds, recent results in English
+and Japanese). The DuckDuckGo-style `ddgs` search stays as an automatic
+backup: when Firecrawl is down, slow, finds nothing or its free daily limit
+is used up, she searches the old way without you noticing. Note: your
+search wording now also goes to Firecrawl.
+
+**No more old news as new news.** Each result now carries its date where the
+search engine knows it ("2 days ago", "Oct 13, 2026", "3日前"), every result
+list tells her today's date, and she is told never to present an old story as
+new. A question about "today", "latest", "current" or "news" (also 今日 /
+最新 / ニュース) is limited to recent pages first.
+
+**Sources under her reply.** When she searched the web or checked the live
+weather, a small "5 sources" chip appears under her reply. Click it to see
+what she searched and one card per page: the site, the title, how old it is
+(older pages are marked "old"), and a "read" mark on the page she read in
+full. Links open in a new browser tab.
+
 ## v2.1.1 — Her Voice Is Quick Again — October 2026
 
 **Voice fix for fresh installs.** The installers used to download the newest
