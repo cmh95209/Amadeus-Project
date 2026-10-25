@@ -1760,6 +1760,52 @@ def _ensure_conversations(c: sqlite3.Cursor) -> None:
     _add_column(c, "conversations", "summary_covers", "INTEGER NOT NULL DEFAULT 0")
 
 
+def _backfill_turns(c: sqlite3.Cursor) -> None:
+    """Number the existing messages of every chat (see `turn` above)."""
+    counters = {}
+    updates = []
+    for mid, conv, role in c.execute(
+            "SELECT id, conversation_id, role FROM messages ORDER BY id ASC").fetchall():
+        n = counters.get(conv, 0) + (1 if role == "user" else 0)
+        counters[conv] = n
+        updates.append((n, mid))
+    c.executemany("UPDATE messages SET turn = ? WHERE id = ?", updates)
+
+
+# The turn a new row gets: the chat's newest turn (+1 for a user message).
+_NEXT_TURN_SQL = ("(SELECT COALESCE(MAX(turn), 0) + ? FROM messages "
+                  "WHERE conversation_id = ?)")
+
+
+# post: the chat's newest turn number (0 when it has no user message yet)
+def current_turn(conversation_id=None) -> int:
+    conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        (n,) = c.execute("SELECT COALESCE(MAX(turn), 0) FROM messages "
+                         "WHERE conversation_id = ?", (conv,)).fetchone()
+        return int(n)
+    finally:
+        conn.close()
+
+
+# post: the message's turn number, or None when it does not exist
+def message_turn(message_id: int):
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        row = c.execute("SELECT turn FROM messages WHERE id = ?",
+                        (int(message_id),)).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+    finally:
+        conn.close()
+
+
 def _ensure_messages_table(c: sqlite3.Cursor) -> None:
     c.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -1837,6 +1883,14 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
         "SELECT 'General' WHERE NOT EXISTS (SELECT 1 FROM conversations)"
     )
     c.execute("UPDATE messages SET conversation_id = 1 WHERE conversation_id IS NULL")
+    # Turn numbers (2026-10-25): per chat, the user's Nth message is turn N;
+    # her reply (all its versions) and any line of hers before the next user
+    # message share it; lines before the first user message are turn 0.
+    # Never renumbered: deleting an older message leaves a gap; deleting the
+    # newest one frees its number (undo + send again = the same turn). Saved
+    # references (lookups) go with their message. Existing chats are numbered once.
+    if _add_column(c, "messages", "turn", "INTEGER"):
+        _backfill_turns(c)
     # Commit the migration work explicitly. Before this, whether the upgrade
     # stuck depended on WHICH caller happened to run it: paths that commit
     # (load_active_conversation) kept it, paths that close without committing
@@ -2545,9 +2599,10 @@ def append_message(_role: str, _content: str, conversation_id=None, japanese=Non
     _ensure_messages_table(c)
 
     c.execute(
-        "INSERT INTO messages (role, content, conversation_id, japanese, greeting) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (_role, _content, conv, japanese, 1 if is_greeting else 0)
+        "INSERT INTO messages (role, content, conversation_id, japanese, greeting, turn) "
+        "VALUES (?, ?, ?, ?, ?, " + _NEXT_TURN_SQL + ")",
+        (_role, _content, conv, japanese, 1 if is_greeting else 0,
+         1 if _role == "user" else 0, conv)
     )
     new_id = c.lastrowid
 
@@ -2630,11 +2685,11 @@ def append_greeting_if_quiet(conversation_id: int, content: str,
                 return None
         c.execute(
             "INSERT INTO messages (role, content, conversation_id, japanese, greeting, "
-            "greeting_kind, greeting_from, greeting_group) "
-            "VALUES ('assistant', ?, ?, ?, 1, ?, ?, ?)",
+            "greeting_kind, greeting_from, greeting_group, turn) "
+            "VALUES ('assistant', ?, ?, ?, 1, ?, ?, ?, " + _NEXT_TURN_SQL + ")",
             (content, conv, japanese, kind,
              None if from_conversation_id is None else int(from_conversation_id),
-             None if group is None else int(group)))
+             None if group is None else int(group), 0, conv))
         new_id = c.lastrowid
         c.execute(
             "UPDATE conversations SET updated_at = strftime('%Y-%m-%d %H:%M','now','localtime') "
