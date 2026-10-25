@@ -1799,6 +1799,11 @@ def _backfill_turns(c: sqlite3.Cursor) -> None:
     c.executemany("UPDATE messages SET turn = ? WHERE id = ?", updates)
 
 
+# Rows that are a reply turn of their own for the version grouping: greetings
+# and her "hold on" asides (never folded into a reply's versions).
+_OWN_TURN_SQL = "(COALESCE(greeting, 0) OR COALESCE(aside, 0))"
+
+
 # The turn a new row gets: the chat's newest turn (+1 for a user message).
 _NEXT_TURN_SQL = ("(SELECT COALESCE(MAX(turn), 0) + ? FROM messages "
                   "WHERE conversation_id = ?)")
@@ -1898,6 +1903,9 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
     # searches (query, result titles + links, the page read) and live-weather
     # fetches; NULL = none. Saved now so a later version can show her links.
     _add_column(c, "messages", "sources", "TEXT")
+    # Her "hold on, let me check" line before a web answer (2026-10-25): a
+    # line of hers of its own, never a version of the answer after it.
+    _add_column(c, "messages", "aside", "INTEGER DEFAULT 0")
 
     # Migrate pre-session databases: fold everything into one conversation.
     _ensure_conversations(c)
@@ -2555,6 +2563,7 @@ def _message_item(row) -> Dict[str, str]:
     mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row[:9]
     kind = row[10] if len(row) > 10 else None
     saved_sources = row[11] if len(row) > 11 else None
+    is_aside = bool(row[12]) if len(row) > 12 else False
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
             "active": bool((active if active is not None else 1)),
             "conversation_id": conv_id}
@@ -2567,6 +2576,8 @@ def _message_item(row) -> Dict[str, str]:
         item["japanese"] = (japanese or "").strip()
         if item["japanese"]:
             item["has_japanese"] = True
+        if is_aside:
+            item["is_aside"] = True
         if saved_sources:
             try:
                 shown = sources_for_ui(json.loads(saved_sources))
@@ -2595,7 +2606,7 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
     c.execute(
         "SELECT id, role, content, created_at, audio, japanese, active, conversation_id, "
-        "greeting, greeting_group, greeting_kind, sources "
+        "greeting, greeting_group, greeting_kind, sources, aside "
         "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         (conv,),
     )
@@ -2605,7 +2616,7 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
     by_id = {r[0]: r for r in rows}
     out = []
     for turn in _group_reply_turns(
-            [(r[0], r[1], r[8] if r[8] else 0, r[9]) for r in rows]):
+            [(r[0], r[1], 1 if (r[8] or r[12]) else 0, r[9]) for r in rows]):
         for pos, mid in enumerate(turn):
             row = by_id[mid]
             if len(turn) > 1 and (row[6] if row[6] is not None else 1) != 1:
@@ -2627,16 +2638,16 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 # post: a new row is inserted into messages with a correct auto-incremented id
 #       every other info e.g., created_at also must be correctly placed
 def append_message(_role: str, _content: str, conversation_id=None, japanese=None,
-                   is_greeting=False) -> int:
+                   is_greeting=False, aside=False) -> int:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
     conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
 
     c.execute(
-        "INSERT INTO messages (role, content, conversation_id, japanese, greeting, turn) "
-        "VALUES (?, ?, ?, ?, ?, " + _NEXT_TURN_SQL + ")",
-        (_role, _content, conv, japanese, 1 if is_greeting else 0,
+        "INSERT INTO messages (role, content, conversation_id, japanese, greeting, aside, turn) "
+        "VALUES (?, ?, ?, ?, ?, ?, " + _NEXT_TURN_SQL + ")",
+        (_role, _content, conv, japanese, 1 if is_greeting else 0, 1 if aside else 0,
          1 if _role == "user" else 0, conv)
     )
     new_id = c.lastrowid
@@ -2797,6 +2808,17 @@ def ensure_greeting_group(message_id: int) -> None:
 #       is_greeting flag) - such a row is a standalone turn with no user
 #       message behind it, so regenerate/undo/version logic keeps its own
 #       lane and never folds it into a neighboring reply's version stack
+def get_message_is_aside(message_id) -> bool:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute("SELECT aside FROM messages WHERE id = ?", (int(message_id),)).fetchone()
+        return bool(row and row[0])
+    finally:
+        conn.close()
+
+
 def get_message_is_greeting(message_id) -> bool:
     conn = _connect_db()
     c = conn.cursor()
@@ -3060,11 +3082,11 @@ def activate_version(message_id: int):
         return None
     _, conv, role = row
     cids = c.execute(
-        "SELECT id, role, greeting, greeting_group FROM messages "
+        "SELECT id, role, " + _OWN_TURN_SQL + ", greeting_group FROM messages "
         "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     turn = next((g for g in _group_reply_turns(
-        [(i, r, (g if g else 0), gg) for i, r, g, gg in cids])
+        [(i, r, (1 if g else 0), gg) for i, r, g, gg in cids])
         if int(message_id) in g), None)
     if turn is None:
         conn.close()
@@ -3088,7 +3110,7 @@ def get_trailing_turn(conversation_id=None) -> List[int]:
     c = conn.cursor()
     _ensure_messages_table(c)
     cids = c.execute(
-        "SELECT id, role, greeting, greeting_group FROM messages "
+        "SELECT id, role, " + _OWN_TURN_SQL + ", greeting_group FROM messages "
         "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     conn.close()
@@ -3107,13 +3129,13 @@ def get_message_before(exclude_ids, conversation_id=None):
     if exclude_ids:
         row = c.execute(
             "SELECT id, role, content FROM messages WHERE conversation_id = ? AND id < ? "
-            "ORDER BY id DESC LIMIT 1",
+            "AND COALESCE(aside, 0) = 0 ORDER BY id DESC LIMIT 1",
             (conv, min(exclude_ids)),
         ).fetchone()
     else:
         row = c.execute(
             "SELECT id, role, content FROM messages WHERE conversation_id = ? "
-            "ORDER BY id DESC LIMIT 1",
+            "AND COALESCE(aside, 0) = 0 ORDER BY id DESC LIMIT 1",
             (conv,),
         ).fetchone()
     conn.close()
@@ -3142,7 +3164,7 @@ def undo_last_assistant(conversation_id=None):
         conn.close()
         return None
     cids = c.execute(
-        "SELECT id, role, greeting, greeting_group FROM messages "
+        "SELECT id, role, " + _OWN_TURN_SQL + ", greeting_group FROM messages "
         "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     turns = _group_reply_turns([(i, r, g if g else 0, gg) for i, r, g, gg in cids])
@@ -3166,9 +3188,18 @@ def undo_last_assistant(conversation_id=None):
     for mid in turn:
         c.execute("DELETE FROM messages WHERE id = ?", (mid,))
         _delete_lookups(c, "message_id = ?", (mid,))
+    # Her "hold on" line before that answer goes with it.
+    deleted = list(turn)
+    while True:
+        prev = c.execute("SELECT id, role, COALESCE(aside, 0) FROM messages "
+                         "WHERE conversation_id = ? ORDER BY id DESC LIMIT 1", (conv,)).fetchone()
+        if not prev or prev[1] != "assistant" or not prev[2]:
+            break
+        c.execute("DELETE FROM messages WHERE id = ?", (prev[0],))
+        deleted.insert(0, prev[0])
     conn.commit()
     conn.close()
-    return {"action": "deleted", "deleted_id": turn[-1], "deleted_ids": turn}
+    return {"action": "deleted", "deleted_id": turn[-1], "deleted_ids": deleted}
 
 
 # ---------- CONVERSATIONS (chat sessions) ----------
@@ -3374,6 +3405,30 @@ def delete_conversation(conversation_id: int) -> bool:
 #       User lines stay in the language the user wrote them in. Older messages
 #       after a gap of 2+ hours carry a short bracketed time note (her prompt
 #       otherwise has no dates); the latest user message stays clean.
+def _merge_asides(rows):
+    """Her "hold on, let me check" line joins the answer after it, so her
+    prompt history still alternates user / her (chat templates expect that)
+    and she remembers saying it. An aside with no answer after it (the answer
+    failed, or is being written again) is left out."""
+    out = []
+    pending = None
+    for row in rows:
+        mid, role, content, japanese, created_at, aside = row
+        if role == "assistant" and aside:
+            pending = row
+            continue
+        if pending is not None and role == "assistant":
+            _, _, a_content, a_japanese, _, _ = pending
+            content = ((a_content or "").strip() + " " + (content or "")).strip()
+            if japanese or a_japanese:
+                japanese = ((a_japanese or a_content or "").strip()
+                            + (japanese or content or "")).strip()
+            row = (mid, role, content, japanese, created_at, aside)
+        pending = None
+        out.append(row)
+    return out
+
+
 def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[str, str]]:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
     conn = _connect_db()
@@ -3384,18 +3439,19 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
     if exclude_ids:
         ph = ",".join("?" * len(exclude_ids))
         rows = c.execute(
-            "SELECT id, role, content, japanese, created_at FROM messages "
+            "SELECT id, role, content, japanese, created_at, aside FROM messages "
             "WHERE conversation_id = ? AND (role = 'user' OR active = 1) "
             "AND id NOT IN (" + ph + ") ORDER BY id ASC",
             [conv, *exclude_ids],
         ).fetchall()
     else:
         rows = c.execute(
-            "SELECT id, role, content, japanese, created_at FROM messages "
+            "SELECT id, role, content, japanese, created_at, aside FROM messages "
             "WHERE conversation_id = ? AND (role = 'user' OR active = 1) "
             "ORDER BY id ASC", (conv,)
         ).fetchall()
     conn.close()
+    rows = _merge_asides(rows)
     out = []
     prev_created_at = None
     # The latest user message is the one being answered right now: its timing
@@ -3408,7 +3464,7 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
         (i for i, row in enumerate(rows) if row[1] == "user"), default=-1
     )
     now_local = datetime.now().astimezone()  # one "now" for every note
-    for i, (mid, role, content, japanese, created_at) in enumerate(rows):
+    for i, (mid, role, content, japanese, created_at, _aside) in enumerate(rows):
         base = japanese if (role == "assistant" and japanese) else content
         note = (None if i == last_user_index
                 else _time_note(created_at, prev_created_at, now_local))

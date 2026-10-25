@@ -19,6 +19,7 @@ try {
   await server.ssrLoadModule("/tests/nameList.test.ts");
   await server.ssrLoadModule("/tests/voiceFirst.test.ts");
   await server.ssrLoadModule("/tests/sources.test.ts");
+  await server.ssrLoadModule("/tests/webStream.test.ts");
   await server.ssrLoadModule("/tests/motions.test.ts");
   await server.ssrLoadModule("/tests/speech.test.ts");
 } finally {

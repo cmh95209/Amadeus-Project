@@ -23,6 +23,8 @@ import {
   setModel,
   getWebAccess,
   setWebAccess,
+  getWebReading,
+  setWebReading,
   getReasoning,
   setReasoning,
   sendInteraction,
@@ -177,6 +179,9 @@ export default function App() {
   const [defaultBudget, setDefaultBudget] = useState<number>(40000);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Web ON: what her reply is doing right now ("Searching the web: ...",
+  // "Reading game8.co...") - shown under the typing dots; "" = nothing to say.
+  const [webStatus, setWebStatus] = useState("");
   const [status, setStatus] = useState("Connecting to Amadeus...");
   // The footer's health inputs (deriveFooter): is the backend answering at
   // all, and where the startup greeting stands. A refresh that already
@@ -194,6 +199,8 @@ export default function App() {
   // launch), the connection probe re-runs it once the backend answers.
   const initState = useRef<"pending" | "ok" | "failed">("pending");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Settings -> Preferences -> "Read pages thoroughly" (saved at once).
+  const [webReading, setWebReadingState] = useState<{ mode: "thorough" | "quick"; reason: string } | null>(null);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [apiKey, setApiKeyInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
@@ -364,6 +371,27 @@ export default function App() {
     });
     return () => { cancelled = true; };
   }, [settingsOpen, personalityReload]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let cancelled = false;
+    getWebReading()
+      .then((w) => { if (!cancelled) setWebReadingState({ mode: w.mode, reason: w.reason }); })
+      .catch(() => { if (!cancelled) setWebReadingState(null); });
+    return () => { cancelled = true; };
+  }, [settingsOpen]);
+
+  async function toggleWebReading() {
+    if (!webReading) return;
+    const mode = webReading.mode === "thorough" ? "quick" : "thorough";
+    try {
+      await setWebReading(mode);
+      const w = await getWebReading();
+      setWebReadingState({ mode: w.mode, reason: w.reason });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save the web reading setting");
+    }
+  }
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -849,7 +877,41 @@ export default function App() {
     setStatus("Amadeus is thinking...");
 
     try {
-      const turn = await sendMessage(text);
+      // Her hold-on line (web ON) is spoken at once; her answer's voice waits
+      // until it is finished, never cutting it off.
+      let asideSpoken = false;
+      setWebStatus("");
+      const turn = await sendMessage(text, {
+        onStatus: (line) => setWebStatus(line),
+        onAside: (aside) => {
+          setMessages((current) => {
+            const next = [...current];
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i].role === "user" && next[i].id == null) {
+                next[i] = { ...next[i], id: aside.userId };
+                break;
+              }
+            }
+            next.push({
+              role: "assistant",
+              content: aside.response,
+              japanese: aside.japanese,
+              id: aside.assistantId,
+              is_aside: true,
+            });
+            return next;
+          });
+          if (aside.speechUrl) {
+            asideSpoken = true;
+            void speechReady?.then((ok) => {
+              if (ok && aside.speechUrl) {
+                void characterRef.current?.playSpeech(aside.speechUrl).catch(() => undefined);
+                rememberVoiceLine(aside.assistantId);
+              }
+            });
+          }
+        },
+      });
       let reply = turn.reply;
       if (!voiceEarly && !reply.response) {
         // Default: wait for the English line, so the bubble and her voice
@@ -893,10 +955,17 @@ export default function App() {
       });
 
       setStatus("Online");
+      setWebStatus("");
       // A real reply proves the line works: an unsettled or failed startup
       // greeting no longer needs to be reported.
       settleGreetPhase("done");
       if (reply.speechUrl && await speechReady) {
+        if (asideSpoken) {
+          // Let her finish the hold-on line first (it may still be loading).
+          await new Promise((r) => setTimeout(r, 300));
+          await waitUntilQuiet(() => characterRef.current?.isSpeechBusy() ?? false,
+            { quietMs: 250, pollMs: 100, maxMs: 30_000 });
+        }
         void characterRef.current?.playSpeech(reply.speechUrl).catch((error) => {
           setStatus(error instanceof Error ? error.message : "Speech playback failed");
         });
@@ -950,6 +1019,7 @@ export default function App() {
       void refreshConnection();
     } finally {
       setLoading(false);
+      setWebStatus("");
       void refreshConversations();
     }
   }
@@ -1546,7 +1616,8 @@ export default function App() {
     setLoading(true);
     setStatus("Amadeus is rethinking...");
     try {
-      const reply = await regenerate();
+      setWebStatus("");
+      const reply = await regenerate({ onStatus: (line) => setWebStatus(line) });
       // The previous reply is kept as an earlier version; reload the active
       // view so the new version and the version arrows appear correctly.
       setMessages(await getMemory());
@@ -1560,6 +1631,7 @@ export default function App() {
       void refreshConnection();
     } finally {
       setLoading(false);
+      setWebStatus("");
     }
   }
 
@@ -1861,7 +1933,7 @@ export default function App() {
                     </button>
                   )}
                   {message.role !== "user" && index === lastAssistantIndex && !loading &&
-                    !message.is_greeting && (
+                    !message.is_greeting && !message.is_aside && (
                     <>
                       <button
                         type="button"
@@ -1940,6 +2012,12 @@ export default function App() {
                 <i />
                 <i />
               </div>
+              {webStatus && (
+                <div className="web-status" role="status" aria-live="polite">
+                  <span className="web-status-spinner" aria-hidden="true" />
+                  {webStatus}
+                </div>
+              )}
             </article>
           )}
 
@@ -2641,6 +2719,29 @@ export default function App() {
                   >
                     <span className="settings-toggle-knob" aria-hidden="true" />
                     <span>{voiceEarly ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+                <div className="settings-toggle-row" aria-label="Read pages thoroughly">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Read pages thoroughly</span>
+                    <span className="settings-toggle-desc">
+                      When web access is on and she searches, she opens the top
+                      pages and takes notes before answering - more accurate, a
+                      few seconds slower. Off: she only reads the best part of the
+                      top page (quicker).
+                      {webReading?.reason ? " Now: " + webReading.reason : ""}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${webReading?.mode === "thorough" ? " on" : ""}`}
+                    onClick={() => void toggleWebReading()}
+                    aria-pressed={webReading?.mode === "thorough"}
+                    disabled={!webReading}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{webReading?.mode === "thorough" ? "On" : "Off"}</span>
                   </button>
                 </div>
 

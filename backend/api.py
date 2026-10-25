@@ -37,6 +37,7 @@ import requests
 
 import chat
 import json
+import queue
 import threading
 import uuid
 import time
@@ -243,6 +244,74 @@ def _register_speech(speech_id, jps_text, assistant_id) -> None:
 #     data: {"phase": "text", "assistant_id", "response": "<English line>"}
 #   the second event is bounded (120 s); on timeout the Japanese line itself
 #   is the response, so the UI never shows an empty box
+# --- The web-ON reply as a live stream (2026-10-25) -----------------------------
+# A web-ON reply can take several seconds (search, reading the pages), so it
+# streams what is really happening: status steps (searching / found / reading
+# / picking out what matters / thinking - only when the step happens), her
+# "hold on, let me check" line the moment it is ready, then the reply (the
+# same fields the old single JSON had), or an error. text/event-stream:
+#     data: {"phase": "status", "step", "text"}
+#     data: {"phase": "aside", "assistant_id", "response", "japanese", "speech_id"}
+#     data: {"phase": "reply", ...}            (last)
+#     data: {"phase": "error", "message"}      (last)
+WEB_STREAM_KEEPALIVE = 15.0   # seconds between keep-alive comments
+
+
+def _sse(payload: dict) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+def _web_stream(work, finish, with_aside: bool):
+    """Run `work()` (one reply, in a worker thread) and stream its progress;
+    `finish(result)` builds the final "reply" event."""
+    events = queue.Queue()
+
+    def on_aside(assistant_id, pack):
+        speech_id = uuid.uuid4().hex
+        _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+        events.put(("aside", {"phase": "aside", "assistant_id": assistant_id,
+                              "response": pack.assistant_reply_ENG,
+                              "japanese": pack.assistant_reply_JPS,
+                              "speech_id": speech_id}))
+
+    def runner():
+        chat._turn.progress = lambda step, text: events.put(
+            ("status", {"phase": "status", "step": step, "text": text}))
+        chat._turn.aside_emit = on_aside if with_aside else None
+        try:
+            result = work()
+        except Exception as exc:          # noqa: BLE001 - reported to the screen
+            events.put(("error", exc))
+        else:
+            events.put(("done", result))
+        finally:
+            chat._turn.progress = None
+            chat._turn.aside_emit = None
+
+    threading.Thread(target=runner, daemon=True).start()
+
+    def generate():
+        while True:
+            try:
+                kind, payload = events.get(timeout=WEB_STREAM_KEEPALIVE)
+            except queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            if kind in ("status", "aside"):
+                yield _sse(payload)
+            elif kind == "error":
+                print("[Flask] LLM failure (web stream):", repr(payload))
+                yield _sse({"phase": "error", "message": _llm_error_message(payload)})
+                return
+            else:
+                yield _sse(finish(payload))
+                return
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @application.route("/", methods=["POST"])
 def request_message():
     if not has_api_key():
@@ -255,28 +324,26 @@ def request_message():
 
     if chat.store.load_web_access():
         # Web access ON: the reply is the original single call (both lines at
-        # once) and the client speaks the single-JSON protocol.
-        try:
-            pack, user_id, assistant_id, conv_id = getOutputPacked(user_input)
-        except Exception as exc:
-            print("[Flask] LLM failure:", repr(exc))
-            return jsonify({"message": _llm_error_message(exc)}), 502
-        timing.line_ready(assistant_id, started, "her reply (web access on, both lines)")
-        print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
-        print("[Flask]: JPS:", pack.assistant_reply_JPS)
-
-        speech_id = uuid.uuid4().hex
-        _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
-        return jsonify({
-            "response": pack.assistant_reply_ENG,
-            "japanese": pack.assistant_reply_JPS,
-            "speech_id": speech_id,
-            "user_id": user_id,
-            "assistant_id": assistant_id,
-            "conversation_id": conv_id,
-            # The links she used (shown under her reply); [] when none.
-            "sources": memory.sources_for_ui(memory.load_message_sources(assistant_id)),
-        })
+        # once), streamed with its live progress (see _web_stream).
+        def finish(result):
+            pack, user_id, assistant_id, conv_id = result
+            timing.line_ready(assistant_id, started, "her reply (web access on, both lines)")
+            print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
+            print("[Flask]: JPS:", pack.assistant_reply_JPS)
+            speech_id = uuid.uuid4().hex
+            _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+            return {
+                "phase": "reply",
+                "response": pack.assistant_reply_ENG,
+                "japanese": pack.assistant_reply_JPS,
+                "speech_id": speech_id,
+                "user_id": user_id,
+                "assistant_id": assistant_id,
+                "conversation_id": conv_id,
+                # The links she used (shown under her reply); [] when none.
+                "sources": memory.sources_for_ui(memory.load_message_sources(assistant_id)),
+            }
+        return _web_stream(lambda: getOutputPacked(user_input), finish, with_aside=True)
 
     # Web access OFF: voice-first (see the doc block above).
     try:
@@ -633,6 +700,25 @@ def undo_last_reply():
 def regenerate():
     if not has_api_key():
         return jsonify({"message": "No API key. Add one in Settings."}), 400
+    if chat.store.load_web_access():
+        # Web ON: the same live progress as a new reply (no hold-on line -
+        # the first one is still in the chat).
+        last = memory.get_last_message()
+        if last is not None and last["role"] == "assistant" and (
+                memory.get_message_is_greeting(last["id"])
+                or memory.get_message_is_aside(last["id"])):
+            return jsonify({"message": "Nothing to regenerate here"}), 400
+
+        def finish(result):
+            pack, new_id = result
+            speech_id = uuid.uuid4().hex
+            with _speech_requests_lock:
+                _speech_requests[speech_id] = (time.monotonic(), pack.assistant_reply_JPS, new_id)
+            return {"phase": "reply", "response": pack.assistant_reply_ENG,
+                    "japanese": pack.assistant_reply_JPS, "speech_id": speech_id,
+                    "assistant_id": new_id,
+                    "sources": memory.sources_for_ui(memory.load_message_sources(new_id))}
+        return _web_stream(regenerateReply, finish, with_aside=False)
     try:
         pack, new_id = regenerateReply()
     except ValueError as exc:

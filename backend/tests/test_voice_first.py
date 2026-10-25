@@ -476,12 +476,16 @@ class VoiceFirstTests(unittest.TestCase):
         self.assertEqual(rows[1][2], EN_LINE)
         self.assertEqual(rows[1][3], JA_LINE)
 
-    def test_route_web_on_keeps_single_json_protocol(self):
+    def test_route_web_on_keeps_single_call_protocol(self):
+        # Web ON: the single-call reply (both lines at once), streamed since
+        # 2026-10-25 with its live progress; the last event is the reply.
         fake = _FakeLLM()
         response, body, _rows = self._route(True, fake)
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.content_type.startswith("application/json"))
-        data = json.loads(body)
+        self.assertTrue(response.content_type.startswith("text/event-stream"))
+        events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+        data = events[-1]
+        self.assertEqual(data["phase"], "reply")
         self.assertEqual(data["response"], EN_LINE)
         self.assertEqual(data["japanese"], JA_LINE)
         self.assertIsInstance(data["speech_id"], str)

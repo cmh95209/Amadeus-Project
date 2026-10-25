@@ -758,6 +758,109 @@ PAGES_DID_NOT_ANSWER = ("(The pages that were read did not answer this. Say so h
                         "instead of guessing.)")
 
 
+# --- Her "hold on, let me check" line (2026-10-25) ------------------------------
+# The moment a real search starts (not when saved notes are reused, not for
+# the weather or a clock question), a short line of hers is written IN
+# PARALLEL with the search: "The banner? Hang on, I'll check." It is saved as
+# her own message (messages.aside) and spoken at once - unless her answer is
+# ready first, then it is dropped (never "hold on" after the answer). Only
+# for the live web-ON reply (the route attaches a listener); never for
+# regenerate. Not mirrored to the long-term memory sidecar.
+ASIDE_MAX_TOKENS = 160
+ASIDE_NOTE = (
+    "\n\n(Internal note: you are about to look this up on the web for the user right "
+    "now: \"{topic}\". Say ONE short spoken line, in character, telling them you are "
+    "checking it now - like someone glancing at their phone. Do NOT answer, guess or "
+    "state any facts about it yet, do not promise results, do not ask a question. "
+    "Keep it to one short sentence.)")
+
+
+class _AsideRun:
+    """One hold-on line being written in the background for one reply."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.closed = False
+        self.saved_id = None
+        self.thread = None
+
+
+def _maybe_start_aside(topic: str) -> None:
+    """Start her hold-on line for this reply (once), if the live route asked."""
+    emit = getattr(_turn, "aside_emit", None)
+    if not emit or getattr(_turn, "aside_run", None) is not None:
+        return
+    context = getattr(_turn, "reply_context", None)
+    conv = getattr(_turn, "conversation", None)
+    if not context or conv is None:
+        return
+    run = _AsideRun()
+    _turn.aside_run = run
+    run.thread = threading.Thread(target=_write_aside, args=(run, topic, list(context), conv, emit),
+                                  daemon=True)
+    run.thread.start()
+
+
+def _aside_messages(topic: str, context, local: bool):
+    """Her prompt for the hold-on line: the same fixed blocks as her reply
+    (the built-in model reuses them), the conversation, and the note on the
+    latest user message (one message, so the roles still alternate)."""
+    ctx = [dict(m) for m in context]
+    for m in reversed(ctx):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            m["content"] = m["content"] + ASIDE_NOTE.format(topic=topic.strip()[:200])
+            break
+    return _ordered_prompt(_PLAIN_RULES_JA if local else _PACK_RULES, PROACTIVE_SEARCH_BLOCK,
+                           [], ctx, right_now=_right_now_note())
+
+
+def _write_aside(run: "_AsideRun", topic: str, context, conv, emit) -> None:
+    started = time.monotonic()
+    try:
+        client = get_llm(API_KEY, LLM_Model).bind(max_tokens=ASIDE_MAX_TOKENS)
+        local = _is_local(client)
+        messages = _aside_messages(topic, context, local)
+        if local:
+            pack = _two_step_pack(client, messages, context, "Hold-on line")
+        else:
+            pack = _structured(client, AmadeusPack, messages)
+        jps = (pack.assistant_reply_JPS or "").strip()
+        eng = (pack.assistant_reply_ENG or "").strip() or jps
+        if not jps or pack.assistant_reply_JPS == _honest_plain_failure_pack().assistant_reply_JPS:
+            print("[Amadeus] Hold-on line: no usable line - skipped.")
+            return
+    except Exception as exc:
+        print(f"[Amadeus] Hold-on line failed (skipped): {exc!r}")
+        return
+    with run.lock:
+        if run.closed:
+            print(f"[Amadeus] Hold-on line ready after the answer ({time.monotonic() - started:.1f}s) - dropped.")
+            return
+        try:
+            run.saved_id = store.append_message("assistant", eng, conversation_id=conv,
+                                                japanese=jps, aside=True)
+        except Exception as exc:
+            print(f"[Amadeus] Hold-on line could not be saved: {exc!r}")
+            return
+    print(f"[Amadeus] Hold-on line ({time.monotonic() - started:.1f}s): {jps}")
+    try:
+        emit(run.saved_id, AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=eng))
+    except Exception as exc:
+        print(f"[Amadeus] Hold-on line could not be sent to the screen: {exc!r}")
+
+
+def close_aside():
+    """Her answer is ready (or failed): a hold-on line still being written is
+    dropped. Returns the id of the one that was saved, else None."""
+    run = getattr(_turn, "aside_run", None)
+    _turn.aside_run = None
+    if run is None:
+        return None
+    with run.lock:
+        run.closed = True
+        return run.saved_id
+
+
 # --- Lookup memory (2026-10-25) ------------------------------------------------
 # Every search is saved per chat (memory.save_lookup). A later search for the
 # same thing in the same chat uses the saved notes while they are fresh
@@ -942,6 +1045,7 @@ def _reread_lookup(lookup_id) -> str:
               "read": None, "engine": lookup.get("engine"), "rechecked": lookup["id"]}
     _record_source(source)
     if urls or results:
+        _maybe_start_aside(lookup["query"])
         _progress("reading", "Re-reading " + ", ".join(webreader._site(u) for u in urls[:3]) + "...")
         ordered = ([r for r in results if r["url"] in urls]
                    + [r for r in results if r["url"] not in urls]) or [{"url": u} for u in urls]
@@ -985,6 +1089,7 @@ def _web_search_with_content(query: str, allow_reuse: bool = True) -> str:
         _progress("thinking", "Amadeus is thinking...")
         return _lookup_text(reuse, "the same search, still fresh")
     _note_search_engine(None)
+    _maybe_start_aside(query)
     _progress("searching", f'Searching the web: "{query}"')
     text = _run_web_search(query)
     results = _parse_search_results(text)
@@ -3869,6 +3974,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     llm = _reply_llm()
     # This reply's searches (saved with its row) + the chat its lookups go to.
     _begin_turn_sources(store.load_active_conversation())
+    _turn.reply_context = message_context   # for her hold-on line
 
     web_on = store.load_web_access()
     # Local model, web off: her Japanese line as plain text + the English line
@@ -4232,9 +4338,16 @@ def getOutputPacked(user_message: str):
     except Exception:
         # No reply came back (server unreachable, timeout, ...). Remove the
         # user turn so memory never contains a message with no answer and the
-        # next internal-context snapshot stays honest.
+        # next internal-context snapshot stays honest. (Her hold-on line, if
+        # one was saved, goes with it.)
+        aside_id = close_aside()
+        if aside_id:
+            store.delete_message(aside_id)
         store.delete_message(user_id)
         raise
+    # Her hold-on line, if still being written, is dropped now: the answer
+    # is stored right after it, never before it.
+    close_aside()
 
     # Store what the user actually sees, plus the Japanese line she actually
     # spoke, so her future context is in her own voice.
@@ -4519,7 +4632,7 @@ def regenerateReply():
         # A startup greeting is a standalone turn: there is no user message
         # behind it to re-answer, so regeneration is a clean no-op here
         # instead of reaching back to whatever user message sits before it.
-        if store.get_message_is_greeting(last["id"]):
+        if store.get_message_is_greeting(last["id"]) or store.get_message_is_aside(last["id"]):
             raise ValueError("Nothing to regenerate here")
         excluded = store.get_trailing_turn() or [last["id"]]
         target = store.get_message_before(excluded)

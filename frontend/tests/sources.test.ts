@@ -64,7 +64,7 @@ assert.equal(links[2].title, "prydwen.gg");               // no title -> the sit
 assert.equal(links[2].domain, "prydwen.gg");
 assert.equal(links[3].kind, "weather");
 assert.equal(links[3].title, "Live weather for Tokyo");
-assert.deepEqual(searchQueries(entries), ["Genshin banner"]);
+assert.deepEqual(searchQueries(entries), [{ query: "Genshin banner", reused: false }]);
 
 // A later search can supply a date the first one lacked.
 const merged = sourceLinks(normalizeSources([
@@ -79,6 +79,25 @@ assert.equal(merged[0].read, true);
 assert.equal(domainOf("https://www.Game8.co/x"), "game8.co");
 assert.equal(domainOf("not a url"), "");
 
+// Reader mode: every page she took notes from is marked "read"; saved notes.
+const reader = normalizeSources([
+  { kind: "search", query: "q", read: "https://a.example/1",
+    used: ["https://a.example/1", "https://c.example/3", "javascript:x"], reused: true,
+    results: [{ title: "A", url: "https://a.example/1" }, { title: "B", url: "https://b.example/2" },
+              { title: "C", url: "https://c.example/3/" }] },
+]);
+assert.ok(reader[0].kind === "search" && reader[0].used?.length === 2 && reader[0].reused === true);
+const readerLinks = sourceLinks(reader);
+assert.deepEqual(readerLinks.map((l) => l.read), [true, false, true]);
+assert.equal(chipLabel(readerLinks, reader), "From my notes · 3 sources · read 2");
+assert.deepEqual(searchQueries(reader), [{ query: "q", reused: true }]);
+const notReused = normalizeSources([{ kind: "search", query: "q", read: null, reused: "yes",
+  results: [{ title: "A", url: "https://a.example/1" }] }]);
+assert.ok(notReused[0].kind === "search" && notReused[0].reused === undefined);
+assert.equal(chipLabel(sourceLinks(notReused), notReused), "1 source");
+const openReused = renderToStaticMarkup(createElement(SourcesBar, { sources: reader, defaultOpen: true }));
+assert.match(openReused, /from my notes/);
+
 // --- dateLabel: friendly, and old pages are marked.
 assert.deepEqual(dateLabel("2026-10-25", NOW), { text: "today", stale: false });
 assert.deepEqual(dateLabel("2026-10-24", NOW), { text: "yesterday", stale: false });
@@ -90,8 +109,9 @@ assert.equal(dateLabel(undefined, NOW), null);
 assert.equal(dateLabel("2026-13-01", NOW), null);
 assert.equal(dateLabel("soon", NOW), null);
 
-assert.equal(chipLabel(links), "4 sources");
-assert.equal(chipLabel(links.slice(0, 1)), "1 source");
+assert.equal(chipLabel(links), "4 sources · read 1");
+assert.equal(chipLabel(links.slice(0, 1)), "1 source · read 1");
+assert.equal(chipLabel(links.slice(1, 2)), "1 source");
 assert.equal(chipLabel(links.slice(3)), "Live weather");
 assert.equal(badgeHue("game8.co"), badgeHue("game8.co"));
 assert.ok(badgeHue("game8.co") >= 0 && badgeHue("game8.co") < 360);
@@ -100,7 +120,7 @@ assert.ok(badgeHue("game8.co") >= 0 && badgeHue("game8.co") < 360);
 const closed = renderToStaticMarkup(createElement(SourcesBar, { sources: entries }));
 assert.match(closed, /class="sources-chip"/);
 assert.match(closed, /aria-expanded="false"/);
-assert.match(closed, /4 sources/);
+assert.match(closed, /4 sources · read 1/);
 assert.doesNotMatch(closed, /sources-panel/);
 assert.doesNotMatch(closed, /javascript:/);
 assert.equal(renderToStaticMarkup(createElement(SourcesBar, { sources: [] })), "");

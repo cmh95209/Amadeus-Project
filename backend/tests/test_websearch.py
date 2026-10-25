@@ -434,6 +434,12 @@ class SourcesForUiTests(unittest.TestCase):
             self.assertEqual(store.sources_for_ui(raw), [])
 
 
+def stream_events(resp):
+    """The data events of a text/event-stream response, in order."""
+    body = resp.get_data(as_text=True)
+    return [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+
+
 class SourcesInChatTests(unittest.TestCase):
     SOURCES = [{"kind": "search", "query": "Genshin banner", "engine": "firecrawl",
                 "read": "https://game8.co/a",
@@ -484,8 +490,9 @@ class SourcesInChatTests(unittest.TestCase):
              patch.object(chat.store, "load_web_access", return_value=True), \
              patch.object(api, "getOutputPacked", side_effect=fake_turn):
             resp = api.application.test_client().post("/", json={"user_input": "banner?"})
-        data = resp.get_json()
+        data = stream_events(resp)[-1]          # web ON = a live stream since 2026-10-25
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(data["phase"], "reply")
         self.assertEqual(data["sources"][0]["query"], "Genshin banner")
         self.assertEqual(data["sources"][0]["results"][0]["date"], "2026-10-24")
 
@@ -497,7 +504,7 @@ class SourcesInChatTests(unittest.TestCase):
         with patch.object(api, "has_api_key", return_value=True), \
              patch.object(chat.store, "load_web_access", return_value=True), \
              patch.object(api, "getOutputPacked", side_effect=fake_turn):
-            data = api.application.test_client().post("/", json={"user_input": "hi"}).get_json()
+            data = stream_events(api.application.test_client().post("/", json={"user_input": "hi"}))[-1]
         self.assertEqual(data["sources"], [])
 
 

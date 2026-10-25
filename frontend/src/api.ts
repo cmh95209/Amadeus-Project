@@ -29,6 +29,8 @@ export type MemoryMessage = {
   is_greeting?: boolean;
   /** The web pages / live data her reply used (web access ON); shown under it. */
   sources?: SourceEntry[];
+  /** Her "hold on, let me check" line before a web answer (own line, no Regenerate). */
+  is_aside?: boolean;
   /** Screen-only: her voice started before the English line arrived. */
   translating?: boolean;
 };
@@ -101,7 +103,15 @@ export type MessageTurn = {
   text: Promise<string>;
 };
 
-export async function sendMessage(userInput: string): Promise<MessageTurn> {
+/** What a live web-ON reply reports while it is being written. */
+export type StreamHooks = {
+  /** A real step: "Searching the web: ...", "Reading game8.co...", ... */
+  onStatus?: (text: string, step: string) => void;
+  /** Her "hold on, let me check" line (saved; speak it at once). */
+  onAside?: (aside: MessageReply) => void;
+};
+
+export async function sendMessage(userInput: string, hooks: StreamHooks = {}): Promise<MessageTurn> {
   const response = await fetch(`${API_BASE}/`, {
     method: "POST",
     headers: {
@@ -114,9 +124,10 @@ export async function sendMessage(userInput: string): Promise<MessageTurn> {
 
   // Voice-first (web OFF) streams two events: "voice" (start audio at once)
   // then "text" (the display line, filled by the backend's fast call 2).
+  // Web ON streams status steps, maybe her hold-on line, then "reply".
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
   if (contentType.includes("text/event-stream")) {
-    return await readVoiceFirstStream(response);
+    return await readVoiceFirstStream(response, hooks);
   }
 
   const data = await parseResponse(response);
@@ -148,14 +159,39 @@ type VoiceFirstEvent = {
   conversation_id?: number;
   response?: string;
   japanese?: string;
+  step?: string;
+  text?: string;
+  message?: string;
+  sources?: unknown;
 };
+
+function replyFromEvent(event: VoiceFirstEvent, response: string): MessageReply {
+  return {
+    response,
+    japanese: typeof event.japanese === "string" ? event.japanese : undefined,
+    speechUrl:
+      typeof event.speech_id === "string"
+        ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
+        : undefined,
+    userId: typeof event.user_id === "number" ? event.user_id : undefined,
+    assistantId: typeof event.assistant_id === "number" ? event.assistant_id : undefined,
+    conversationId:
+      typeof event.conversation_id === "number" ? event.conversation_id : undefined,
+  };
+}
 
 // Hands the turn back as soon as the "voice" event arrives, so her voice can
 // start while the backend is still writing the English line; the rest of the
 // stream is read in the background and settles `text`. (Until 2026-10-20 this
 // waited for the WHOLE stream, so the voice always waited for the English line
 // - 2 s on the built-in model, 9-20 s on cloud.)
-export async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
+//
+// The same reader handles the web-ON stream (2026-10-25): "status" steps and
+// her "aside" (hold-on line) go to the hooks; "reply" carries the whole reply
+// (both lines + sources) and settles both promises; "error" fails the turn.
+export async function readVoiceFirstStream(
+  response: Response, hooks: StreamHooks = {},
+): Promise<MessageTurn> {
   if (!response.ok) {
     const data = await parseResponse(response);
     throw new Error(data?.message || `Request failed (${response.status})`);
@@ -215,23 +251,25 @@ export async function readVoiceFirstStream(response: Response): Promise<MessageT
               continue; // a torn frame - the server always terminates frames
             }
             if (event.phase === "voice") {
-              reply = {
-                response: "",
-                japanese: typeof event.japanese === "string" ? event.japanese : undefined,
-                speechUrl:
-                  typeof event.speech_id === "string"
-                    ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
-                    : undefined,
-                userId: typeof event.user_id === "number" ? event.user_id : undefined,
-                assistantId:
-                  typeof event.assistant_id === "number" ? event.assistant_id : undefined,
-                conversationId:
-                  typeof event.conversation_id === "number" ? event.conversation_id : undefined,
-              };
+              reply = replyFromEvent(event, "");
               settleReply();
             } else if (event.phase === "text") {
               if (typeof event.response === "string") text = event.response;
               settleText(text);
+            } else if (event.phase === "status") {
+              if (typeof event.text === "string") hooks.onStatus?.(event.text, event.step ?? "");
+            } else if (event.phase === "aside") {
+              if (typeof event.response === "string") {
+                hooks.onAside?.(replyFromEvent(event, event.response));
+              }
+            } else if (event.phase === "reply") {
+              const full = typeof event.response === "string" ? event.response : "";
+              reply = { ...replyFromEvent(event, full), sources: normalizeSources(event.sources) };
+              text = full;
+              settleReply();
+              settleText(full);
+            } else if (event.phase === "error") {
+              failure = new Error(event.message || "The reply failed. Please try again.");
             }
           }
         }
@@ -454,6 +492,25 @@ export async function setWebAccess(enabled: boolean): Promise<void> {
   }));
 }
 
+/** How she reads pages after a search: "thorough" (reader mode, default) or
+ *  "quick"; `effective` is what is used right now ("quick" on a model server
+ *  that runs one task at a time) and `reason` says why, for Settings. */
+export type WebReading = { mode: "thorough" | "quick"; effective: string; reason: string };
+
+export async function getWebReading(): Promise<WebReading> {
+  const data = await parseResponse(await fetch(`${API_BASE}/webReading`, { cache: "no-store" }));
+  if (data.mode !== "thorough" && data.mode !== "quick") throw new Error("Could not read the web reading setting");
+  return { mode: data.mode, effective: String(data.effective ?? ""), reason: String(data.reason ?? "") };
+}
+
+export async function setWebReading(mode: "thorough" | "quick"): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/webReading`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  }));
+}
+
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
 export type ReasoningKey = "replies_builtin" | "replies_custom" | "translations";
 export type ReasoningInfo = Record<ReasoningKey, ReasoningLevel> & {
@@ -537,8 +594,12 @@ export async function undoLastReply(): Promise<UndoResult | null> {
   };
 }
 
-export async function regenerate(): Promise<MessageReply> {
+export async function regenerate(hooks: StreamHooks = {}): Promise<MessageReply> {
   const response = await fetch(`${API_BASE}/regenerate`, { method: "POST" });
+  // Web ON: the same live stream as a new reply (status steps, then "reply").
+  if ((response.headers.get("content-type") || "").toLowerCase().includes("text/event-stream")) {
+    return (await readVoiceFirstStream(response, hooks)).reply;
+  }
   const data = await parseResponse(response);
   if (typeof data.response !== "string") throw new Error("Backend returned an invalid response");
   return {

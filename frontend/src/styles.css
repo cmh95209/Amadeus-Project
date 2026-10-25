@@ -639,6 +639,36 @@ button {
   color: #d1a65f;
 }
 
+.sources-reused {
+  color: #8fd1ac;
+}
+
+/* Web ON: what her reply is doing right now, under the typing dots. */
+.web-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 5px 0;
+  color: #8b95a3;
+  font-size: 12px;
+  line-height: 1.4;
+  animation: sources-in 0.16s ease-out;
+}
+
+.web-status-spinner {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid rgba(139, 149, 163, 0.35);
+  border-top-color: #8fb3dd;
+  border-radius: 50%;
+  animation: web-status-spin 0.8s linear infinite;
+}
+
+@keyframes web-status-spin {
+  to { transform: rotate(360deg); }
+}
+
 .sources-empty {
   margin: 2px;
   color: #8b95a3;
@@ -646,7 +676,8 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sources-panel { animation: none; }
+  .sources-panel, .web-status { animation: none; }
+  .web-status-spinner { animation: none; }
   .sources-chip, .source-card { transition: none; }
 }
 

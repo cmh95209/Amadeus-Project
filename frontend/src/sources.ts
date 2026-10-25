@@ -8,6 +8,10 @@ export type SearchSource = {
   results: { title: string; url: string; date?: string }[];
   /** The page she read in full (null when none could be read). */
   read: string | null;
+  /** Reader mode: every page she took notes from. */
+  used?: string[];
+  /** Her saved notes from an earlier lookup were used (no new search). */
+  reused?: boolean;
 };
 
 export type WeatherSource = {
@@ -24,7 +28,7 @@ export type SourceLink = {
   title: string;
   domain: string;
   date?: string;
-  /** She read this page in full (not just its snippet). */
+  /** She read this page (took notes from it), not just its snippet. */
   read: boolean;
   /** "weather" for the live-weather service, "web" otherwise. */
   kind: "web" | "weather";
@@ -58,11 +62,16 @@ export function normalizeSources(raw: unknown): SourceEntry[] {
             }];
           })
         : [];
+      const used = Array.isArray(e.used)
+        ? e.used.filter(isWebLink).map((u) => u.trim())
+        : [];
       out.push({
         kind: "search",
         query: typeof e.query === "string" ? e.query : "",
         results,
         read: isWebLink(e.read) ? e.read.trim() : null,
+        ...(used.length ? { used } : {}),
+        ...(e.reused === true ? { reused: true } : {}),
       });
     } else if (e.kind === "weather") {
       out.push({
@@ -108,12 +117,13 @@ export function sourceLinks(entries: SourceEntry[]): SourceLink[] {
       }
       continue;
     }
-    const readKey = entry.read ? linkKey(entry.read) : "";
+    const readKeys = new Set([entry.read, ...(entry.used ?? [])]
+      .filter((u): u is string => !!u).map(linkKey));
     for (const r of entry.results) {
       const key = linkKey(r.url);
       const prev = seen.get(key);
       if (prev) {
-        if (key === readKey) prev.read = true;
+        if (readKeys.has(key)) prev.read = true;
         if (!prev.date && r.date) prev.date = r.date;
         continue;
       }
@@ -122,7 +132,7 @@ export function sourceLinks(entries: SourceEntry[]): SourceLink[] {
         title: r.title || domainOf(r.url),
         domain: domainOf(r.url),
         ...(r.date ? { date: r.date } : {}),
-        read: key === readKey,
+        read: readKeys.has(key),
         kind: "web",
       });
     }
@@ -130,12 +140,14 @@ export function sourceLinks(entries: SourceEntry[]): SourceLink[] {
   return [...seen.values()];
 }
 
-/** The searches she ran (non-empty queries, each once). */
-export function searchQueries(entries: SourceEntry[]): string[] {
-  const out: string[] = [];
+/** The searches she ran (non-empty queries, each once); `reused` = answered
+ *  from her saved notes of an earlier lookup instead of a new search. */
+export function searchQueries(entries: SourceEntry[]): { query: string; reused: boolean }[] {
+  const out: { query: string; reused: boolean }[] = [];
   for (const e of entries) {
-    if (e.kind === "search" && e.query.trim() && !out.includes(e.query.trim())) {
-      out.push(e.query.trim());
+    const q = e.kind === "search" ? e.query.trim() : "";
+    if (q && !out.some((x) => x.query === q)) {
+      out.push({ query: q, reused: e.kind === "search" && e.reused === true });
     }
   }
   return out;
@@ -165,10 +177,18 @@ export function dateLabel(iso: string | undefined, now: Date = new Date()): { te
   return { text, stale: days > STALE_DAYS };
 }
 
-/** The chip's text: "5 sources" / "1 source" / "Live weather". */
-export function chipLabel(links: SourceLink[]): string {
+/** The chip's text: "5 sources · read 3" / "1 source" / "Live weather";
+ *  "From my notes · ..." when every search was answered from saved notes. */
+export function chipLabel(links: SourceLink[], entries: SourceEntry[] = []): string {
   if (links.length === 1 && links[0].kind === "weather") return "Live weather";
-  return `${links.length} source${links.length === 1 ? "" : "s"}`;
+  let label = `${links.length} source${links.length === 1 ? "" : "s"}`;
+  const read = links.filter((l) => l.kind === "web" && l.read).length;
+  if (read > 0) label += ` · read ${read}`;
+  const searches = entries.filter((e) => e.kind === "search");
+  if (searches.length > 0 && searches.every((e) => e.kind === "search" && e.reused)) {
+    label = "From my notes · " + label;
+  }
+  return label;
 }
 
 /** A steady colour for a site's letter badge (same site, same colour). */

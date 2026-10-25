@@ -48,7 +48,7 @@ function SourceCard({ link, index }: { link: SourceLink; index: number }) {
               className="source-read"
               title={link.kind === "weather"
                 ? "Live data she used for this reply"
-                : "She read this page in full, not just its snippet"}
+                : "She read this page and took notes from it, not just its snippet"}
             >
               {link.kind === "weather" ? "live" : "read"}
             </span>
@@ -96,7 +96,7 @@ export function SourcesBar({ sources, defaultOpen = false }: {
           </span>
         )}
         <span className="sources-chip-label">
-          {links.length > 0 ? chipLabel(links) : "Searched the web"}
+          {links.length > 0 ? chipLabel(links, sources) : "Searched the web"}
         </span>
         <span className="sources-chevron" aria-hidden="true">{open ? "▴" : "▾"}</span>
       </button>
@@ -107,7 +107,15 @@ export function SourcesBar({ sources, defaultOpen = false }: {
             <div className="sources-queries">
               <span className="sources-heading">Searched</span>
               {queries.map((q) => (
-                <span key={q} className="sources-query" title={q}>{q}</span>
+                <span key={q.query} className="sources-query" title={q.query}>
+                  {q.query}
+                  {q.reused && (
+                    <span className="sources-reused"
+                      title="Answered from her saved notes of an earlier search in this chat">
+                      {" "}· from my notes
+                    </span>
+                  )}
+                </span>
               ))}
             </div>
           )}
