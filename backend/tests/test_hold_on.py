@@ -157,6 +157,42 @@ class AsideWriterTests(_Db):
         # Started only once per reply.
         chat._turn.aside_run = None
 
+    def test_she_is_shown_her_earlier_lines_and_retries_a_repeat(self):
+        # Two earlier hold-on lines in this chat (2026-10-26: word for word the same).
+        store.append_message("assistant", "Hang on.", conversation_id=1,
+                             japanese="ちょっと待って、今調べてみるわね。", aside=True)
+        store.append_message("assistant", "Hang on.", conversation_id=1,
+                             japanese="ちょっと待って、今調べてみるわね。", aside=True)
+        self.assertEqual(store.recent_aside_lines(1),
+                         ["ちょっと待って、今調べてみるわね。"] * 2)
+        packs = [chat.AmadeusPack(assistant_reply_JPS="ちょっと待って、今調べてみるわね。",
+                                  assistant_reply_ENG="Hang on, let me look."),
+                 chat.AmadeusPack(assistant_reply_JPS="原神のバナー？今見てみるわ。",
+                                  assistant_reply_ENG="The Genshin banner? Let me look.")]
+        prompts = []
+
+        def fake_two_step(client, messages, context, label):
+            prompts.append(messages)
+            return packs[len(prompts) - 1]
+        got = []
+        done = threading.Event()
+        chat._begin_turn_sources(1)
+        chat._turn.reply_context = self.CONTEXT
+        chat._turn.aside_emit = lambda aid, pack: (got.append(pack.assistant_reply_JPS), done.set())
+        with patch.object(chat, "get_llm", return_value=SimpleNamespace(bind=lambda **k: "client")), \
+             patch.object(chat, "_is_local", return_value=True), \
+             patch.object(chat, "_two_step_pack", side_effect=fake_two_step):
+            chat._maybe_start_aside("Genshin Impact current banner")
+            self.assertTrue(done.wait(5))
+            chat._turn.aside_run.thread.join(5)
+        self.assertEqual(len(prompts), 2)                                   # one retry
+        note = [m for m in prompts[0] if m.get("role") == "user"][-1]["content"]
+        self.assertIn("Word it differently from your earlier hold-on lines", note)
+        self.assertIn("「ちょっと待って、今調べてみるわね。」", note)
+        self.assertIn("Name what you are checking", note)
+        self.assertEqual(got, ["原神のバナー？今見てみるわ。"])
+        chat.close_aside()
+
     def test_dropped_when_the_answer_is_first(self):
         got = []
         self.start(lambda aid, pack: got.append(aid), write_delay=0.3)

@@ -846,9 +846,14 @@ ASIDE_MAX_TOKENS = 160
 ASIDE_NOTE = (
     "\n\n(Internal note: you are about to look this up on the web for the user right "
     "now: \"{topic}\". Say ONE short spoken line, in character, telling them you are "
-    "checking it now - like someone glancing at their phone. Do NOT answer, guess or "
-    "state any facts about it yet, do not promise results, do not ask a question. "
-    "Keep it to one short sentence.)")
+    "checking it now - like someone glancing at their phone. Name what you are checking "
+    "in a few words. Do NOT answer, guess or state any facts about it yet, do not promise "
+    "results, do not ask a question. Keep it to one short sentence.{avoid})")
+# Her earlier hold-on lines in this chat, so she does not say the same one
+# again (2026-10-26: two in a row were word for word 「ちょっと待って、今調べて
+# みるわね。」). A line still this similar to one of them gets ONE retry.
+ASIDE_RECENT = 4
+ASIDE_SAME_RATIO = 0.8
 
 
 class _AsideRun:
@@ -877,14 +882,28 @@ def _maybe_start_aside(topic: str) -> None:
     run.thread.start()
 
 
-def _aside_messages(topic: str, context, local: bool):
+def _aside_avoid_text(lines) -> str:
+    if not lines:
+        return ""
+    quoted = "、".join(f"「{x.strip()}」" for x in lines if x and x.strip())
+    return (" Word it differently from your earlier hold-on lines in this chat: "
+            + quoted + ".") if quoted else ""
+
+
+def _aside_too_similar(line: str, lines) -> bool:
+    return any(difflib.SequenceMatcher(None, line.strip(), (x or "").strip()).ratio()
+               >= ASIDE_SAME_RATIO for x in lines or [])
+
+
+def _aside_messages(topic: str, context, local: bool, avoid=None):
     """Her prompt for the hold-on line: the same fixed blocks as her reply
     (the built-in model reuses them), the conversation, and the note on the
     latest user message (one message, so the roles still alternate)."""
     ctx = [dict(m) for m in context]
     for m in reversed(ctx):
         if m.get("role") == "user" and isinstance(m.get("content"), str):
-            m["content"] = m["content"] + ASIDE_NOTE.format(topic=topic.strip()[:200])
+            m["content"] = m["content"] + ASIDE_NOTE.format(
+                topic=topic.strip()[:200], avoid=_aside_avoid_text(avoid))
             break
     return _ordered_prompt(_PLAIN_RULES_JA if local else _PACK_RULES, PROACTIVE_SEARCH_BLOCK,
                            [], ctx, right_now=_right_now_note())
@@ -895,11 +914,20 @@ def _write_aside(run: "_AsideRun", topic: str, context, conv, emit) -> None:
     try:
         client = get_llm(API_KEY, LLM_Model).bind(max_tokens=ASIDE_MAX_TOKENS)
         local = _is_local(client)
-        messages = _aside_messages(topic, context, local)
-        if local:
-            pack = _two_step_pack(client, messages, context, "Hold-on line")
-        else:
-            pack = _structured(client, AmadeusPack, messages)
+        try:
+            recent = store.recent_aside_lines(conv, ASIDE_RECENT)
+        except Exception:
+            recent = []
+
+        def write(avoid):
+            messages = _aside_messages(topic, context, local, avoid)
+            if local:
+                return _two_step_pack(client, messages, context, "Hold-on line")
+            return _structured(client, AmadeusPack, messages)
+        pack = write(recent)
+        if recent and _aside_too_similar(pack.assistant_reply_JPS or "", recent):
+            print("[Amadeus] Hold-on line repeats an earlier one - one retry.")
+            pack = write(recent + [pack.assistant_reply_JPS or ""])
         jps = (pack.assistant_reply_JPS or "").strip()
         eng = (pack.assistant_reply_ENG or "").strip() or jps
         if not jps or pack.assistant_reply_JPS == _honest_plain_failure_pack().assistant_reply_JPS:
@@ -2679,34 +2707,55 @@ def _pretend_lookup_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
 # ("upcoming, in 4 days"); this net checks her reply: a date after today in a
 # past-tense sentence (English or Japanese line) gets ONE corrective rewrite.
 # Still wrong -> the original is served (never blocks a reply).
+def _date_problems(pack: "AmadeusPack"):
+    """(future dates said as past, months called "last year" that her English
+    line dates to this year) in her reply."""
+    eng, jps = pack.assistant_reply_ENG or "", pack.assistant_reply_JPS or ""
+    return (webdates.past_tense_future_dates(eng, jps),
+            webdates.last_year_on_this_year(eng, jps))
+
+
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December")
+
+
 def _tense_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
     if not _lookup_ran():
         return pack
-    wrong = webdates.past_tense_future_dates(pack.assistant_reply_ENG or "",
-                                             pack.assistant_reply_JPS or "")
-    if not wrong:
+    future_past, last_year = _date_problems(pack)
+    if not future_past and not last_year:
         return pack
-    today = datetime.now().strftime("%B %d, %Y")
-    dates = ", ".join(sorted({d.strftime("%B %d, %Y") for d, _ in wrong}))
-    print(f"[Amadeus] Web ON: reply puts upcoming dates ({dates}) in the past tense - "
-          "one corrective rewrite.")
+    now = datetime.now()
+    today = now.strftime("%B %d, %Y")
+    problems = []
+    if future_past:
+        dates = ", ".join(sorted({d.strftime("%B %d, %Y") for d, _ in future_past}))
+        problems.append(f"{dates} is still in the FUTURE, but you described it as already "
+                        "past - say it is upcoming (\"will be released on ...\" / 「…に発売予定」)")
+        print(f"[Amadeus] Web ON: reply puts upcoming dates ({dates}) in the past tense.")
+    if last_year:
+        months = ", ".join(sorted({f"{_MONTH_NAMES[m - 1]} {now.year}" for m, _ in last_year}))
+        problems.append(f"{months} is THIS year ({now.year}), but you called it last year "
+                        "(去年 / 昨年 / \"last ...\") - say this year (今年) or give the date")
+        print(f"[Amadeus] Web ON: reply calls {months} \"last year\".")
+    print("[Amadeus] Web ON: one corrective rewrite for the dates.")
     rewrite_llm = llm.bind_tools(
         [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
     convo = (list(messages)
              + [{"role": "assistant", "content": pack.assistant_reply_ENG or ""}]
              + [{"role": "user", "content": (
-                 f"(Internal note: today is {today}. In your last reply, {dates} is still in "
-                 "the FUTURE, but you described it as already past. Rewrite the reply so "
-                 "anything dated after today is upcoming (\"will be released on ...\" / "
-                 "「…に発売予定」), keeping everything else the same. Use the AmadeusPack tool.)"
+                 f"(Internal note: today is {today}. In your last reply: "
+                 + "; ".join(problems) + ". Rewrite the reply with the dates right in BOTH the "
+                 "Japanese and the English line, keeping everything else the same. Use the "
+                 "AmadeusPack tool.)"
              )}])
     try:
         reply = _invoke_forced(rewrite_llm, convo)
         calls = getattr(reply, "tool_calls", None) or []
         if calls and calls[0].get("name") == "AmadeusPack":
             new = _pack_from_args(calls[0].get("args"))
-            if (not _degenerate_pack(new) and not webdates.past_tense_future_dates(
-                    new.assistant_reply_ENG or "", new.assistant_reply_JPS or "")):
+            still_future, still_last = _date_problems(new)
+            if not _degenerate_pack(new) and not still_future and not still_last:
                 return new
     except Exception as exc:
         print("[Amadeus] Web ON: tense rewrite failed:", repr(exc))

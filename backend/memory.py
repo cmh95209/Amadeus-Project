@@ -2808,6 +2808,22 @@ def ensure_greeting_group(message_id: int) -> None:
 #       is_greeting flag) - such a row is a standalone turn with no user
 #       message behind it, so regenerate/undo/version logic keeps its own
 #       lane and never folds it into a neighboring reply's version stack
+# post: her latest "hold on" lines in the chat (Japanese, newest first)
+def recent_aside_lines(conversation_id: int, limit: int = 4) -> list:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        rows = c.execute(
+            "SELECT COALESCE(NULLIF(japanese, ''), content) FROM messages "
+            "WHERE conversation_id = ? AND COALESCE(aside, 0) = 1 ORDER BY id DESC LIMIT ?",
+            (int(conversation_id), int(limit))).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0]]
+
+
 def get_message_is_aside(message_id) -> bool:
     conn = _connect_db()
     try:
