@@ -168,6 +168,22 @@ class FetchPagesTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 2.0)
         self.assertEqual([p["rank"] for p in got], [2, 3, 4])
 
+    def test_enough_pages_end_the_wait(self):
+        pages = {r["url"]: ok_page(r["title"]) for r in RESULTS}
+        fetch = fake_fetch(pages, {"https://site1.example/p": 3})
+        start = time.monotonic()
+        got = wr.fetch_pages(RESULTS, fetch, time.monotonic() + 10, max_pages=2)
+        self.assertLess(time.monotonic() - start, 1.5)           # did not wait for site1
+        self.assertEqual(len(got), 2)
+
+    def test_with_a_preference_it_waits_for_a_preferred_page(self):
+        pages = {r["url"]: ok_page("Oct 13 - Nov 3" if r["title"] == "R3" else r["title"])
+                 for r in RESULTS}
+        fetch = fake_fetch(pages, {"https://site3.example/p": 0.4})
+        got = wr.fetch_pages(RESULTS, fetch, time.monotonic() + 10, max_pages=2,
+                             prefer=lambda p: "Nov 3" in p["text"])
+        self.assertEqual(got[0]["rank"], 3)
+
     def test_nothing_to_fetch(self):
         self.assertEqual(wr.fetch_pages([], fake_fetch({}), time.monotonic() + 5), [])
         self.assertEqual(wr.fetch_pages(RESULTS, fake_fetch({}), time.monotonic() - 1), [])
