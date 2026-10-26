@@ -209,6 +209,7 @@ def fetch_pages(results, fetch, deadline, progress=None, max_pages=MAX_PAGES,
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(tries))
     futures = {pool.submit(fetch, r["url"], timeout): (i, r) for i, r in enumerate(tries)}
     got = {}
+    done = set()
     try:
         for fut in concurrent.futures.as_completed(futures, timeout=max(0.5, _remaining(deadline))):
             i, r = futures[fut]
@@ -222,11 +223,18 @@ def fetch_pages(results, fetch, deadline, progress=None, max_pages=MAX_PAGES,
                           "date": (page.get("updated") or page.get("published")
                                    or r.get("date") or page.get("title_month") or ""),
                           "text": page.get("text", ""), "rank": i + 1}
-                if len(got) >= max_pages and (
-                        prefer is None or any(_safe_prefer(prefer, p) for p in got.values())):
-                    break
             elif progress:
                 progress("skip", f"Couldn't open {_site(r['url'])}, skipping it")
+            done.add(i)
+            # Stop once the best-ranked readable pages are settled: every
+            # better-ranked result has arrived (or failed). Never "whichever
+            # page came first" - that read weak pages (2026-10-26 test set).
+            ok = sorted(got)
+            if len(ok) >= max_pages:
+                kth = ok[max_pages - 1]
+                if all(j in done for j in range(kth)) and (
+                        prefer is None or any(_safe_prefer(prefer, got[j]) for j in ok[:max_pages])):
+                    break
     except concurrent.futures.TimeoutError:
         pass
     finally:

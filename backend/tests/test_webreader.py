@@ -170,11 +170,19 @@ class FetchPagesTests(unittest.TestCase):
 
     def test_enough_pages_end_the_wait(self):
         pages = {r["url"]: ok_page(r["title"]) for r in RESULTS}
-        fetch = fake_fetch(pages, {"https://site1.example/p": 3})
+        fetch = fake_fetch(pages, {"https://site4.example/p": 3})
         start = time.monotonic()
         got = wr.fetch_pages(RESULTS, fetch, time.monotonic() + 10, max_pages=2)
-        self.assertLess(time.monotonic() - start, 1.5)           # did not wait for site1
-        self.assertEqual(len(got), 2)
+        self.assertLess(time.monotonic() - start, 1.5)           # did not wait for site4
+        self.assertEqual([p["rank"] for p in got], [1, 2])
+
+    def test_a_better_ranked_page_is_waited_for(self):
+        # Quick mode reads ONE page: it must be the best-ranked readable one,
+        # not whichever download finished first.
+        pages = {r["url"]: ok_page(r["title"]) for r in RESULTS}
+        fetch = fake_fetch(pages, {"https://site1.example/p": 0.4})
+        got = wr.fetch_pages(RESULTS, fetch, time.monotonic() + 10, max_pages=1, max_tries=3)
+        self.assertEqual([p["rank"] for p in got], [1])
 
     def test_with_a_preference_it_waits_for_a_preferred_page(self):
         pages = {r["url"]: ok_page("Oct 13 - Nov 3" if r["title"] == "R3" else r["title"])
