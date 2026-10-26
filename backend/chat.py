@@ -19,6 +19,7 @@ import ja_voice
 import speech_text
 import webdates
 import webfetch
+import weblinks
 import webreader
 import websearch
 import weather
@@ -765,13 +766,13 @@ def web_reading_reason() -> str:
     return "She reads the top pages and takes notes before answering."
 
 
-def _reader_call(pin_slot):
+def _reader_call(pin_slot, max_tokens=READER_MAX_TOKENS):
     """The reader call: her model, reasoning off, a short answer; on her
     built-in server pinned to the second slot."""
     client = get_llm(API_KEY, LLM_Model)
 
     def call(messages, timeout):
-        kwargs = {"max_tokens": READER_MAX_TOKENS, "timeout": max(1.0, float(timeout))}
+        kwargs = {"max_tokens": max_tokens, "timeout": max(1.0, float(timeout))}
         if pin_slot is not None:
             kwargs["extra_body"] = {**(getattr(client, "extra_body", None) or {}),
                                     "id_slot": pin_slot}
@@ -1109,6 +1110,8 @@ def _matching_lookup(query: str):
     if not wanted:
         return None
     for lk in _recent_lookups():
+        if _is_link_lookup(lk):
+            continue
         got = webreader.terms(lk.get("query", ""))
         if not got:
             continue
@@ -1144,6 +1147,8 @@ def _reread_lookup(lookup_id) -> str:
     if not lookup or (conv is not None and lookup.get("conversation_id") != conv):
         return (f"(There is no lookup #{lookup_id} in this chat. Use web_search if you "
                 "need to look something up.)")
+    if _is_link_lookup(lookup):
+        return _reread_link_lookup(lookup)
     if getattr(_turn, "skip_lookup_turn", None) is not None and \
             lookup.get("turn") == _turn.skip_lookup_turn:
         # Regenerate: the replaced answer's own lookup is searched afresh.
@@ -1178,6 +1183,238 @@ def _reread_lookup(lookup_id) -> str:
                         today=datetime.now().strftime("%Y-%m-%d")))
     # Nothing usable: search afresh.
     return _web_search_with_content(lookup["query"], allow_reuse=False)
+
+
+# --- Links the user sends (2026-10-26) ---------------------------------------------
+# Web ON and the user's LATEST message holds links: the app opens them itself
+# (at most 3; weblinks.fetch_link - risky links refused, X posts through
+# FxTwitter, every redirect checked, Keenable's reader as the backup), the
+# reader writes notes about what they asked (or the page's main points), and
+# her reply is written from the notes. Never a link she makes up, never a link
+# found on a page. Each page is saved as a lookup ("link: <address>") with its
+# text, so a follow-up re-reads the saved text instead of downloading again,
+# and the same link within LINK_REUSE_SECONDS is not downloaded twice.
+LINK_BUDGET_LOCAL = 25       # seconds: opening + reading the links, local / built-in
+LINK_BUDGET_CLOUD = 18       # seconds, cloud
+LINK_READER_MAX_TOKENS = 700
+LINK_REUSE_SECONDS = 20 * 60
+LINK_SAVE_CHARS = 20000      # page text kept with the lookup
+LINK_PAGE_CHARS = 12000      # page text one reader call sees
+LINK_QUERY_PREFIX = "link: "
+LINKS_RULE = (
+    "These are the pages from the links the user sent; you opened them yourself just "
+    "now (only those pages, nothing they link to). Answer from these notes, in your own "
+    "words. When a link could not be opened, say so plainly with the reason - never "
+    "guess what it says. Use web_search only if the user also wants something checked "
+    "beyond these pages.")
+LINKS_WEB_OFF_NOTE = (
+    "(Internal note: the user's latest message has a web link, but web access is OFF "
+    "in Settings, so you cannot open it - do not guess what the page says. Tell them "
+    "briefly that you can't open links while web access is off, and that you will read "
+    "it if they turn web access on. Then answer anything else they said normally.)")
+
+
+def _is_link_lookup(lookup) -> bool:
+    return str((lookup or {}).get("query") or "").startswith(LINK_QUERY_PREFIX)
+
+
+def _question_without_links(message) -> str:
+    """The user's words around their links ("" for a bare link)."""
+    text = weblinks._LINK_RE.sub(" ", str(message or ""))
+    return re.sub(r"\s+", " ", text).strip(" \t-:：、。,.")
+
+
+def _link_lookup(url):
+    """A lookup of this exact link in this chat from the last
+    LINK_REUSE_SECONDS that kept the page's text, else None."""
+    for lk in _recent_lookups():
+        if lk.get("query") == LINK_QUERY_PREFIX + url and \
+                _lookup_age_seconds(lk) <= LINK_REUSE_SECONDS and \
+                any(p.get("text") for p in lk.get("pages") or []):
+            return lk
+    return None
+
+
+def _fetch_links(urls, deadline) -> dict:
+    """Open the links in parallel -> {url: page}; one still loading at the
+    deadline counts as "took too long"."""
+    if not urls:
+        return {}
+    timeout = max(2.0, min(weblinks.LINK_TIMEOUT, deadline - time.monotonic() - 2))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(urls))
+    futures = {pool.submit(weblinks.fetch_link, u, timeout): u for u in urls}
+    got = {}
+    try:
+        for fut in concurrent.futures.as_completed(futures, timeout=timeout + 1):
+            u = futures[fut]
+            try:
+                got[u] = fut.result()
+            except Exception as exc:
+                print(f"[Amadeus] Opening {u} failed: {exc!r}")
+                got[u] = {"status": "error", "reason": "could not be opened", "url": u}
+    except concurrent.futures.TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    for u in urls:
+        got.setdefault(u, {"status": "error", "reason": "took too long", "url": u})
+    return got
+
+
+def _read_link_pages(question, pages, deadline) -> str:
+    """Notes (reader mode) or best paragraphs (quick mode) for the opened
+    pages -> the mode used. Fills each page's "notes" / "excerpt"."""
+    mode, parallel, pin, _local = web_reading_plan()
+    page_chars = min(webfetch.char_budget(store.effective_context_budget()), LINK_PAGE_CHARS)
+    if mode == "reader":
+        today = datetime.now().strftime("%Y-%m-%d")
+        webreader.read_pages(question, "", pages, _reader_call(pin, LINK_READER_MAX_TOKENS),
+                             deadline, today, page_chars, parallel=parallel,
+                             progress=_progress, links=True)
+    share = max(1500, page_chars // max(1, len(pages)))
+    for p in pages:
+        if not p.get("notes") and p.get("status") != "none":
+            # Quick mode, or the reader ran out of time: the best paragraphs.
+            p["excerpt"] = (webreader.best_chunks(p["text"], question, share, question)
+                            if webreader.terms(question) else
+                            webreader.spread_chunks(p["text"], share))
+    return mode
+
+
+def _links_block(pages, failed, skipped) -> str:
+    """Her prompt's part about the user's links: notes, what failed and why."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    parts = []
+    body = webreader.link_notes_block(pages)
+    if body:
+        parts.append(body)
+    elif pages:
+        parts.append("(The pages the user sent were opened but had nothing readable.)")
+    for i, u, reason in failed:
+        parts.append(f"[L{i}] Could not open {webreader._site(u)}: it {reason}.")
+    if skipped:
+        parts.append(f"(The user sent {skipped} more link{'s' if skipped != 1 else ''}; "
+                     f"only the first {weblinks.MAX_LINKS} were opened - say so.)")
+    parts.append(LINKS_RULE)
+    parts.append(SEARCH_DATE_NOTE.format(today=today))
+    return "\n\n".join(parts)
+
+
+def _link_source(i, u, page, status, reason="", lookup_id=None, reused=False) -> dict:
+    entry = {"kind": "link", "url": u, "final": page.get("final_url") or u,
+             "title": page.get("title") or "", "date": page.get("date") or "",
+             "status": status, "via": page.get("via")}
+    if reason:
+        entry["reason"] = reason
+    if lookup_id:
+        entry["lookup_id"] = lookup_id
+    if reused:
+        entry["reused"] = True
+    return entry
+
+
+def _save_link_lookup(u, page, mode):
+    conv = _lookup_conversation()
+    if conv is None:
+        return None
+    try:
+        final = page.get("final_url") or u
+        saved = [{"url": final, "title": page.get("title", ""), "date": page.get("date", ""),
+                  "rank": 1, "notes": page.get("notes"),
+                  "text": (page.get("text") or "")[:LINK_SAVE_CHARS]}]
+        return store.save_lookup(
+            conv, store.current_turn(conv), LINK_QUERY_PREFIX + u, page.get("via"), mode,
+            [{"title": page.get("title", ""), "url": final, "date": page.get("date", "")}],
+            saved, page.get("excerpt") or "")
+    except Exception as exc:
+        print(f"[Amadeus] Could not save the lookup for link {u}: {exc!r}")
+        return None
+
+
+def _read_user_links(message) -> str:
+    """Open + read the links in the user's latest message -> the text for
+    her prompt ("" when the message has no link)."""
+    links, skipped = weblinks.find_links(message)
+    if not links:
+        return ""
+    question = _question_without_links(message)
+    _, _, _, local = web_reading_plan()
+    deadline = time.monotonic() + (LINK_BUDGET_LOCAL if local else LINK_BUDGET_CLOUD)
+    sites = ", ".join(dict.fromkeys(webreader._site(u) for u in links))
+    _maybe_start_aside("the link" + ("s" if len(links) > 1 else "") + f" they sent ({sites})")
+    again = bool(_AGAIN_RE.search(question))
+    reused = {u: lk for u in links for lk in [None if again else _link_lookup(u)] if lk}
+    if reused:
+        _progress("notes", "Checking the page" + ("s" if len(reused) > 1 else "")
+                  + " I opened earlier...")
+    fresh = [u for u in links if u not in reused]
+    if fresh:
+        _progress("reading", "Opening " + ", ".join(webreader._site(u) for u in fresh) + "...")
+    opened = _fetch_links(fresh, deadline)
+    pages, failed = [], []
+    for i, u in enumerate(links, 1):
+        if u in reused:
+            saved = next(p for p in reused[u]["pages"] if p.get("text"))
+            page = {"url": saved.get("url") or u, "final_url": saved.get("url") or u,
+                    "title": saved.get("title", ""), "date": saved.get("date", ""),
+                    "text": saved["text"], "via": reused[u].get("engine"),
+                    "lookup": reused[u]["id"]}
+        else:
+            got = opened[u]
+            if got.get("status") != "ok":
+                reason = got.get("reason") or "could not be opened"
+                failed.append((i, u, reason))
+                _record_source(_link_source(i, u, got, "failed", reason))
+                if fresh:
+                    _progress("skip", f"Couldn't open {webreader._site(u)} - it {reason}")
+                continue
+            page = {"url": got.get("final_url") or u, "final_url": got.get("final_url") or u,
+                    "title": got.get("title", ""),
+                    "date": got.get("updated") or got.get("published") or got.get("title_month") or "",
+                    "text": got.get("text", ""), "via": got.get("via")}
+        page.update(rank=i, pasted=u)
+        pages.append(page)
+    mode = "-"
+    if pages:
+        _progress("reading", "Reading " + _site_list(pages) + "...")
+        mode = _read_link_pages(question, pages, deadline)
+    for p in pages:
+        status = "ok" if (p.get("notes") or p.get("excerpt")) else "empty"
+        lookup_id = p.get("lookup") or _save_link_lookup(p["pasted"], p, mode)
+        _record_source(_link_source(p["rank"], p["pasted"], p, status, lookup_id=lookup_id,
+                                    reused=bool(p.get("lookup"))))
+    print(f"[Amadeus] Links ({mode}): {len(links)} sent"
+          + (f", {skipped} more left out" if skipped else "")
+          + f"; read {len([p for p in pages if p.get('notes') or p.get('excerpt')])}"
+          + (f" ({', '.join(str(p.get('via')) for p in pages)})" if pages else "")
+          + (f"; failed: {', '.join(f'{webreader._site(u)} ({r})' for _, u, r in failed)}"
+             if failed else ""))
+    _progress("thinking", "Amadeus is thinking...")
+    return _links_block(pages, failed, skipped)
+
+
+def _reread_link_lookup(lookup) -> str:
+    """reread_lookup on a page the user sent: its saved text is read again
+    for the current question (no download); without saved text, the notes."""
+    saved = next((p for p in lookup.get("pages") or [] if p.get("text")), None)
+    if not saved:
+        _record_reused(lookup)
+        return _lookup_text(lookup, "the page the user sent earlier")
+    question = _question_without_links(getattr(_turn, "question", "") or "")
+    url = lookup["query"][len(LINK_QUERY_PREFIX):]
+    page = {"url": saved.get("url") or url, "final_url": saved.get("url") or url,
+            "title": saved.get("title", ""), "date": saved.get("date", ""),
+            "text": saved["text"], "via": lookup.get("engine"), "rank": 1, "pasted": url}
+    _progress("notes", "Re-reading " + webreader._site(page["url"]) + "...")
+    _, _, _, local = web_reading_plan()
+    deadline = time.monotonic() + (LINK_BUDGET_LOCAL if local else LINK_BUDGET_CLOUD)
+    _read_link_pages(question, [page], deadline)
+    _record_source(_link_source(1, url, page, "ok" if (page.get("notes") or page.get("excerpt"))
+                                else "empty", lookup_id=lookup["id"], reused=True))
+    _progress("thinking", "Amadeus is thinking...")
+    return (f"Your lookup #{lookup['id']} is a page the user sent earlier "
+            f"({_age_text(_lookup_age_seconds(lookup))}); its saved text was read again just now:\n"
+            + _links_block([page], [], 0))
 
 
 # The user's own recent words: the years they named or meant (year guard).
@@ -3097,10 +3334,23 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     )
     # The reader calls answer THIS question (not just the search words).
     _turn.question = last_user if isinstance(last_user, str) else ""
+
+    # ---- Links the user sent: opened first ------------------------------
+    # (the app opens them, never she; see _read_user_links). A message that
+    # is only links needs no routing; with other words the routing below
+    # still runs (a weather question next to a link is still answered live).
+    links_read = False
+    links_text = _read_user_links(_turn.question) if weblinks.has_links(_turn.question) else ""
+    if links_text:
+        links_read = True
+        convo.append({"role": "assistant", "content": "I opened the link(s) you sent."})
+        convo.append({"role": "user", "content": links_text + (
+            "\n\nNow answer the user's message using the AmadeusPack tool, based on these notes.")})
     route = None
     triaged = None
     triage_failed = False
-    if _web_triage_candidate(last_user, messages):
+    if not (links_read and not webreader.terms(_question_without_links(_turn.question))) \
+            and _web_triage_candidate(last_user, messages):
         try:
             triaged = _web_triage(llm, messages)
         except Exception:
@@ -3112,8 +3362,15 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         if triaged and (triaged.get("weather") or triaged.get("search")
                         or triaged.get("check")):
             route = triaged
+    if route is None and links_read:
+        route = {}
     if route is None:
         route = _deterministic_route(last_user, messages, allow_check=triage_failed)
+    if links_read and route:
+        # "Can you check this link?" is about the link (already opened), not
+        # a search for its words or a web-access test; she can still search
+        # in the loop below when the pages are not enough.
+        route = {k: v for k, v in route.items() if k not in ("search", "check")}
 
     # ---- Weather: live data beats search ----------------------------------
     # Weather outranks the explicit-search route BY DESIGN: text search for a
@@ -3341,7 +3598,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     # ordinary turns that needed no search are unaffected - it only bites when the
     # user asked her to look something up online. This guarantees the honest
     # "I could not verify it" outcome for ANY model, regardless of format.
-    if not search_ran:
+    if not search_ran and not links_read:
         convo.append({
             "role": "user",
             "content": (
@@ -3395,7 +3652,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     # so the user still gets an answer. We prefer the text from the last (phase 2)
     # call and fall back to any plain answer captured during the search loop.
     # _salvage_plain_text only raises if there is literally no text at all.
-    if not search_ran and not _strip_thinking(raw).strip():
+    if not search_ran and not links_read and not _strip_thinking(raw).strip():
         # The final call produced nothing usable and no search ran: the only
         # surviving text is her pre-search announcement, which must not become
         # the reply (it promises an action that never happened).
@@ -4209,6 +4466,11 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     # Her earlier lookups in this chat (web ON): a few short lines in the
     # changing part, so the built-in model's reused prompt is untouched.
     lookup_index = _lookup_index_message() if web_on else None
+    # Web OFF and the user sent a link: she says she can't open it (never
+    # guesses at it); web ON opens it (_read_user_links).
+    link_note = ({"role": "system", "content": LINKS_WEB_OFF_NOTE}
+                 if not web_on and isinstance(last_user, str) and weblinks.has_links(last_user)
+                 else None)
 
     messages = _ordered_prompt(
         pack_rules,
@@ -4216,6 +4478,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         book_messages
         + ([memory_block] if memory_block else [])
         + ([lookup_index] if lookup_index else [])
+        + ([link_note] if link_note else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
         right_now=_right_now_note(),

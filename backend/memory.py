@@ -2556,6 +2556,22 @@ def sources_for_ui(sources) -> list:
             out.append({"kind": "weather",
                         "place": str(entry.get("place") or "")[:_SOURCE_TEXT_MAX],
                         "url": _safe_link(entry.get("url")) or None})
+        elif kind == "link":
+            # A link the user sent (2026-10-26): opened or not, and why not.
+            url = _safe_link(entry.get("url"))
+            if not url:
+                continue
+            item = {"kind": "link", "url": url,
+                    "final": _safe_link(entry.get("final")) or url,
+                    "title": str(entry.get("title") or "")[:_SOURCE_TEXT_MAX],
+                    "opened": entry.get("status") == "ok"}
+            if entry.get("date"):
+                item["date"] = str(entry["date"])[:10]
+            if entry.get("reason"):
+                item["reason"] = str(entry["reason"])[:_SOURCE_TEXT_MAX]
+            if entry.get("reused"):
+                item["reused"] = True
+            out.append(item)
     return out
 
 
