@@ -446,6 +446,32 @@ button {
   border-color: rgba(112, 150, 197, 0.16);
 }
 
+/* Web links inside a message: clickable, long ones wrap. */
+.chat-link {
+  color: #8fc1ff;
+  text-decoration: underline;
+  text-decoration-color: rgba(143, 193, 255, 0.45);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.chat-link:hover {
+  text-decoration-color: currentColor;
+}
+
+/* Her link that no search in this reply returned (from her memory). */
+.chat-link-unchecked {
+  margin-left: 5px;
+  padding: 0 5px;
+  border: 1px solid rgba(232, 184, 109, 0.35);
+  border-radius: 4px;
+  color: #e8b86d;
+  font-size: 0.72em;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+  cursor: help;
+}
+
 /* Her web sources, under the reply: a chip that opens the link cards. */
 .sources {
   margin-top: 8px;

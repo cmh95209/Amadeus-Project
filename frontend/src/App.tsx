@@ -4,6 +4,8 @@ import SamplingSettings from "./components/SamplingSettings";
 import { ModelPicker } from "./components/ModelPicker";
 import { NameListEditor, nameListProblem } from "./components/NameListEditor";
 import { SourcesBar } from "./components/SourcesBar";
+import { LinkedText } from "./components/LinkedText";
+import { knownLinkKeys } from "./linkText";
 import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
@@ -1977,7 +1979,8 @@ export default function App() {
                 </div>
               ) : (
                 <div className="bubble">
-                  {message.content}
+                  <LinkedText text={message.content}
+                    known={message.role === "user" ? undefined : knownLinkKeys(message.sources)} />
                   {message.translating && !message.content && (
                     <span className="bubble-translating" aria-label="Writing the English line">
                       <i />
@@ -1987,7 +1990,7 @@ export default function App() {
                   )}
                   {japaneseShown && message.role !== "user" && message.japanese && (
                     <span className="bubble-japanese" lang="ja">
-                      {message.japanese}
+                      <LinkedText text={message.japanese} known={knownLinkKeys(message.sources)} />
                     </span>
                   )}
                 </div>

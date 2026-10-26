@@ -124,7 +124,7 @@ export function domainOf(url: string): string {
 }
 
 /** The same page reached twice (trailing slash, #part, http/https) counts once. */
-function linkKey(url: string): string {
+export function linkKey(url: string): string {
   return url.trim().replace(/^https?:\/\//i, "").replace(/#.*$/, "").replace(/\/+$/, "").toLowerCase();
 }
 
