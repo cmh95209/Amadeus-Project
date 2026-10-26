@@ -1,8 +1,8 @@
-"""Exa + Parallel, keyless engines on trial (2026-10-26).
+"""Exa, the second keyless engine (2026-10-26; Parallel was tried and dropped).
 
-Both answer through public MCP endpoints (one JSON-RPC tools/call). Off by
-default; AMADEUS_SEARCH_ENGINES picks the order for test-set runs. No network:
-urlopen is faked.
+It answers through a public MCP endpoint (one JSON-RPC tools/call). Order:
+Firecrawl -> Exa -> Keenable -> ddgs; AMADEUS_SEARCH_ENGINES sets another
+order for test-set runs. No network: urlopen is faked.
 """
 
 import io
@@ -30,18 +30,12 @@ October 13 — November 3: Skirk, Escoffier
 
 ---
 
-Title: Banners — GenshinFlex
-URL: https://genshinflex.com/en/banners/
+Title: Current and Next Banner Schedule (October 2026)
+URL: https://game8.co/games/Genshin-Impact/archives/305012
 Published: N/A
 Highlights:
+Last updated on: October 23, 2026 10:39 AM
 Current and announced character banners."""
-
-PARALLEL_JSON = {"search_id": "s1", "results": [
-    {"url": "https://game8.co/games/Genshin-Impact/archives/305012",
-     "title": "Current and Next Banner Schedule (October 2026)", "publish_date": "2020-10-12",
-     "excerpts": ["Last updated on: October 23, 2026 10:39 AM", "# Current and Next Banner Schedule"]},
-    {"url": "https://timesaver.gg/blog/x", "title": "Genshin Banner Schedule", "excerpts": ["7.2 lineup"]},
-]}
 
 
 class _Resp:
@@ -78,20 +72,10 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(body["params"], {"name": "web_search_exa",
                                           "arguments": {"query": "Genshin current banner", "numResults": 5}})
         self.assertEqual([r["href"] for r in rows], ["https://www.prydwen.gg/genshin-impact/banners",
-                                                     "https://genshinflex.com/en/banners/"])
+                                                     "https://game8.co/games/Genshin-Impact/archives/305012"])
         self.assertEqual(rows[0]["date"], "2026-10-24")
-        self.assertEqual(rows[1]["date"], "")
+        self.assertEqual(rows[1]["date"], "2026-10-23")       # "Last updated on" when no Published
         self.assertIn("Skirk, Escoffier", rows[0]["body"])
-
-    def test_parallel_parses_json_and_prefers_the_updated_date(self):
-        with patch.object(websearch.urllib.request, "urlopen",
-                          return_value=rpc(json.dumps(PARALLEL_JSON))) as op:
-            rows = websearch.parallel_search("Genshin current banner")
-        args = json.loads(op.call_args[0][0].data)["params"]["arguments"]
-        self.assertEqual(args["search_queries"], ["Genshin current banner"])
-        self.assertEqual(rows[0]["date"], "2026-10-23")      # not the page's first date (2020)
-        self.assertEqual(rows[1]["date"], "")
-        self.assertEqual(len(rows), 2)
 
     def test_rate_limit_parks_the_engine_for_an_hour(self):
         err = urllib.error.HTTPError("u", 429, "busy", {}, io.BytesIO(b""))
@@ -99,7 +83,6 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(websearch.EngineUnavailable):
                 websearch.exa_search("q")
         self.assertTrue(websearch.engine_cooling_down("exa"))
-        self.assertFalse(websearch.engine_cooling_down("parallel"))
         with patch.object(websearch.urllib.request, "urlopen") as op:
             with self.assertRaises(websearch.EngineUnavailable):
                 websearch.exa_search("q")
@@ -109,17 +92,21 @@ class EngineTests(unittest.TestCase):
         with patch.object(websearch.urllib.request, "urlopen",
                           return_value=rpc("Rate limit exceeded, slow down", is_error=True)):
             with self.assertRaises(websearch.EngineUnavailable):
-                websearch.parallel_search("q")
-        self.assertTrue(websearch.engine_cooling_down("parallel"))
+                websearch.exa_search("q")
+        self.assertTrue(websearch.engine_cooling_down("exa"))
 
     def test_garbage_answer(self):
-        with patch.object(websearch.urllib.request, "urlopen", return_value=rpc("not json")):
+        with patch.object(websearch.urllib.request, "urlopen", return_value=_Resp("<html>oops</html>")):
             with self.assertRaises(websearch.EngineUnavailable):
-                websearch.parallel_search("q")
+                websearch.exa_search("q")
+
+    def test_no_results(self):
+        with patch.object(websearch.urllib.request, "urlopen", return_value=rpc("No results found.")):
+            self.assertEqual(websearch.exa_search("q"), [])
 
 
 class OrderTests(unittest.TestCase):
-    def run_search(self, env, exa=None, parallel=None, keen=None, fire=None):
+    def run_search(self, env, exa=None, keen=None, fire=None):
         calls = []
 
         def rec(name, value):
@@ -130,8 +117,7 @@ class OrderTests(unittest.TestCase):
         with patch.dict(os.environ, {"AMADEUS_SEARCH_ENGINES": env}), \
              patch.object(chat, "_firecrawl_results", rec("firecrawl", fire)), \
              patch.object(chat, "_keenable_results", rec("keenable", keen)), \
-             patch.object(chat.websearch, "exa_search", rec("exa", exa)), \
-             patch.object(chat.websearch, "parallel_search", rec("parallel", parallel)):
+             patch.object(chat.websearch, "exa_search", rec("exa", exa)):
             chat._begin_turn_sources()
             text = chat._run_web_search("Genshin current banner")
             engine = chat._turn.engine
@@ -140,17 +126,18 @@ class OrderTests(unittest.TestCase):
 
     ROW = [{"title": "T", "body": "b", "href": "https://a.com/x", "date": "2026-10-24"}]
 
-    def test_default_order_is_unchanged(self):
-        calls, engine, _ = self.run_search("", keen=self.ROW)
-        self.assertEqual(calls, ["firecrawl", "keenable"])
-        self.assertEqual(engine, "keenable")
-
-    def test_trial_order(self):
-        calls, engine, text = self.run_search("parallel,keenable", parallel=self.ROW)
-        self.assertEqual((calls, engine), (["parallel"], "parallel"))
+    def test_default_order(self):
+        calls, engine, text = self.run_search("", exa=self.ROW)
+        self.assertEqual((calls, engine), (["firecrawl", "exa"], "exa"))
         self.assertIn("URL: https://a.com/x", text)
-        calls, engine, _ = self.run_search("exa, keenable", keen=self.ROW)
-        self.assertEqual((calls, engine), (["exa", "keenable"], "keenable"))
+        calls, engine, _ = self.run_search("", keen=self.ROW)
+        self.assertEqual((calls, engine), (["firecrawl", "exa", "keenable"], "keenable"))
+
+    def test_test_run_order(self):
+        calls, engine, _ = self.run_search("keenable", keen=self.ROW)
+        self.assertEqual((calls, engine), (["keenable"], "keenable"))
+        calls, engine, _ = self.run_search("parallel, keenable", keen=self.ROW)   # dropped name ignored
+        self.assertEqual((calls, engine), (["keenable"], "keenable"))
 
     def test_unknown_names_ignored(self):
         self.assertEqual(chat._search_engines(), chat.SEARCH_ENGINES)

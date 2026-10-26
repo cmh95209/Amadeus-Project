@@ -4,8 +4,10 @@
 Firecrawl is the first engine her web search tries: no account or API key
 ("keyless": free, a daily cap per internet connection), about 2 seconds,
 recent dated results in English and Japanese, 2 free credits per search.
-Keenable (keenable_search, below) is the second: keyless, ~1,000 searches an
-hour per connection, every result dated. chat._run_web_search falls back to
+Exa (exa_search, at the end) is the second: keyless, ~1.5 s, unpublished
+limit. Keenable (keenable_search, below) is the third: keyless, ~1,000
+searches an hour per connection, every result dated (it was the second until
+2026-10-26). chat._run_web_search falls back to
 the next engine - and finally to the `ddgs` library - whenever one fails, is
 slow, finds nothing or is out of free use.
 
@@ -491,20 +493,18 @@ def guard_query_seasons(query, user_texts, today=None):
     return (out, changed) if changed else (q, [])
 
 
-# --- Exa + Parallel: keyless engines on trial (2026-10-26) ------------------------
-# Both answer through their public "MCP" endpoints (one JSON-RPC tools/call per
-# search, no account, no key) - the same free access Hermes Agent rotates
-# through. Their free limits are not published, so a refusal (HTTP 402/429 or
-# a "rate limit" message) parks the engine for an hour, any other failure for
-# 30 seconds. Neither takes a recent-pages-only setting. Used only when listed
-# in chat.SEARCH_ENGINES (default: off - on trial against the test set).
+# --- Exa: the second keyless engine (2026-10-26) -----------------------------------
+# Exa answers through its public "MCP" endpoint (one JSON-RPC tools/call per
+# search, no account, no key) - the free access Hermes Agent rotates through.
+# Its free limit is not published, so a refusal (HTTP 402/429 or a "rate
+# limit" message) parks it for an hour, any other failure for 30 seconds. It
+# takes no recent-pages-only setting. (Parallel, tried the same day, ran out
+# of keyless use after ~10 searches and was dropped.)
 EXA_URL = "https://mcp.exa.ai/mcp"
-PARALLEL_URL = "https://search.parallel.ai/mcp"
 MCP_TIMEOUT = 6                       # seconds, the single attempt
 MCP_QUOTA_COOLDOWN = 3600
 MCP_ERROR_COOLDOWN = 30
 _mcp_skip_until = {}                  # engine -> monotonic time it is skipped until
-_PARALLEL_SESSION = "%032x" % (int(time.time() * 1e6) ^ id(_mcp_skip_until))
 _RATE_WORDS_RE = re.compile(r"(?i)rate.?limit|too many requests|quota|slow down|\b429\b")
 _UPDATED_RE = re.compile(
     r"(?i)(?:last\s+)?updated(?:\s+on)?\s*:?\s*"
@@ -613,37 +613,6 @@ def exa_search(query: str, max_results: int = 5, timeout: float = MCP_TIMEOUT,
                         "body": _clean_snippet(body), "href": url.group(1),
                         "date": (_iso_or_empty(published.group(1) if published else "")
                                  or _updated_date(body))})
-        if len(results) >= max_results:
-            break
-    return results
-
-
-def parallel_search(query: str, max_results: int = 5, timeout: float = MCP_TIMEOUT,
-                    freshness=None) -> list:
-    """Search Parallel (keyless) -> [{"title", "body", "href", "date"}].
-    Its publish date is sometimes the page's FIRST date (a schedule page
-    updated yesterday shows 2020), so a newer "Last updated on: ..." in the
-    excerpt wins. `freshness` is not supported (ignored). Raises
-    EngineUnavailable."""
-    text = _mcp_search("parallel", PARALLEL_URL, "web_search",
-                       {"objective": query, "search_queries": [query],
-                        "session_id": _PARALLEL_SESSION}, timeout)
-    try:
-        data = json.loads(text or "{}")
-    except ValueError:
-        raise EngineUnavailable(f"unexpected answer: {str(text)[:120]}") from None
-    rows = data.get("results") if isinstance(data, dict) else data
-    if not isinstance(rows, list):
-        raise EngineUnavailable(f"unexpected answer: {str(text)[:120]}")
-    results = []
-    for row in rows:
-        if not isinstance(row, dict) or not str(row.get("url") or "").strip():
-            continue
-        excerpts = row.get("excerpts") or []
-        body = " ".join(str(x) for x in excerpts) if isinstance(excerpts, list) else str(excerpts)
-        dates = [d for d in (_iso_or_empty(row.get("publish_date")), _updated_date(body)) if d]
-        results.append({"title": str(row.get("title") or "").strip(), "body": _clean_snippet(body),
-                        "href": str(row["url"]).strip(), "date": max(dates) if dates else ""})
         if len(results) >= max_results:
             break
     return results

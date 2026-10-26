@@ -506,13 +506,16 @@ def _keenable_results(q: str, freshness, deadline: float, state: bool = False) -
     return results
 
 
-# The keyless engines tried in turn before ddgs (2026-10-26). Exa and Parallel
-# are on trial: off by default, switched on for test-set runs with the
-# AMADEUS_SEARCH_ENGINES setting ("parallel,keenable"); unknown names are
+# The keyless engines tried in turn before ddgs (2026-10-26, MH: order B).
+# Exa second: in the test set it matched Keenable (26 of 30 right each), was
+# ~1 s faster and had fresher news; Keenable (published limit, dated results)
+# takes over whenever Exa refuses or finds nothing. Parallel was tried and
+# dropped (its keyless limit ran out after ~10 searches). For test runs,
+# AMADEUS_SEARCH_ENGINES sets another order ("keenable"); unknown names are
 # ignored, an empty list keeps the default.
-SEARCH_ENGINES = ("firecrawl", "keenable")
-_KNOWN_ENGINES = ("firecrawl", "keenable", "exa", "parallel")
-_MCP_ENGINES = {"exa": "exa_search", "parallel": "parallel_search"}   # websearch functions
+SEARCH_ENGINES = ("firecrawl", "exa", "keenable")
+_KNOWN_ENGINES = ("firecrawl", "exa", "keenable")
+_MCP_ENGINES = {"exa": "exa_search"}   # websearch functions
 
 
 def _search_engines() -> tuple:
@@ -523,7 +526,7 @@ def _search_engines() -> tuple:
 
 
 def _mcp_engine_results(engine: str, q: str, deadline: float) -> list:
-    """Exa's / Parallel's results for `q`; [] when it fails, finds nothing or
+    """Exa's results for `q`; [] when it fails, finds nothing or
     there is too little time left (ddgs keeps a full attempt)."""
     room = deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
     if room < 1.5:
@@ -551,11 +554,11 @@ def _note_search_engine(name) -> None:
 def _run_web_search(query: str) -> str:
     """Run a web search and return compact results for the model.
 
-    Firecrawl (websearch.py, keyless) is tried first, then Keenable (keyless,
-    the second engine); when both fail, are slow, find nothing or are out of
-    free use, the DuckDuckGo-style `ddgs` search runs (with a couple of
-    bounded retries) on the time that is left. A time-sensitive query is
-    limited to recent pages on every engine.
+    The keyless engines in SEARCH_ENGINES are tried in turn (Firecrawl, Exa,
+    Keenable); when all fail, are slow, find nothing or are out of free use,
+    the DuckDuckGo-style `ddgs` search runs (with a couple of bounded
+    retries) on the time that is left. A time-sensitive query is limited to
+    recent pages on Firecrawl and Keenable (Exa has no such setting).
     See the SEARCH_* constants above for timing."""
     q = (query or "").strip()
     _note_search_engine(None)

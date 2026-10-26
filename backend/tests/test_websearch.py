@@ -435,13 +435,18 @@ class RunWebSearchTests(unittest.TestCase):
         self.fc_calls = []
         self._sleep = patch.object(chat.time, "sleep")
         self._sleep.start()
-        # Keenable (the second engine) is "down" unless a test says otherwise.
+        # Exa and Keenable (the engines after Firecrawl) are "down" unless a
+        # test says otherwise.
+        self._ex = patch.object(chat.websearch, "exa_search",
+                                side_effect=websearch.EngineUnavailable("test"))
+        self.ex = self._ex.start()
         self._kn = patch.object(chat.websearch, "keenable_search",
                                 side_effect=websearch.KeenableUnavailable("test"))
         self.kn = self._kn.start()
 
     def tearDown(self):
         self._kn.stop()
+        self._ex.stop()
         self._sleep.stop()
 
     def test_a_what_is_on_now_question_searches_without_the_recent_limit(self):
