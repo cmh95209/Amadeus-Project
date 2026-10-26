@@ -298,6 +298,56 @@ class YearGuardTests(unittest.TestCase):
                       chat.WEB_SEARCH_TOOL["function"]["description"])
 
 
+class SeasonGuardTests(unittest.TestCase):
+    """A season word she adds that the user did not say becomes the current
+    season (anime cours by month), or the next / previous one when asked."""
+    from datetime import date as _d
+    OCT = _d(2026, 10, 26)
+
+    def g(self, query, user, today=None):
+        return websearch.guard_query_seasons(query, [user], today or self.OCT)
+
+    def test_her_season_becomes_the_current_one(self):
+        self.assertEqual(self.g("new anime season winter popularity", "Which anime this season?"),
+                         ("new anime season fall popularity", ["winter"]))
+        self.assertEqual(self.g("冬アニメ 人気", "今期のアニメで人気なのは？"), ("秋アニメ 人気", ["冬"]))
+        self.assertEqual(self.g("Summer anime lineup", "anime right now?", self._d(2026, 2, 1)),
+                         ("Winter anime lineup", ["Summer"]))
+        self.assertEqual(self.g("autumn anime season", "anime now?", self._d(2026, 5, 1)),
+                         ("spring anime season", ["autumn"]))
+
+    def test_next_and_last_season(self):
+        self.assertEqual(self.g("anime spring season lineup", "what anime is coming next season?"),
+                         ("anime winter season lineup", ["spring"]))
+        self.assertEqual(self.g("anime fall season popular", "what was popular last season?"),
+                         ("anime summer season popular", ["fall"]))
+        self.assertEqual(self.g("冬アニメ", "来期のアニメは？"), ("冬アニメ", []))
+
+    def test_left_alone(self):
+        for query, user in [
+                ("best anime winter 2022", "best anime of winter 2022?"),     # the user named it
+                ("summer anime 2019", "anime from 2019?"),                     # a year: the past
+                ("anime summer back then", "back when I was in school?"),      # a past time
+                ("summer festival Tokyo", "what festivals are on?"),           # not a TV season
+                ("spring rolls recipe", "how do I make spring rolls?"),
+                ("fall anime season", "anime this season?")]:                  # already right
+            self.assertEqual(self.g(query, user), (query, []), query)
+
+    def test_the_search_uses_the_fixed_season(self):
+        chat._begin_turn_sources()
+        chat._turn.question = "Which new anime this season are people talking about?"
+        chat._turn.reply_context = [{"role": "user", "content": chat._turn.question}]
+        try:
+            with patch.object(chat.websearch, "season_index", return_value=3), \
+                 patch.object(chat, "_run_web_search", return_value="No web results were found.") as run:
+                chat._web_search_with_content("new anime season winter 2024 popular")
+        finally:
+            chat._turn.question = ""
+            chat._turn.reply_context = None
+            chat.take_turn_sources()
+        self.assertEqual(run.call_args.args[0], "new anime season fall popular")
+
+
 class KeenableClientTests(unittest.TestCase):
     def setUp(self):
         websearch.reset_keenable_cooldown()

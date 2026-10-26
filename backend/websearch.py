@@ -429,3 +429,63 @@ def is_state_question(query, question="") -> bool:
     """A question about what is current / running (not news)."""
     text = f"{query or ''} {question or ''}"
     return bool(_STATE_RE.search(text)) and not _NEWS_RE.search(text)
+
+
+# --- Season guard (2026-10-26) ----------------------------------------------------
+# Like the past years: asked "which anime this season?" in October, she searched
+# "new anime season WINTER popularity" and answered about Winter 2026. A season
+# word she adds that the user did not say becomes the CURRENT season (anime
+# cours: Jan-Mar winter, Apr-Jun spring, Jul-Sep summer, Oct-Dec fall), or the
+# next / previous one when the user said "next season" / "last season" (来期 /
+# 前期). Left alone when the user named a season, a year, or a past time.
+_SEASONS_EN = ("winter", "spring", "summer", "fall")
+_SEASONS_JA = ("冬", "春", "夏", "秋")
+_SEASON_EN_RE = re.compile(r"\b(winter|spring|summer|fall|autumn)\b", re.IGNORECASE)
+_SEASON_JA_RE = re.compile(r"(冬|春|夏|秋)(?=\s*(?:アニメ|ドラマ|期|クール|シーズン|新作))")
+# Only for TV / anime season line-ups ("summer festival" is not one).
+_SEASON_CONTEXT_RE = re.compile(r"\b(?:anime|season|cour|drama|tv|series|shows?|line-?up|premieres?|simulcasts?)\b",
+                                re.IGNORECASE)
+_USER_SEASON_RE = re.compile(r"\b(?:winter|spring|summer|fall|autumn)\b|冬|春|夏|秋", re.IGNORECASE)
+_NEXT_SEASON_RE = re.compile(r"\bnext (?:season|cour)\b|来期|来季|次のクール|次期", re.IGNORECASE)
+_LAST_SEASON_RE = re.compile(r"\b(?:last|previous) (?:season|cour)\b|前期|前季|前のクール", re.IGNORECASE)
+
+
+def season_index(today=None) -> int:
+    """0 winter, 1 spring, 2 summer, 3 fall (anime cours by month)."""
+    return ((today or date.today()).month - 1) // 3
+
+
+def guard_query_seasons(query, user_texts, today=None):
+    """-> (search words with the season she added on her own replaced by the
+    season the user means, [the season words replaced])."""
+    q = str(query or "")
+    texts = [str(t or "") for t in user_texts or []]
+    if not ((_SEASON_EN_RE.search(q) and _SEASON_CONTEXT_RE.search(q)) or _SEASON_JA_RE.search(q)):
+        return q, []
+    if any(_USER_SEASON_RE.search(t) or _YEAR_ANY_RE.search(t) or _PAST_TIME_RE.search(t)
+           for t in texts):
+        return q, []
+    target = season_index(today)
+    if any(_NEXT_SEASON_RE.search(t) for t in texts):
+        target = (target + 1) % 4
+    elif any(_LAST_SEASON_RE.search(t) for t in texts):
+        target = (target - 1) % 4
+    en, ja = _SEASONS_EN[target], _SEASONS_JA[target]
+    changed = []
+
+    def fix_en(m):
+        word = m.group(1).lower()
+        word = "fall" if word == "autumn" else word
+        if word != en:
+            changed.append(m.group(1))
+            return en.capitalize() if m.group(1)[0].isupper() else en
+        return m.group(1)
+
+    def fix_ja(m):
+        if m.group(1) != ja:
+            changed.append(m.group(1))
+            return ja
+        return m.group(1)
+    out = q if not _SEASON_CONTEXT_RE.search(q) else _SEASON_EN_RE.sub(fix_en, q)
+    out = _SEASON_JA_RE.sub(fix_ja, out)
+    return (out, changed) if changed else (q, [])

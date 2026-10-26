@@ -470,13 +470,17 @@ def _keenable_results(q: str, freshness, deadline: float, state: bool = False) -
     if room() < 1.5:
         return []
     if state and freshness:
-        results = _keenable_call(q, min(KEENABLE_TIMEOUT, room()))
-        if results is None:
+        # Both searches at once (each ~0.5 s); the unlimited one leads.
+        timeout = min(KEENABLE_TIMEOUT, room())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            plain_f = pool.submit(_keenable_call, q, timeout)
+            recent_f = pool.submit(_keenable_call, q, timeout, freshness)
+            results, recent = plain_f.result(), recent_f.result()
+        if results is None and recent is None:
             return []
-        if room() >= 1.5:
-            recent = _keenable_call(q, min(KEENABLE_TIMEOUT, room()), freshness) or []
-            seen = {r["href"] for r in results}
-            results = (results + [r for r in recent if r["href"] not in seen])[:STATE_MERGE_MAX]
+        results, recent = results or [], recent or []
+        seen = {r["href"] for r in results}
+        results = (results + [r for r in recent if r["href"] not in seen])[:STATE_MERGE_MAX]
         if not results:
             print(f"[Amadeus] Keenable found nothing for {q!r}, trying ddgs")
         return results
@@ -800,7 +804,7 @@ def _read_results(query: str, results: list, source: dict):
         candidates, lambda url, timeout: webfetch.fetch_page(url, timeout=timeout),
         deadline, progress=_progress,
         max_pages=webreader.MAX_PAGES if mode == "reader" else 1,
-        max_tries=(webreader.MAX_TRIES + (2 if state else 0)) if mode == "reader" else (4 if state else 2),
+        max_tries=(webreader.MAX_TRIES + (1 if state else 0)) if mode == "reader" else (3 if state else 2),
         prefer=(lambda p: webdates.covers_today(p.get("text", ""))) if state else None)
     source["mode"] = mode
     if not pages:
@@ -1153,11 +1157,17 @@ def _user_words_for_years() -> list:
 def _guard_query(query: str) -> str:
     """Her search words without the past years she added on her own (see
     websearch.guard_query_years); logged when something was removed."""
-    fixed, removed = websearch.guard_query_years(query, _user_words_for_years())
+    user_words = _user_words_for_years()
+    fixed, removed = websearch.guard_query_years(query, user_words)
     if removed:
         print(f"[Amadeus] Search words fixed (years the user never said: "
               f"{', '.join(map(str, removed))}): {query!r} -> {fixed!r}")
-    return fixed
+    # The same for a season she adds ("anime winter" asked in October).
+    seasoned, seasons = websearch.guard_query_seasons(fixed, user_words)
+    if seasons:
+        print(f"[Amadeus] Search words fixed (season the user never said: "
+              f"{', '.join(seasons)}): {fixed!r} -> {seasoned!r}")
+    return seasoned
 
 
 def _web_search_with_content(query: str, allow_reuse: bool = True) -> str:
