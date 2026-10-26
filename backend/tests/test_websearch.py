@@ -810,6 +810,21 @@ class TenseNetTests(unittest.TestCase):
         out, _ = self.run_net(self.WRONG, rewritten=still)
         self.assertEqual(out, self.WRONG)
 
+    def test_last_year_on_a_this_year_date_is_rewritten(self):
+        from datetime import date as _date
+        today = _date.today()
+        month = today.strftime("%B")
+        wrong = chat.AmadeusPack(
+            assistant_reply_JPS=f"PC版は去年の{today.month}月に発売されたの。",
+            assistant_reply_ENG=f"The PC version came out in {month} {today.year}.")
+        fixed = (f"PC版は今年の{today.month}月に発売されたの。",
+                 f"The PC version came out in {month} {today.year}.")
+        out, sent = self.run_net(wrong, rewritten=fixed)
+        self.assertEqual(out.assistant_reply_JPS, fixed[0])
+        self.assertIn("is THIS year", sent[0][-1]["content"])
+        out, _ = self.run_net(wrong, rewritten=(wrong.assistant_reply_JPS, wrong.assistant_reply_ENG))
+        self.assertEqual(out, wrong)                        # still wrong: the original stays
+
     def test_correct_or_unsearched_replies_are_untouched(self):
         ok = chat.AmadeusPack(assistant_reply_JPS=f"{self.ja_date}に発売予定よ。",
                               assistant_reply_ENG=f"It will be released on {self.en_date}.")

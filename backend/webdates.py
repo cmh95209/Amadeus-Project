@@ -199,3 +199,44 @@ def past_tense_future_dates(english, japanese="", today=None) -> list:
             if future and past_re.search(sentence) and not future_re.search(sentence):
                 found.extend((d, sentence.strip()) for d in future)
     return found
+
+
+# --- her reply: "last year" on a date from this year (2026-10-26) ------------------
+# Her Japanese line said 「PC版は去年の8月に発売」 while her English line (and the
+# page) said August 2026 - this year. Only a contradiction BETWEEN or WITHIN her
+# lines is flagged (the English line carries the year the page gave).
+_LAST_YEAR_JA_RE = re.compile(r"(?:去年|昨年)の?\s*(\d{1,2})\s*月")
+_LAST_YEAR_EN_RE = re.compile(r"\blast\s+" + _MONTH_WORD + r"\b|\b" + _MONTH_WORD + r"\s+(?:of\s+)?last year\b",
+                              re.IGNORECASE)
+_MONTH_YEAR_EN_RE = re.compile(r"\b" + _MONTH_WORD + r"\.?(?:\s+\d{1,2}(?:st|nd|rd|th)?,?)?\s+(\d{4})\b",
+                               re.IGNORECASE)
+
+
+def _month_years(text) -> set:
+    """(month, year) pairs written with an explicit year in English text."""
+    out = set()
+    for m in _MONTH_YEAR_EN_RE.finditer(str(text or "")):
+        out.add((_MONTHS.index(m.group(1)[:3].lower()) + 1, int(m.group(2))))
+    return out
+
+
+def last_year_on_this_year(english, japanese="", today=None) -> list:
+    """Months her reply calls "last year" (去年 / 昨年 / "last August") although her
+    own English line dates them to THIS year: [(month, sentence)]."""
+    today = today or date.today()
+    dated = _month_years(english)
+    this_year = {mo for mo, y in dated if y == today.year}
+    last_year = {mo for mo, y in dated if y == today.year - 1}
+    found = []
+    for sentence in _sentences(japanese, True):
+        for m in _LAST_YEAR_JA_RE.finditer(sentence):
+            mo = int(m.group(1))
+            if mo in this_year and mo not in last_year:
+                found.append((mo, sentence.strip()))
+    for sentence in _sentences(english):
+        for m in _LAST_YEAR_EN_RE.finditer(sentence):
+            word = m.group(1) or m.group(2)
+            mo = _MONTHS.index(word[:3].lower()) + 1
+            if mo in this_year and mo not in last_year:
+                found.append((mo, sentence.strip()))
+    return found

@@ -88,5 +88,26 @@ class PastTenseTests(unittest.TestCase):
             self.assertEqual(wd.past_tense_future_dates(en, ja, TODAY), [], en or ja)
 
 
+class LastYearTests(unittest.TestCase):
+    """"Last year" (去年 / 昨年 / "last August") on a month her English line
+    dates to THIS year - 2026-10-26: 「PC版は去年の8月に発売」 for August 2026."""
+
+    def test_found(self):
+        found = wd.last_year_on_this_year(
+            "The PC version was released back in August 2026.",
+            "PC版は去年の8月に発売されていて、10月29日に発売される予定なの。", TODAY)
+        self.assertEqual([m for m, _ in found], [8])
+        found = wd.last_year_on_this_year("It came out last August. Steam: August 20, 2026.", "", TODAY)
+        self.assertEqual([m for m, _ in found], [8])
+
+    def test_right_ones_pass(self):
+        for en, ja in [
+                ("It was released in August 2025.", "去年の8月に発売されたの。"),
+                ("The PC version was released in August 2026.", "PC版は今年の8月に発売されたの。"),
+                ("The PC version was released in August 2026.", "PC版は8月に発売されたの。"),
+                ("", "去年の8月に発売されたの。")]:                  # no year to compare: left alone
+            self.assertEqual(wd.last_year_on_this_year(en, ja, TODAY), [], (en, ja))
+
+
 if __name__ == "__main__":
     unittest.main()
