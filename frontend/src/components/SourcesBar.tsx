@@ -48,13 +48,20 @@ function SourceCard({ link, index }: { link: SourceLink; index: number }) {
               className="source-read"
               title={link.kind === "weather"
                 ? "Live data she used for this reply"
-                : "She read this page and took notes from it, not just its snippet"}
+                : link.sent
+                  ? "The link you sent - she opened it and took notes"
+                  : "She read this page and took notes from it, not just its snippet"}
             >
-              {link.kind === "weather" ? "live" : "read"}
+              {link.kind === "weather" ? "live" : link.sent ? "your link" : "read"}
             </span>
           )}
         </span>
         <span className="source-title">{link.title}</span>
+        {link.failed && (
+          <span className="source-date stale" title="The link you sent could not be opened">
+            couldn't open: it {link.failed}
+          </span>
+        )}
         {when && (
           <span
             className={`source-date${when.stale ? " stale" : ""}`}

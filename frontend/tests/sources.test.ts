@@ -130,4 +130,28 @@ const nothing = renderToStaticMarkup(createElement(SourcesBar, {
 }));
 assert.match(nothing, /Searched the web/);
 
+// --- Links the user sent (2026-10-26): opened or not, and why not.
+const sent = normalizeSources([
+  { kind: "link", url: "https://bit.ly/abc", final: "https://news.example.com/story",
+    title: "Story", date: "2026-10-24", opened: true },
+  { kind: "link", url: "https://paywall.example.com/a", final: "javascript:alert(1)",
+    title: "", opened: false, reason: "needs a login" },
+  { kind: "link", url: "javascript:alert(1)", opened: true },
+]);
+assert.equal(sent.length, 2);
+const sentLinks = sourceLinks(sent);
+assert.equal(sentLinks[0].url, "https://news.example.com/story");   // where it ended up
+assert.equal(sentLinks[0].sent, true);
+assert.equal(sentLinks[0].read, true);
+assert.equal(sentLinks[1].url, "https://paywall.example.com/a");
+assert.equal(sentLinks[1].failed, "needs a login");
+assert.equal(chipLabel(sentLinks), "Your 2 links · read 1");
+assert.equal(chipLabel(sentLinks.slice(0, 1)), "Your link · read");
+assert.equal(chipLabel(sentLinks.slice(1)), "Your link · couldn't open");
+assert.equal(chipLabel([...sentLinks, ...links.slice(0, 1)]), "3 sources · read 2");
+const sentPanel = renderToStaticMarkup(createElement(SourcesBar, { sources: sent, defaultOpen: true }));
+assert.match(sentPanel, /your link/);
+assert.match(sentPanel, /couldn&#x27;t open: it needs a login/);
+assert.doesNotMatch(sentPanel, /javascript:/);
+
 console.log("sources.test.ts: ok");

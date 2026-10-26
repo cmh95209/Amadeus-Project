@@ -20,7 +20,21 @@ export type WeatherSource = {
   url: string | null;
 };
 
-export type SourceEntry = SearchSource | WeatherSource;
+/** A link the user sent (2026-10-26): the app opened it for her reply. */
+export type LinkSource = {
+  kind: "link";
+  url: string;
+  /** Where it ended up after redirects (the page she read). */
+  final: string;
+  title: string;
+  date?: string;
+  opened: boolean;
+  /** Why it could not be opened ("needs a login"). */
+  reason?: string;
+  reused?: boolean;
+};
+
+export type SourceEntry = SearchSource | WeatherSource | LinkSource;
 
 /** One link in the panel: every result of every search, once. */
 export type SourceLink = {
@@ -32,6 +46,10 @@ export type SourceLink = {
   read: boolean;
   /** "weather" for the live-weather service, "web" otherwise. */
   kind: "web" | "weather";
+  /** A link the user sent (not a search result). */
+  sent?: boolean;
+  /** A link the user sent that could not be opened: why. */
+  failed?: string;
 };
 
 const WEB_LINK = /^https?:\/\/[^\s/]+/i;
@@ -79,6 +97,18 @@ export function normalizeSources(raw: unknown): SourceEntry[] {
         place: typeof e.place === "string" ? e.place : "",
         url: isWebLink(e.url) ? e.url.trim() : null,
       });
+    } else if (e.kind === "link" && isWebLink(e.url)) {
+      out.push({
+        kind: "link",
+        url: e.url.trim(),
+        final: isWebLink(e.final) ? e.final.trim() : e.url.trim(),
+        title: typeof e.title === "string" ? e.title : "",
+        ...(typeof e.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(e.date)
+          ? { date: e.date } : {}),
+        opened: e.opened === true,
+        ...(typeof e.reason === "string" && e.reason ? { reason: e.reason } : {}),
+        ...(e.reused === true ? { reused: true } : {}),
+      });
     }
   }
   return out;
@@ -113,6 +143,23 @@ export function sourceLinks(entries: SourceEntry[]): SourceLink[] {
           domain: domainOf(entry.url),
           read: true,
           kind: "weather",
+        });
+      }
+      continue;
+    }
+    if (entry.kind === "link") {
+      const url = entry.opened ? entry.final : entry.url;
+      const key = linkKey(url);
+      if (!seen.has(key)) {
+        seen.set(key, {
+          url,
+          title: entry.title || domainOf(url),
+          domain: domainOf(url),
+          ...(entry.date ? { date: entry.date } : {}),
+          read: entry.opened,
+          kind: "web",
+          sent: true,
+          ...(entry.opened ? {} : { failed: entry.reason || "could not be opened" }),
         });
       }
       continue;
@@ -181,6 +228,12 @@ export function dateLabel(iso: string | undefined, now: Date = new Date()): { te
  *  "From my notes · ..." when every search was answered from saved notes. */
 export function chipLabel(links: SourceLink[], entries: SourceEntry[] = []): string {
   if (links.length === 1 && links[0].kind === "weather") return "Live weather";
+  if (links.length > 0 && links.every((l) => l.sent)) {
+    const opened = links.filter((l) => l.read).length;
+    const what = links.length === 1 ? "Your link" : `Your ${links.length} links`;
+    if (opened === links.length) return what + (links.length === 1 ? " · read" : " · read all");
+    return opened === 0 ? `${what} · couldn't open` : `${what} · read ${opened}`;
+  }
   let label = `${links.length} source${links.length === 1 ? "" : "s"}`;
   const read = links.filter((l) => l.kind === "web" && l.read).length;
   if (read > 0) label += ` · read ${read}`;
