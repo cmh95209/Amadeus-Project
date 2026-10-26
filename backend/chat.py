@@ -1014,14 +1014,21 @@ def _lookup_sites(lookup) -> str:
 
 
 def _recent_lookups():
+    """This chat's newest lookups - without those made for the answer that is
+    being regenerated (Regenerate searches fresh: the old answer was often off
+    BECAUSE of what that search found, 2026-10-26)."""
     conv = _lookup_conversation()
     if conv is None:
         return []
+    skip = getattr(_turn, "skip_lookup_turn", None)
     try:
-        return store.recent_lookups(conv, LOOKUP_INDEX_SIZE)
+        lookups = store.recent_lookups(conv, LOOKUP_INDEX_SIZE + (5 if skip is not None else 0))
     except Exception as exc:
         print(f"[Amadeus] Could not read the chat's lookups: {exc!r}")
         return []
+    if skip is not None:
+        lookups = [lk for lk in lookups if lk.get("turn") != skip]
+    return lookups[:LOOKUP_INDEX_SIZE]
 
 
 def _lookup_index_message():
@@ -1109,6 +1116,10 @@ def _reread_lookup(lookup_id) -> str:
     if not lookup or (conv is not None and lookup.get("conversation_id") != conv):
         return (f"(There is no lookup #{lookup_id} in this chat. Use web_search if you "
                 "need to look something up.)")
+    if getattr(_turn, "skip_lookup_turn", None) is not None and \
+            lookup.get("turn") == _turn.skip_lookup_turn:
+        # Regenerate: the replaced answer's own lookup is searched afresh.
+        return _web_search_with_content(lookup["query"], allow_reuse=False)
     if _lookup_is_fresh(lookup):
         _progress("notes", "Checking my notes from earlier...")
         _record_reused(lookup)
@@ -4788,6 +4799,10 @@ def regenerateReply():
         for message_id in excluded:
             store.set_message_active(message_id, False)
 
+    # The turn being answered again: its lookups are not reused (a fresh
+    # search instead); lookups of earlier questions still are.
+    _turn.skip_lookup_turn = store.message_turn(
+        target["id"] if excluded else last["id"])
     internal_context = store.load_internal_context()
     context = store.build_prompt_messages(exclude_ids=excluded)
     try:
@@ -4799,6 +4814,8 @@ def regenerateReply():
             for message_id in excluded:
                 store.set_message_active(message_id, True)
         raise
+    finally:
+        _turn.skip_lookup_turn = None
     new_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )

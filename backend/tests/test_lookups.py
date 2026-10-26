@@ -239,6 +239,41 @@ class IndexAndRereadTests(_Db):
         self.assertIn(f"There is no lookup #{other}", chat._reread_lookup(other))
         self.assertIn("There is no lookup #abc", chat._reread_lookup("abc"))
 
+    def test_regenerate_searches_fresh_for_the_replaced_answer(self):
+        # Turn 1 (older question) and turn 2 (the answer being regenerated),
+        # each with a fresh lookup.
+        with patch.object(store, "load_active_conversation", return_value=1):
+            store.append_message("user", "Steins;Gate news?", conversation_id=1)
+            store.append_message("assistant", "RE:BOOT.", conversation_id=1, japanese="リブート。")
+            old = store.save_lookup(1, 1, "Steins;Gate latest news", None, "reader", RESULTS, PAGES)
+            store.append_message("user", "Who's on the current Genshin banner?", conversation_id=1)
+            her = store.append_message("assistant", "Wrong banner.", conversation_id=1, japanese="違う。")
+            mine = store.save_lookup(1, 2, "Genshin Impact current banner", None, "reader", RESULTS, PAGES)
+            store.link_lookups([mine], her)
+            seen = {}
+
+            def fake_reply(context, internal_context=None):
+                chat._begin_turn_sources(1)
+                seen["index"] = chat._lookup_index_message()["content"]
+                with patch.object(chat, "_run_web_search", return_value=SEARCH_TEXT) as run, \
+                     patch.object(chat, "_read_results", return_value=("", [])):
+                    chat._web_search_with_content("Genshin Impact current banner")
+                    seen["genshin_searched"] = run.called
+                    run.reset_mock()
+                    chat._web_search_with_content("Steins;Gate latest news")
+                    seen["steins_searched"] = run.called
+                    seen["reread"] = chat._reread_lookup(mine)
+                return chat.AmadeusPack(assistant_reply_JPS="スカーク。", assistant_reply_ENG="Skirk.")
+            with patch.object(chat, "getResponsePacked", side_effect=fake_reply), \
+                 patch.object(store, "load_internal_context", return_value=None):
+                chat.regenerateReply()
+        self.assertTrue(seen["genshin_searched"])            # the replaced answer: fresh search
+        self.assertFalse(seen["steins_searched"])            # an earlier question: notes reused
+        self.assertNotIn(f"#{mine} ", seen["index"])
+        self.assertIn(f"#{old} ", seen["index"])
+        self.assertNotIn("still fresh", seen["reread"])      # rereading it searches too
+        self.assertIsNone(getattr(chat._turn, "skip_lookup_turn", None))
+
     def test_the_tool_is_offered_only_with_lookups_and_works(self):
         msgs = [{"role": "system", "content": "persona"},
                 {"role": "user", "content": "And what about the next banner after that?"}]
