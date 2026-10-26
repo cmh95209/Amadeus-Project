@@ -66,9 +66,9 @@ class FindLinksTests(unittest.TestCase):
 # --- risky links + redirects -------------------------------------------------------
 class RiskyLinkTests(unittest.TestCase):
     def test_refused(self):
-        self.assertEqual(webfetch.risky_link("https://user:pw@example.com/"), "carries a password or key")
-        self.assertEqual(webfetch.risky_link("https://example.com/?token=abc"), "carries a password or key")
-        self.assertEqual(webfetch.risky_link("https://example.com/?API_KEY=1&x=2"), "carries a password or key")
+        self.assertEqual(webfetch.risky_link("https://user:pw@example.com/"), "has a password or key in it")
+        self.assertEqual(webfetch.risky_link("https://example.com/?token=abc"), "has a password or key in it")
+        self.assertEqual(webfetch.risky_link("https://example.com/?API_KEY=1&x=2"), "has a password or key in it")
         self.assertEqual(webfetch.risky_link("https://example.com/" + "a" * 2100), "is too long")
         self.assertEqual(webfetch.risky_link("ftp://example.com/"), "is not a web address")
 
@@ -273,6 +273,27 @@ class ReadUserLinksTests(_Db):
         saved = store.load_lookup(ok["lookup_id"])
         self.assertEqual(saved["query"], "link: https://a.com/x")
         self.assertTrue(saved["pages"][0]["text"].startswith("Paragraph 0"))
+
+    def test_no_hold_on_line_when_nothing_will_be_opened(self):
+        with patch.object(chat, "_maybe_start_aside") as aside, \
+             patch.object(chat, "_fetch_links", wraps=chat._fetch_links) as fetch:
+            text, sources = self.run_links(
+                "check https://example.com/r?token=abc and https://x.com/jack", {})
+        aside.assert_not_called()
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args[0][0], [])           # nothing went online
+        self.assertIn("[L1] Did not open example.com: the link itself has a password or key", text)
+        self.assertIn("not that the page asks for a password", text)
+        self.assertIn("[L2] Could not open x.com: it is an X page other than a single post", text)
+        self.assertEqual([s["status"] for s in sources], ["failed", "failed"])
+
+    def test_hold_on_line_names_only_the_links_that_will_be_opened(self):
+        pages = {"https://a.com/x": ok_page()}
+        with patch.object(chat, "_maybe_start_aside") as aside:
+            self.run_links("see https://a.com/x and https://b.com/?password=1", pages)
+        aside.assert_called_once()
+        self.assertIn("(a.com)", aside.call_args[0][0])
+        self.assertNotIn("b.com", aside.call_args[0][0])
 
     def test_same_link_soon_after_is_not_downloaded_again(self):
         pages = {"https://a.com/x": ok_page()}

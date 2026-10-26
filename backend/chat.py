@@ -1290,8 +1290,18 @@ def _links_block(pages, failed, skipped) -> str:
         parts.append(body)
     elif pages:
         parts.append("(The pages the user sent were opened but had nothing readable.)")
-    for i, u, reason in failed:
-        parts.append(f"[L{i}] Could not open {webreader._site(u)}: it {reason}.")
+    for i, u, reason, status in failed:
+        if status == "refused" and "password or key" in reason:
+            # The LINK holds a secret - not the page asking for one (she said
+            # "it requires a password" on 2026-10-26).
+            parts.append(f"[L{i}] Did not open {webreader._site(u)}: the link itself has a "
+                         "password or key written in it, so opening it could give that secret "
+                         "away. Tell the user you left it unopened to keep it safe - not that "
+                         "the page asks for a password.")
+        elif status == "refused":
+            parts.append(f"[L{i}] Did not open {webreader._site(u)}: the link {reason}.")
+        else:
+            parts.append(f"[L{i}] Could not open {webreader._site(u)}: it {reason}.")
     if skipped:
         parts.append(f"(The user sent {skipped} more link{'s' if skipped != 1 else ''}; "
                      f"only the first {weblinks.MAX_LINKS} were opened - say so.)")
@@ -1340,17 +1350,23 @@ def _read_user_links(message) -> str:
     question = _question_without_links(message)
     _, _, _, local = web_reading_plan()
     deadline = time.monotonic() + (LINK_BUDGET_LOCAL if local else LINK_BUDGET_CLOUD)
-    sites = ", ".join(dict.fromkeys(webreader._site(u) for u in links))
-    _maybe_start_aside("the link" + ("s" if len(links) > 1 else "") + f" they sent ({sites})")
+    # Links refused at once (a key in the link, an X profile) need no wait:
+    # no hold-on line when nothing is going to be opened.
+    refused = {u: r for u in links for r in [weblinks.refusal(u)] if r}
+    if len(refused) < len(links):
+        sites = ", ".join(dict.fromkeys(webreader._site(u) for u in links if u not in refused))
+        _maybe_start_aside("the link" + ("s" if len(links) - len(refused) > 1 else "")
+                           + f" they sent ({sites})")
     again = bool(_AGAIN_RE.search(question))
-    reused = {u: lk for u in links for lk in [None if again else _link_lookup(u)] if lk}
+    reused = {u: lk for u in links if u not in refused
+              for lk in [None if again else _link_lookup(u)] if lk}
     if reused:
         _progress("notes", "Checking the page" + ("s" if len(reused) > 1 else "")
                   + " I opened earlier...")
-    fresh = [u for u in links if u not in reused]
+    fresh = [u for u in links if u not in reused and u not in refused]
     if fresh:
         _progress("reading", "Opening " + ", ".join(webreader._site(u) for u in fresh) + "...")
-    opened = _fetch_links(fresh, deadline)
+    opened = {**refused, **_fetch_links(fresh, deadline)}
     pages, failed = [], []
     for i, u in enumerate(links, 1):
         if u in reused:
@@ -1363,10 +1379,11 @@ def _read_user_links(message) -> str:
             got = opened[u]
             if got.get("status") != "ok":
                 reason = got.get("reason") or "could not be opened"
-                failed.append((i, u, reason))
+                failed.append((i, u, reason, got.get("status")))
                 _record_source(_link_source(i, u, got, "failed", reason))
-                if fresh:
-                    _progress("skip", f"Couldn't open {webreader._site(u)} - it {reason}")
+                _progress("skip", (f"Didn't open {webreader._site(u)} - the link {reason}"
+                                   if got.get("status") == "refused" else
+                                   f"Couldn't open {webreader._site(u)} - it {reason}"))
                 continue
             page = {"url": got.get("final_url") or u, "final_url": got.get("final_url") or u,
                     "title": got.get("title", ""),
@@ -1387,7 +1404,7 @@ def _read_user_links(message) -> str:
           + (f", {skipped} more left out" if skipped else "")
           + f"; read {len([p for p in pages if p.get('notes') or p.get('excerpt')])}"
           + (f" ({', '.join(str(p.get('via')) for p in pages)})" if pages else "")
-          + (f"; failed: {', '.join(f'{webreader._site(u)} ({r})' for _, u, r in failed)}"
+          + (f"; failed: {', '.join(f'{webreader._site(u)} ({r})' for _, u, r, _s in failed)}"
              if failed else ""))
     _progress("thinking", "Amadeus is thinking...")
     return _links_block(pages, failed, skipped)

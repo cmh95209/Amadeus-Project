@@ -134,7 +134,7 @@ _SECRET_PARAM_RE = re.compile(
 
 def risky_link(url) -> str:
     """Why a pasted link must not be opened ("" when it may be): "is too long",
-    "carries a password or key", or "is not a web address"."""
+    "has a password or key in it", or "is not a web address"."""
     url = str(url or "").strip()
     if len(url) > MAX_URL_CHARS:
         return "is too long"
@@ -146,10 +146,10 @@ def risky_link(url) -> str:
     if parts.scheme not in ("http", "https") or not host:
         return "is not a web address"
     if parts.username or parts.password:
-        return "carries a password or key"
+        return "has a password or key in it"
     for name, _value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
         if _SECRET_PARAM_RE.match(name.strip()):
-            return "carries a password or key"
+            return "has a password or key in it"
     return ""
 
 

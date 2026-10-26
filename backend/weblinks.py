@@ -228,22 +228,33 @@ def _worth_keenable(page) -> bool:
                 ("blocked automated access", "took too long", "could not be opened")))
 
 
-def fetch_link(url, timeout=LINK_TIMEOUT) -> dict:
-    """Open one pasted link -> webfetch.fetch_page's dict plus "url" (as
-    pasted) and "via" ("page" | "x" | "keenable" | None)."""
-    started = time.monotonic()
+def refusal(url):
+    """A link that is known at once not to be opened (no network needed):
+    one with a password / key in it, or an X page that is not a single post
+    -> fetch_link's answer for it; else None. Such a link gets no hold-on
+    line - there is nothing to wait for."""
     risky = webfetch.risky_link(url)
     if risky:
         return {"status": "refused", "text": "", "title": "", "reason": risky,
                 "url": url, "final_url": url, "via": None}
+    if is_x_link(url) and not x_post(url):
+        return {"status": "unsupported", "text": "", "title": "", "url": url, "final_url": url,
+                "via": None, "reason": "is an X page other than a single post "
+                                       "(profiles and searches need an X login)"}
+    return None
+
+
+def fetch_link(url, timeout=LINK_TIMEOUT) -> dict:
+    """Open one pasted link -> webfetch.fetch_page's dict plus "url" (as
+    pasted) and "via" ("page" | "x" | "keenable" | None)."""
+    started = time.monotonic()
+    refused = refusal(url)
+    if refused:
+        return refused
     if x_post(url):
         page = fetch_x_post(url, timeout)
         page.update(url=url, via="x" if page["status"] == "ok" else None)
         return page
-    if is_x_link(url):
-        return {"status": "unsupported", "text": "", "title": "", "url": url, "final_url": url,
-                "via": None, "reason": "is an X page other than a single post "
-                                       "(profiles and searches need an X login)"}
     page = webfetch.fetch_page(url, timeout=timeout, min_chars=MIN_LINK_CHARS)
     page.update(url=url, via="page" if page.get("status") == "ok" else None)
     left = timeout - (time.monotonic() - started)
