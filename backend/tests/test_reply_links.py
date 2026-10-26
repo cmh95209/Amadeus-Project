@@ -11,8 +11,11 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from test_lookups import PAGES, RESULTS, _Db  # noqa: E402
 import chat  # noqa: E402
+import memory as store  # noqa: E402
 import speech_text  # noqa: E402
 
 WIKI = "https://en.wikipedia.org/wiki/Steins;Gate_(TV_series)"
@@ -52,6 +55,39 @@ class JapaneseLineTests(unittest.TestCase):
     def test_several_links_come_back_in_order(self):
         line = "一つ目 https://a.com/1 、二つ目 https://b.com/2 よ。"
         self.assertEqual(chat._clean_tts_text(line), line)
+
+
+class SavedLookupLinkTests(_Db):
+    """"Send me the link to that page" one message after a search: the saved
+    lookup must still hold the page addresses (10-message test, 2026-10-26)."""
+
+    def setUp(self):
+        super().setUp()
+        self.lid = store.save_lookup(1, 1, "Genshin banner", "keenable", "reader", RESULTS, PAGES)
+        chat._begin_turn_sources(1)
+
+    def test_saved_notes_carry_the_addresses(self):
+        text = chat._lookup_text(store.load_lookup(self.lid), "still fresh")
+        self.assertIn("Page addresses (copy one exactly if the user asks for a link)", text)
+        self.assertIn("- Genshin Banners: https://prydwen.gg/banners", text)
+        # the page that gave notes comes first
+        self.assertLess(text.index("prydwen.gg/banners"), text.index("ign.com/x"))
+
+    def test_index_lists_addresses_only_when_a_link_is_asked_for(self):
+        plain = chat._lookup_index_message("and who comes next?")["content"]
+        asked = chat._lookup_index_message("Can you send me the link to that page?")["content"]
+        ja = chat._lookup_index_message("そのページのリンクを教えて")["content"]
+        self.assertNotIn("https://", plain)
+        self.assertIn("pages: https://prydwen.gg/banners, https://ign.com/x", asked)
+        self.assertIn("copy one of its page addresses exactly", asked)
+        self.assertIn("https://prydwen.gg/banners", ja)
+
+    def test_results_when_no_page_was_read(self):
+        lid = store.save_lookup(1, 2, "python version", "ddgs", "quick", RESULTS, [])
+        self.assertEqual(chat._lookup_page_links(store.load_lookup(lid)),
+                         [("Game8", "https://game8.co/a"),
+                          ("Genshin Banners", "https://prydwen.gg/banners"),
+                          ("IGN", "https://ign.com/x")])
 
 
 class PromptTests(unittest.TestCase):

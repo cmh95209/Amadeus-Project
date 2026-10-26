@@ -1069,21 +1069,58 @@ def _recent_lookups():
     return lookups[:LOOKUP_INDEX_SIZE]
 
 
-def _lookup_index_message():
-    """EARLIER LOOKUPS: one short line per recent lookup in this chat, or None."""
+# The user asks for a link / address (2026-10-26): the earlier lookups then
+# show their page addresses, so "send me the link to that page" can be
+# answered from a real search instead of "I don't have the URL".
+_LINK_ASK_RE = re.compile(
+    r"\b(links?|urls?|web ?address(es)?|websites?|web ?pages?|sites?)\b"
+    r"|リンク|ＵＲＬ|アドレス|サイト|ページ", re.IGNORECASE)
+
+
+def _lookup_page_links(lookup, limit=3) -> list:
+    """(title, address) of the pages a lookup read (those that gave notes
+    first), else its top results - the addresses she may hand on as links."""
+    pages = lookup.get("pages") or []
+    picked = [p for p in pages if p.get("notes")] + [p for p in pages if not p.get("notes")]
+    if not picked:
+        picked = lookup.get("results") or []
+    out, seen = [], set()
+    for p in picked:
+        url = str(p.get("url") or "").strip()
+        if url.startswith(("http://", "https://")) and url not in seen:
+            seen.add(url)
+            out.append((str(p.get("title") or "").strip(), url))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _lookup_index_message(last_user: str = ""):
+    """EARLIER LOOKUPS: one short line per recent lookup in this chat, or None.
+    When the user's message asks for a link, each line also lists its page
+    addresses."""
     lookups = _recent_lookups()
     if not lookups:
         return None
+    with_links = bool(_LINK_ASK_RE.search(last_user or ""))
     lines = []
     for lk in lookups:
         sites = _lookup_sites(lk)
-        lines.append(f"#{lk['id']} (turn {lk.get('turn') or 0}, "
-                     f"{_age_text(_lookup_age_seconds(lk))}): \"{lk['query']}\""
-                     + (f" - {sites}" if sites else ""))
+        line = (f"#{lk['id']} (turn {lk.get('turn') or 0}, "
+                f"{_age_text(_lookup_age_seconds(lk))}): \"{lk['query']}\""
+                + (f" - {sites}" if sites else ""))
+        if with_links:
+            links = _lookup_page_links(lk)
+            if links:
+                line += " - pages: " + ", ".join(url for _title, url in links)
+        lines.append(line)
     return {"role": "system", "content": (
         "EARLIER LOOKUPS in this chat (web searches you already made; your notes are "
         "saved). For a follow-up about one of them, call reread_lookup with its number "
-        "instead of searching again:\n" + "\n".join(lines))}
+        "instead of searching again"
+        + (" - and when the user asks for a link, copy one of its page addresses exactly"
+           if with_links else "")
+        + ":\n" + "\n".join(lines))}
 
 
 def _lookup_text(lookup, why: str) -> str:
@@ -1097,6 +1134,11 @@ def _lookup_text(lookup, why: str) -> str:
         body = webreader.wrap_web_data(lookup["excerpt"])
     if not body:
         body = PAGES_DID_NOT_ANSWER
+    links = _lookup_page_links(lookup)
+    if links:
+        # The addresses, so a link can be given from saved notes too.
+        body += ("\nPage addresses (copy one exactly if the user asks for a link):\n"
+                 + "\n".join(f"- {title or webreader._site(url)}: {url}" for title, url in links))
     return (head + "\n" + body + "\n\n" + SEARCH_DATE_NOTE.format(
         today=datetime.now().strftime("%Y-%m-%d")))
 
@@ -4523,7 +4565,8 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 
     # Her earlier lookups in this chat (web ON): a few short lines in the
     # changing part, so the built-in model's reused prompt is untouched.
-    lookup_index = _lookup_index_message() if web_on else None
+    lookup_index = (_lookup_index_message(last_user if isinstance(last_user, str) else "")
+                    if web_on else None)
     # Web OFF and the user sent a link: she says she can't open it (never
     # guesses at it); web ON opens it (_read_user_links).
     link_note = ({"role": "system", "content": LINKS_WEB_OFF_NOTE}

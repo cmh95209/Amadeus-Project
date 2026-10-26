@@ -92,6 +92,21 @@ export function knownLinkKeys(entries: SourceEntry[] | undefined): Set<string> {
   return keys;
 }
 
+/** A link without its "?..." part ("?snr=1_300" tracking tails). */
+function withoutQuery(key: string): string {
+  return key.replace(/\?.*$/, "").replace(/\/+$/, "");
+}
+
+/** Her link came from this reply's searches: the same address, the same
+ *  page without its "?..." tail, or a shortened form of a found page
+ *  (".../app/825630" for ".../app/825630/STEINSGATE_0?snr=..."). */
 export function isKnownLink(href: string, known: Set<string>): boolean {
-  return known.has(linkKey(href));
+  const key = linkKey(href);
+  if (known.has(key)) return true;
+  const bare = withoutQuery(key);
+  for (const k of known) {
+    const page = withoutQuery(k);
+    if (page === bare || page.startsWith(bare + "/")) return true;
+  }
+  return false;
 }

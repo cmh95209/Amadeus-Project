@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { hrefFor, knownLinkKeys, splitLinks, trimLink } from "../src/linkText";
+import { hrefFor, isKnownLink, knownLinkKeys, splitLinks, trimLink } from "../src/linkText";
 import { normalizeSources } from "../src/sources";
 import { LinkedText } from "../src/components/LinkedText";
 
@@ -42,6 +42,17 @@ assert.ok(known.has("www.prydwen.gg/b"));
 assert.ok(known.has("news.example.com/s"));
 assert.ok(known.has("bit.ly/x"));
 assert.equal(knownLinkKeys(undefined).size, 0);
+
+// A found page she wrote shorter or without its tracking tail still counts.
+const steam = knownLinkKeys(normalizeSources([{ kind: "search", query: "q", read: null, results: [
+  { title: "S", url: "https://store.steampowered.com/app/825630/STEINSGATE_0?snr=1_300_morelikev2__307_11" },
+  { title: "Y", url: "https://www.youtube.com/watch?v=abc" }] }]));
+assert.ok(isKnownLink("https://store.steampowered.com/app/825630", steam));
+assert.ok(isKnownLink("https://store.steampowered.com/app/825630/STEINSGATE_0/", steam));
+assert.ok(!isKnownLink("https://store.steampowered.com/app/8256", steam));     // not a whole part
+assert.ok(!isKnownLink("https://store.steampowered.com/app/999999", steam));
+assert.ok(isKnownLink("https://www.youtube.com/watch?v=abc", steam));
+assert.ok(isKnownLink("https://store.steampowered.com", steam));               // the site itself
 
 // --- the component: plain text stays plain; links open in a new tab.
 assert.equal(renderToStaticMarkup(createElement(LinkedText, { text: "hello <b>there</b>" })),
