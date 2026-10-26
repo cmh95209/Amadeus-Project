@@ -175,6 +175,24 @@ def _swap_name(text: str, name: str, reading: str) -> str:
     return text.replace(name, reading)
 
 
+# --- Japanese words the engine's dictionary misreads (2026-10-26) -------------
+# pyopenjtalk splits 言ってね / 言って。 at the start of a phrase (or after
+# ちゃんと, 時々, ...) into the noun 言 (ゲン) + the quote particle って:
+# "ゲンッテネ". Writing the verb in kana gives the right イッテネ. Skipped
+# when a kanji comes right before 言, so compounds keep their reading
+# (発言って = ハツゲンッテ); 々 is a repeat mark, not a word part, so 時々言って
+# is still fixed. Runs on every line, Japanese-only ones included.
+_MISREAD = [
+    (re.compile(r"(?<![㐀-䶿一-鿿豈-﫿])言って"), "いって"),
+]
+
+
+def _fix_misreadings(text: str) -> str:
+    for pattern, spoken in _MISREAD:
+        text = pattern.sub(spoken, text)
+    return text
+
+
 # --- layer 3: English words (2026-10-17) --------------------------------------
 # Order: the user's pronunciation list, then the built-in one (exact, whole
 # words, case-insensitive) -> ALL-CAPS acronyms spelled the Japanese way
@@ -470,7 +488,7 @@ def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
     back unchanged."""
     if not text:
         return text
-    swapped = _swap_name(text, name, name_reading)
+    swapped = _fix_misreadings(_swap_name(text, name, name_reading))
     normalized = _normalize(swapped)
     t = _english_to_kana(normalized.replace("PM2.5", PM25_SPOKEN))
     if not re.search(r"\d", t):
