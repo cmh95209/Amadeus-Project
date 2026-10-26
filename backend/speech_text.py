@@ -481,6 +481,49 @@ def _english_to_kana(text: str) -> str:
     return re.sub(r"(?<=[ァ-ヺー])-(?=\d)", "", text)
 
 
+# --- web addresses (2026-10-26) ---------------------------------------------
+# A link in her reply is for the screen (it is clickable there); read aloud it
+# would be spelled out letter by letter. [label](address) keeps its label.
+WEB_LINK_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.)[^\s<>\"'`「」『』【】（）〈〉《》、。，！？・\u3000]+")
+_MD_LINK_RE = re.compile(r"\[([^\]\n]{1,200})\]\(\s*((?:https?://|www\.)[^\s)]+)\s*\)", re.I)
+_LINK_TRAILING = ".,;:!?'\"*_~"
+
+
+def link_spans(text: str) -> list:
+    """(start, end) of each web address in the text, without punctuation
+    stuck to its end and without a closing bracket that is not part of it
+    (the same trimming as the link reader's weblinks._trim)."""
+    spans = []
+    for m in WEB_LINK_RE.finditer(text or ""):
+        link = m.group(0)
+        while link:
+            last = link[-1]
+            if last in _LINK_TRAILING:
+                link = link[:-1]
+            elif last in ")]}" and link.count({")": "(", "]": "[", "}": "{"}[last]) < link.count(last):
+                link = link[:-1]
+            else:
+                break
+        if link:
+            spans.append((m.start(), m.start() + len(link)))
+    return spans
+
+
+def drop_links(text: str) -> str:
+    """The text with its web addresses left out (a [label](address) link
+    keeps its label) - for the voice only."""
+    if not text or not WEB_LINK_RE.search(text):
+        return text
+    t = _MD_LINK_RE.sub(r"\1", text)
+    for start, end in reversed(link_spans(t)):
+        t = t[:start] + t[end:]
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"[（(]\s*[）)]", "", t)               # brackets left empty
+    t = re.sub(r"[：:]\s*(?=[、。！？\n]|$)", "", t)   # "見て：" with nothing after it
+    t = re.sub(r"[ \t]+(?=[、。！？\n]|$)", "", t)
+    return t.strip()
+
+
 def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
     """Rewrite text into the form the voice engine reads naturally:
     the user's name -> its saved reading, English words -> katakana, then
@@ -488,7 +531,7 @@ def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
     back unchanged."""
     if not text:
         return text
-    swapped = _fix_misreadings(_swap_name(text, name, name_reading))
+    swapped = _fix_misreadings(_swap_name(drop_links(text), name, name_reading))
     normalized = _normalize(swapped)
     t = _english_to_kana(normalized.replace("PM2.5", PM25_SPOKEN))
     if not re.search(r"\d", t):

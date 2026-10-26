@@ -210,7 +210,16 @@ PROACTIVE_SEARCH_BLOCK = {
         "The current date and time are in your RIGHT NOW note - always use those; never "
         "search for them, and if a search result shows a different date or time, your "
         "RIGHT NOW note is right. Never say you looked something up, checked online or "
-        "have “the latest data” unless you actually ran web_search in this reply."
+        "have “the latest data” unless you actually ran web_search in this reply. "
+        # 2026-10-26: links in her replies are clickable on screen.
+        "WEB LINKS: the pages you searched are already listed under your reply, so do not "
+        "add links on your own. Only when the user asks for a link (or for where to find "
+        "something online), write the page's full web address (https://...) exactly as it "
+        "appears in a URL line of your search results in this reply - never make one up, "
+        "shorten it or guess it. Without a "
+        "search, an address from your own memory may be wrong or out of date: say you "
+        "have not checked it. A link is shown on screen and never spoken, so in your "
+        "spoken sentence just name the site."
     ),
 }
 
@@ -1771,6 +1780,13 @@ def _clean_tts_text(text: str) -> str:
     t = _strip_thinking(text or "").strip()
     if not t:
         return t
+    # Web addresses stay whole (2026-10-26): they are clickable on screen and
+    # the voice leaves them out (speech_text.drop_links) - the English-
+    # stripping below would otherwise chop them into fragments. Each one is
+    # parked as a placeholder with no Latin letters while the line is cleaned.
+    t, parked = _park_links(t)
+    if parked:
+        return _unpark_links(_clean_tts_text(t), parked)
     # A stray word in another script (her 12B model, rarely: Korean 들을,
     # Bengali বাইরে - 2026-10-22/24) would be read out as noise: drop it.
     if _OTHER_SCRIPT_RE.search(t):
@@ -1791,13 +1807,36 @@ def _clean_tts_text(text: str) -> str:
             kept.append(s)
         t = "\n".join(kept)
         t = re.sub(r"[（(][^（）()]*[）)]",
-                   lambda m: m.group(0) if _has_japanese_script(m.group(0)) else "", t)
+                   lambda m: m.group(0) if (_has_japanese_script(m.group(0))
+                                            or _LINK_MARK in m.group(0)) else "", t)
         t = re.sub(r"\n{3,}", "\n\n", t)
         t = _strip_inline_english(t)
         # The shared name list: a listed name still in Latin letters becomes
         # its katakana, so the screen, the voice and her history agree.
         t = speech_text.swap_listed_words(t)
     return _collapse_runaway(t).strip()
+
+
+_LINK_MARK = "\ue000"
+
+
+def _park_links(text: str):
+    """Web addresses -> placeholders (private-use characters only)."""
+    spans = speech_text.link_spans(text)
+    if not spans:
+        return text, []
+    parked = []
+    for start, end in reversed(spans):
+        parked.insert(0, text[start:end])
+        text = text[:start] + _LINK_MARK + chr(0xE100 + len(spans) - len(parked)) + text[end:]
+    return text, parked
+
+
+def _unpark_links(text: str, parked) -> str:
+    for i, link in enumerate(parked):
+        mark = _LINK_MARK + chr(0xE100 + i)
+        text = text.replace(" " + mark, " " + link).replace(mark, link)
+    return text
 
 
 def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
@@ -1861,6 +1900,7 @@ def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
             "role": "user",
             "content": (
                 "Translate the following Japanese into natural spoken English. "
+                "Copy any web address (https://...) exactly as written. "
                 "Output ONLY the English text - no quotes, no commentary.\n"
                 + "".join(h + "\n" for h in _user_hint_lines(pack.assistant_reply_JPS or eng)) + "\n"
                 + (pack.assistant_reply_JPS or eng)[:1500]
@@ -2000,6 +2040,7 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
                 "role": "user",
                 "content": (
                     "Translate the following Japanese into natural spoken English. "
+                    "Copy any web address (https://...) exactly as written. "
                     "Output ONLY the English text - no quotes, no commentary.\n"
                     + "".join(h + "\n" for h in _user_hint_lines(text)) + "\n"
                     + text[:1500]
@@ -4982,6 +5023,7 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
         "You are writing the English line shown to the user in the chat UI for "
         "one of Amadeus's replies. Translate her Japanese line into natural, "
         "spoken English in her voice - keep her tone and meaning exactly. "
+        "Copy any web address (https://...) exactly as written. "
         "Output ONLY the English text - no quotes, no Japanese, no commentary.",
     ] + _user_hint_lines(jps)
     for line in context_lines or ():
