@@ -506,6 +506,42 @@ def _keenable_results(q: str, freshness, deadline: float, state: bool = False) -
     return results
 
 
+# The keyless engines tried in turn before ddgs (2026-10-26). Exa and Parallel
+# are on trial: off by default, switched on for test-set runs with the
+# AMADEUS_SEARCH_ENGINES setting ("parallel,keenable"); unknown names are
+# ignored, an empty list keeps the default.
+SEARCH_ENGINES = ("firecrawl", "keenable")
+_KNOWN_ENGINES = ("firecrawl", "keenable", "exa", "parallel")
+_MCP_ENGINES = {"exa": "exa_search", "parallel": "parallel_search"}   # websearch functions
+
+
+def _search_engines() -> tuple:
+    import os
+    raw = os.environ.get("AMADEUS_SEARCH_ENGINES", "")
+    picked = tuple(e for e in (x.strip().lower() for x in raw.split(",")) if e in _KNOWN_ENGINES)
+    return picked or SEARCH_ENGINES
+
+
+def _mcp_engine_results(engine: str, q: str, deadline: float) -> list:
+    """Exa's / Parallel's results for `q`; [] when it fails, finds nothing or
+    there is too little time left (ddgs keeps a full attempt)."""
+    room = deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
+    if room < 1.5:
+        return []
+    try:
+        search = getattr(websearch, _MCP_ENGINES[engine])
+        results = search(q, max_results=5, timeout=min(websearch.MCP_TIMEOUT, room))
+    except websearch.EngineUnavailable as exc:
+        print(f"[Amadeus] {engine.capitalize()} search unavailable: {exc}")
+        return []
+    except Exception as exc:
+        print(f"[Amadeus] {engine.capitalize()} search failed: {exc!r}")
+        return []
+    if not results:
+        print(f"[Amadeus] {engine.capitalize()} found nothing for {q!r}, trying the next search")
+    return results
+
+
 def _note_search_engine(name) -> None:
     """Remember which engine answered the latest search in this thread (for
     the log line and the reply's saved sources)."""
@@ -533,15 +569,20 @@ def _run_web_search(query: str) -> str:
     state = websearch.is_state_question(q, getattr(_turn, "question", "") or "")
     _turn.state_question = state
 
-    results = _firecrawl_results(q, None if state else freshness, deadline)
-    if results:
-        _note_search_engine("firecrawl")
-        return _format_search_results(results)
-    _progress("retry", "The main search didn't answer, trying the second search...")
-    results = _keenable_results(q, freshness, deadline, state=state)
-    if results:
-        _note_search_engine("keenable")
-        return _format_search_results(results)
+    for i, engine in enumerate(_search_engines()):
+        if i == 1:
+            _progress("retry", "The main search didn't answer, trying the second search...")
+        elif i > 1:
+            _progress("retry", "Trying another search...")
+        if engine == "firecrawl":
+            results = _firecrawl_results(q, None if state else freshness, deadline)
+        elif engine == "keenable":
+            results = _keenable_results(q, freshness, deadline, state=state)
+        else:
+            results = _mcp_engine_results(engine, q, deadline)
+        if results:
+            _note_search_engine(engine)
+            return _format_search_results(results)
     _progress("retry", "Trying the backup search...")
 
     try:

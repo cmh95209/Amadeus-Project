@@ -489,3 +489,161 @@ def guard_query_seasons(query, user_texts, today=None):
     out = q if not _SEASON_CONTEXT_RE.search(q) else _SEASON_EN_RE.sub(fix_en, q)
     out = _SEASON_JA_RE.sub(fix_ja, out)
     return (out, changed) if changed else (q, [])
+
+
+# --- Exa + Parallel: keyless engines on trial (2026-10-26) ------------------------
+# Both answer through their public "MCP" endpoints (one JSON-RPC tools/call per
+# search, no account, no key) - the same free access Hermes Agent rotates
+# through. Their free limits are not published, so a refusal (HTTP 402/429 or
+# a "rate limit" message) parks the engine for an hour, any other failure for
+# 30 seconds. Neither takes a recent-pages-only setting. Used only when listed
+# in chat.SEARCH_ENGINES (default: off - on trial against the test set).
+EXA_URL = "https://mcp.exa.ai/mcp"
+PARALLEL_URL = "https://search.parallel.ai/mcp"
+MCP_TIMEOUT = 6                       # seconds, the single attempt
+MCP_QUOTA_COOLDOWN = 3600
+MCP_ERROR_COOLDOWN = 30
+_mcp_skip_until = {}                  # engine -> monotonic time it is skipped until
+_PARALLEL_SESSION = "%032x" % (int(time.time() * 1e6) ^ id(_mcp_skip_until))
+_RATE_WORDS_RE = re.compile(r"(?i)rate.?limit|too many requests|quota|slow down|\b429\b")
+_UPDATED_RE = re.compile(
+    r"(?i)(?:last\s+)?updated(?:\s+on)?\s*:?\s*"
+    r"((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})")
+
+
+class EngineUnavailable(Exception):
+    """An engine could not answer this time (the reason is in the message)."""
+
+
+def _mcp_cool_down(engine: str, seconds: float) -> None:
+    with _lock:
+        _mcp_skip_until[engine] = max(_mcp_skip_until.get(engine, 0.0), time.monotonic() + seconds)
+
+
+def reset_engine_cooldowns() -> None:
+    with _lock:
+        _mcp_skip_until.clear()
+
+
+def engine_cooling_down(engine: str) -> bool:
+    return time.monotonic() < _mcp_skip_until.get(engine, 0.0)
+
+
+def _mcp_text(raw: str) -> str:
+    """An MCP answer (plain JSON or server-sent "data:" lines) -> its first
+    text item. Raises EngineUnavailable on an error answer."""
+    body = raw
+    if "data:" in raw[:300]:
+        datas = [ln[5:].strip() for ln in raw.splitlines() if ln.startswith("data:")]
+        body = datas[-1] if datas else raw
+    msg = json.loads(body)
+    if not isinstance(msg, dict):
+        raise EngineUnavailable("unexpected answer")
+    if msg.get("error"):
+        raise EngineUnavailable("error: " + str(msg["error"])[:160])
+    result = msg.get("result") or {}
+    texts = [c.get("text", "") for c in result.get("content") or []
+             if isinstance(c, dict) and c.get("type") == "text"]
+    if result.get("isError"):
+        raise EngineUnavailable("error: " + (texts[0] if texts else "")[:160])
+    return texts[0] if texts else ""
+
+
+def _mcp_search(engine: str, url: str, tool: str, args: dict, timeout: float) -> str:
+    if engine_cooling_down(engine):
+        raise EngineUnavailable("skipped (cooling down after an earlier failure)")
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": tool, "arguments": args}}
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={
+        "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+        "User-Agent": "Amadeus/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
+            raw = resp.read(4 * 1024 * 1024).decode("utf-8", "replace")
+        return _mcp_text(raw)
+    except urllib.error.HTTPError as e:
+        quota = e.code in (402, 429)
+        _mcp_cool_down(engine, MCP_QUOTA_COOLDOWN if quota else MCP_ERROR_COOLDOWN)
+        raise EngineUnavailable(("free limit reached " if quota else "") + f"(HTTP {e.code})") from None
+    except EngineUnavailable as e:
+        quota = bool(_RATE_WORDS_RE.search(str(e)))
+        _mcp_cool_down(engine, MCP_QUOTA_COOLDOWN if quota else MCP_ERROR_COOLDOWN)
+        raise
+    except Exception as e:
+        _mcp_cool_down(engine, MCP_ERROR_COOLDOWN)
+        raise EngineUnavailable(repr(e)) from None
+
+
+def _iso_or_empty(value) -> str:
+    v = str(value or "").strip()
+    return v[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", v) else ""
+
+
+def _updated_date(text) -> str:
+    """"Last updated on: October 23, 2026" in a page excerpt -> 2026-10-23."""
+    m = _UPDATED_RE.search(str(text or "")[:3000])
+    if not m:
+        return ""
+    raw = re.sub(r"[.,]", "", m.group(1))
+    for fmt in ("%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
+
+
+def exa_search(query: str, max_results: int = 5, timeout: float = MCP_TIMEOUT,
+               freshness=None) -> list:
+    """Search Exa (keyless) -> [{"title", "body", "href", "date"}]. Exa's
+    answer is text blocks (Title / URL / Published / Highlights) split by
+    "---". `freshness` is not supported (ignored). Raises EngineUnavailable."""
+    text = _mcp_search("exa", EXA_URL, "web_search_exa",
+                       {"query": query, "numResults": int(max_results)}, timeout)
+    results = []
+    for block in re.split(r"\n-{3,}\n", text or ""):
+        url = re.search(r"(?m)^URL:\s*(\S+)\s*$", block)
+        if not url:
+            continue
+        title = re.search(r"(?m)^Title:\s*(.+)$", block)
+        published = re.search(r"(?m)^Published(?: Date)?:\s*(\S+)", block)
+        high = re.search(r"(?s)Highlights:\s*(.*)$", block)
+        body = high.group(1) if high else ""
+        results.append({"title": (title.group(1).strip() if title else ""),
+                        "body": _clean_snippet(body), "href": url.group(1),
+                        "date": (_iso_or_empty(published.group(1) if published else "")
+                                 or _updated_date(body))})
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def parallel_search(query: str, max_results: int = 5, timeout: float = MCP_TIMEOUT,
+                    freshness=None) -> list:
+    """Search Parallel (keyless) -> [{"title", "body", "href", "date"}].
+    Its publish date is sometimes the page's FIRST date (a schedule page
+    updated yesterday shows 2020), so a newer "Last updated on: ..." in the
+    excerpt wins. `freshness` is not supported (ignored). Raises
+    EngineUnavailable."""
+    text = _mcp_search("parallel", PARALLEL_URL, "web_search",
+                       {"objective": query, "search_queries": [query],
+                        "session_id": _PARALLEL_SESSION}, timeout)
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        raise EngineUnavailable(f"unexpected answer: {str(text)[:120]}") from None
+    rows = data.get("results") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        raise EngineUnavailable(f"unexpected answer: {str(text)[:120]}")
+    results = []
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get("url") or "").strip():
+            continue
+        excerpts = row.get("excerpts") or []
+        body = " ".join(str(x) for x in excerpts) if isinstance(excerpts, list) else str(excerpts)
+        dates = [d for d in (_iso_or_empty(row.get("publish_date")), _updated_date(body)) if d]
+        results.append({"title": str(row.get("title") or "").strip(), "body": _clean_snippet(body),
+                        "href": str(row["url"]).strip(), "date": max(dates) if dates else ""})
+        if len(results) >= max_results:
+            break
+    return results
