@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.1.2 — Her Voice Works in Firefox — November 2026
+
+**Voice fix for Firefox.** In Firefox she stayed silent (no voice, no lip
+movement) and the page said "Speech playback failed". Her voice is sent to the
+browser while it is still being made, and its first piece claimed the line was
+0 seconds long: Chrome and Edge ignored that, Firefox believed it. The app now
+marks a line in progress as "length unknown", and saved lines get their real
+length, so Firefox plays and replays her voice. Chrome and Edge work as before.
+To update, run the installer once more (your settings and conversations stay).
+
 ## v2.1.1 — Her Voice Is Quick Again — October 2026
 
 **Voice fix for fresh installs.** The installers used to download the newest

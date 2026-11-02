@@ -867,6 +867,12 @@ def _voice_engine_reachable(timeout: float = 2.0) -> bool:
 # post: a stored voice line is streamed back for replay
 @application.route("/message_audio/<path:relpath>", methods=["GET"])
 def message_audio(relpath):
+    # Lines saved before v2.1.2 kept the engine's "0 bytes" WAV header, which
+    # Firefox will not replay: write the real sizes in on first replay.
+    if relpath.startswith("generated/") and relpath.endswith(".wav"):
+        target = (Path(__file__).resolve().parent / relpath).resolve()
+        if target.parent == (Path(__file__).resolve().parent / "generated").resolve():
+            tts_module.fix_wav_sizes(target)
     response = send_from_directory(Path(__file__).resolve().parent, relpath, conditional=True)
     response.headers["Cache-Control"] = "no-store"
     return response

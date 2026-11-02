@@ -14,30 +14,85 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _engine_header():
+    """The header GPT-SoVITS starts a streamed line with: sizes say 0 bytes."""
+    import io, wave
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(32000); w.writeframes(b'')
+    return buf.getvalue()
+
+
+def _load_tts(requests):
+    with patch.dict(sys.modules, {'requests': requests}):
+        spec = importlib.util.spec_from_file_location('speech_tts_test', ROOT / 'tts.py')
+        tts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tts)
+    return tts
+
+
+FFFF = b'\xff\xff\xff\xff'
+
+
 class SpeechTests(unittest.TestCase):
     def test_stream_cleanup(self):
+        header = _engine_header()
         class Upstream:
             closed = False
             def __enter__(self): return self
             def __exit__(self, *args): self.closed = True
             def raise_for_status(self): pass
-            def iter_content(self, **kwargs): yield from (b'RIFF', b'pcm')
+            # The header can arrive split, and glued to the first sound.
+            def iter_content(self, **kwargs): yield from (header[:20], header[20:] + b'pcm', b'more')
         upstream = Upstream()
         requests = SimpleNamespace(post=lambda *a, **kw: upstream)
-        with patch.dict(sys.modules, {'requests': requests}), tempfile.TemporaryDirectory() as directory:
-            spec = importlib.util.spec_from_file_location('speech_tts_test', ROOT / 'tts.py')
-            tts = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(tts)
+        with tempfile.TemporaryDirectory() as directory:
+            tts = _load_tts(requests)
             tts.OUT_WAV = Path(directory) / 'generated.wav'
             tts._request_payload = lambda text: {'text': text}
             chunks = tts.streamVoiceChunks('test')
-            self.assertEqual(next(chunks), b'RIFF')
+            first = next(chunks)
+            # Firefox: the browser gets "length unknown", not "0 bytes".
+            self.assertEqual(first[4:8], FFFF)
+            self.assertEqual(first[40:44], FFFF)
+            self.assertEqual(first[:4] + first[8:40], header[:4] + header[8:40])
+            self.assertTrue(first.endswith(b'pcm'))
             chunks.close()
             self.assertTrue(upstream.closed)
             self.assertFalse(tts._speech_lock.locked())
             self.assertFalse(tts.OUT_WAV.with_suffix('.browser.tmp').exists())
-            self.assertEqual(b''.join(tts.streamVoiceChunks('test')), b'RIFFpcm')
-            self.assertEqual(tts.OUT_WAV.read_bytes(), b'RIFFpcm')
+            streamed = b''.join(tts.streamVoiceChunks('test'))
+            self.assertEqual(streamed[44:], b'pcmmore')
+            # The saved copy carries the real sizes (Firefox replays it).
+            saved = tts.OUT_WAV.read_bytes()
+            self.assertEqual(int.from_bytes(saved[4:8], 'little'), len(saved) - 8)
+            self.assertEqual(int.from_bytes(saved[40:44], 'little'), 7)
+            self.assertEqual(saved[44:], b'pcmmore')
+
+    def test_non_wav_stream_passes_through(self):
+        tts = _load_tts(SimpleNamespace(post=None))
+        self.assertEqual(list(tts._browser_stream(iter([b'OggS', b'data']))), [b'OggS', b'data'])
+        self.assertEqual(list(tts._browser_stream(iter([b'{"message": "error"}']))), [b'{"message": "error"}'])
+        self.assertEqual(list(tts._browser_stream(iter([]))), [])
+
+    def test_fix_wav_sizes(self):
+        tts = _load_tts(SimpleNamespace(post=None))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'voice_1.wav'
+            path.write_bytes(_engine_header() + b'\x01\x00' * 10)
+            self.assertTrue(tts.fix_wav_sizes(path))
+            data = path.read_bytes()
+            self.assertEqual(int.from_bytes(data[4:8], 'little'), len(data) - 8)
+            self.assertEqual(int.from_bytes(data[40:44], 'little'), 20)
+            self.assertFalse(tts.fix_wav_sizes(path))          # already right: untouched
+            import wave
+            with wave.open(str(path)) as w:
+                self.assertEqual(w.getnframes(), 10)
+            other = Path(directory) / 'note.txt'
+            other.write_bytes(b'not a wav file')
+            self.assertFalse(tts.fix_wav_sizes(other))
+            self.assertEqual(other.read_bytes(), b'not a wav file')
+            self.assertFalse(tts.fix_wav_sizes(Path(directory) / 'missing.wav'))
 
     def test_speech_ticket(self):
         # Exercise the route body without importing LLM/TTS/Flask dependencies.

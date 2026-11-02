@@ -71,6 +71,71 @@ def _request_payload(text: str) -> dict:
     }
 
 
+def _wav_data_offset(head: bytes):
+    """Where the 'data' chunk's header starts in a RIFF/WAVE header, or None."""
+    if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+        return None
+    pos = 12
+    while pos + 8 <= len(head):
+        if head[pos:pos + 4] == b"data":
+            return pos
+        pos += 8 + int.from_bytes(head[pos + 4:pos + 8], "little")
+    return None
+
+
+def _browser_stream(chunks):
+    """The engine starts a streamed line with a WAV header that says "0 bytes
+    of sound" (it does not know the length yet). Chrome/Edge ignore that;
+    Firefox believes it and refuses the line (silence, 2026-11-02 tester
+    report). Rewrite those sizes to 0xFFFFFFFF - the usual "length unknown,
+    still streaming" value, checked in real Firefox - and pass the rest on
+    untouched."""
+    head = b""
+    for chunk in chunks:
+        if head is None:
+            yield chunk
+            continue
+        head += chunk
+        offset = _wav_data_offset(head)
+        maybe_wav = (len(head) < 12 and b"RIFF".startswith(head[:4])) or head[8:12] == b"WAVE"
+        if (offset is None or offset + 8 > len(head)) and maybe_wav and len(head) < 256:
+            continue   # header not complete yet
+        fixed = bytearray(head)
+        if offset is not None and offset + 8 <= len(fixed):
+            fixed[4:8] = b"\xff\xff\xff\xff"
+            fixed[offset + 4:offset + 8] = b"\xff\xff\xff\xff"
+        head = None
+        yield bytes(fixed)
+    if head:
+        yield head
+
+
+def fix_wav_sizes(path) -> bool:
+    """Write the real sizes into a finished WAV file's header (a saved line
+    keeps the engine's "0 bytes" header otherwise, which Firefox will not
+    replay). Safe to call on any file: anything that is not a WAV with a
+    'data' chunk is left alone. Returns True when the header was changed."""
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+        with path.open("r+b") as f:
+            head = f.read(256)
+            offset = _wav_data_offset(head)
+            if offset is None:
+                return False
+            riff = (size - 8).to_bytes(4, "little")
+            data = max(0, size - offset - 8).to_bytes(4, "little")
+            if head[4:8] == riff and head[offset + 4:offset + 8] == data:
+                return False
+            f.seek(4)
+            f.write(riff)
+            f.seek(offset + 4)
+            f.write(data)
+            return True
+    except (OSError, OverflowError):
+        return False
+
+
 def _start_stream_player():
     """Start a player that accepts a WAV header followed by PCM bytes."""
     ffplay = shutil.which("ffplay")
@@ -134,6 +199,7 @@ def _stream_audio(text: str, play: bool):
                         except (BrokenPipeError, OSError):
                             _finish_stream_player(player)
                             player = None
+        fix_wav_sizes(temp_path)
         temp_path.replace(OUT_WAV)
     finally:
         _finish_stream_player(player)
@@ -160,11 +226,10 @@ def streamVoiceChunks(text: str, save_path=None):
             ) as response:
                 response.raise_for_status()
                 with temp_path.open("wb") as output:
-                    for chunk in response.iter_content(chunk_size=4096):
-                        if not chunk:
-                            continue
+                    for chunk in _browser_stream(c for c in response.iter_content(chunk_size=4096) if c):
                         output.write(chunk)
                         yield chunk
+            fix_wav_sizes(temp_path)
             temp_path.replace(OUT_WAV)
             if save_path is not None:
                 try:
@@ -212,6 +277,7 @@ def renderVoiceToPath(text: str, path) -> bool:
                     for chunk in response.iter_content(chunk_size=4096):
                         if chunk:
                             output.write(chunk)
+            fix_wav_sizes(temp_path)
             temp_path.replace(path)
             return True
         except Exception as exc:
