@@ -8,7 +8,19 @@ browser while it is still being made, and its first piece claimed the line was
 0 seconds long: Chrome and Edge ignored that, Firefox believed it. The app now
 marks a line in progress as "length unknown", and saved lines get their real
 length, so Firefox plays and replays her voice. Chrome and Edge work as before.
-To update, run the installer once more (your settings and conversations stay).
+
+**Installer fixes (Windows v4.12.2).**
+- A Python toolbox left broken by an earlier install that stopped (the
+  install ended with "'pip' is not recognized") is now rebuilt automatically.
+- An install folder that is not a full path (for example just "Yes" typed
+  after the command) is refused with a clear message, instead of installing
+  into whatever folder the window was in.
+- Graphics cards older than the RTX 20 / GTX 16 series (GTX 10 series and
+  before) get the processor version of her voice, which works on them; the
+  graphics-card version cannot run there. The install log now names the card.
+
+To update, download the new installer and run it once more (your settings and
+conversations stay).
 
 ## v2.1.1 — Her Voice Is Quick Again — October 2026
 

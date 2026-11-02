@@ -1,9 +1,22 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12.2  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.12.2 (November 2026, app v2.1.2):
+#   - A Python toolbox left broken by an earlier install that stopped
+#     ("'pip' is not recognized") is now rebuilt automatically instead of
+#     being trusted because its name exists.
+#   - An install folder that is not a full path (for example just "Yes")
+#     is refused with a clear message instead of landing in whatever
+#     folder the window happened to be in.
+#   - Graphics cards older than the RTX 20 / GTX 16 series (GTX 10 series
+#     and before) get the processor version of the voice engine - the
+#     graphics-card version cannot run on them. The log now names the card,
+#     its memory, driver and generation, and step 7 runs a real test
+#     calculation on the card.
 #
 #  WHAT'S NEW IN v4.12.1 (October 2026, app v2.1.1):
 #   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
@@ -184,8 +197,24 @@ $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faste
 # install never stops waiting for a human. Older conda ignores it.
 $env:CONDA_PLUGINS_AUTO_ACCEPT_TOS = "yes"
 
+# An install folder must be a full path (D:\Amadeus, \\server\share\Amadeus).
+# A bare word such as "Yes" typed after the command would otherwise become a
+# folder inside wherever the window happens to be - C:\Windows\System32 in
+# an Administrator window (2026-11 tester report).
+function Test-InstallDirOk($dir){
+    return ([string]$dir -match '^[A-Za-z]:\\' -or [string]$dir -match '^\\\\[^\\]+\\[^\\]+')
+}
+if ($InstallDir -and -not (Test-InstallDirOk $InstallDir)) {
+    Write-Host ""
+    Write-Host ("INSTALL STOPPED: '" + $InstallDir + "' is not a full folder path.") -ForegroundColor Red
+    Write-Host "Use a full path such as D:\Amadeus after -InstallDir, or leave -InstallDir out" -ForegroundColor Yellow
+    Write-Host "to install in your user folder (" (Join-Path $env:USERPROFILE "Amadeus") ")." -ForegroundColor Yellow
+    Read-Host "Press Enter to close this window" | Out-Null
+    exit 1
+}
 if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE "Amadeus" }
 $InstallDir = $InstallDir.TrimEnd('\')
+if ($InstallDir -match '^[A-Za-z]:$') { $InstallDir += '\' }   # a drive root keeps its backslash
 $LogPath    = Join-Path $InstallDir "install_log.txt"
 # Since v2.1 every install follows the fork's main branch. Installs made by
 # older installers sit on the old feature branch; they are moved to main
@@ -284,12 +313,41 @@ function Set-GptSovitsVersion($dest, $commit){
     Log ("  Voice engine switched to the tested version (was " + $(if ($head) { $head.Substring(0, [Math]::Min(7, $head.Length)) } else { "unknown" }) + ").") "Green"
 }
 
-# Create a conda environment only if it does not already exist (safe to re-run).
+# The folder of a named conda environment, read from `conda env list` lines
+# ("name  [*]  path"; the path may hold spaces), or $null.
+function Find-EnvPathIn($lines, $name){
+    foreach ($line in @($lines)) {
+        $m = [regex]::Match([string]$line, '^(\S+)\s+(?:\*\s+)?(\S.*?)\s*$')
+        if ($m.Success -and $m.Groups[1].Value -eq $name -and $m.Groups[2].Value -ne '*') { return $m.Groups[2].Value }
+    }
+    return $null
+}
+function Get-EnvPath($name){ return (Find-EnvPathIn (& $conda env list 2>$null) $name) }
+
+# An environment works when its own Python runs and has pip. One left
+# half-built by an install that stopped is listed by name but is empty
+# ("'pip' is not recognized" - 2026-11 tester report).
+function Test-EnvWorks($path){
+    $py = Join-Path $path "python.exe"
+    if (-not (Test-Path $py)) { return $false }
+    $out = & $py -m pip --version 2>&1 | Out-String
+    return ($LASTEXITCODE -eq 0 -and $out -match 'pip \d')
+}
+
+# Create a conda environment only if it does not already exist (safe to
+# re-run); a broken one with that name is removed and built again.
 function Ensure-Env($name, $py="3.10"){
-    $names = & $conda env list | ForEach-Object { ($_ -split '\s+')[0] }
-    if ($names -contains $name) { Log ("  Python environment '" + $name + "' already exists.") "Yellow"; return }
+    $path = Get-EnvPath $name
+    if ($path) {
+        if (Test-EnvWorks $path) { Log ("  Python environment '" + $name + "' already exists.") "Yellow"; return }
+        Log ("  Python environment '" + $name + "' is broken (no working Python inside - probably left by an earlier install that stopped). Rebuilding it...") "Yellow"
+        & $conda env remove -n $name -y 2>&1 | Out-Null
+        if ((Test-Path $path) -and (Split-Path $path -Leaf) -eq $name) { Remove-Item -Recurse -Force $path -ErrorAction SilentlyContinue }
+        if (Test-Path $path) { throw ("Could not remove the broken '" + $name + "' Python environment (" + $path + "). Close any program using it, delete that folder, then run the installer again.") }
+    }
     & $conda create -n $name python=$py -y | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ("Could not create the '" + $name + "' Python environment.") }
+    if ($path) { Log ("  Python environment '" + $name + "' rebuilt.") "Green" }
 }
 
 # Locate a toolbox's own Python program (the program that actually runs the
@@ -302,7 +360,49 @@ function Ensure-Env($name, $py="3.10"){
 function Env-Python($name){
     $p = Join-Path $condaHome "envs\$name\python.exe"
     if (Test-Path $p) { return $p }
+    # conda may keep it in another of its folders (e.g. %USERPROFILE%\.conda\envs)
+    $e = Get-EnvPath $name
+    if ($e -and (Test-Path (Join-Path $e "python.exe"))) { return (Join-Path $e "python.exe") }
     return $null
+}
+
+# The voice engine's graphics-card PyTorch (CUDA 12.8 build) only runs on
+# cards of generation ("compute capability") 7.5 or newer = RTX 20 / GTX 16
+# series onwards (its arch list: sm_75 .. sm_120, checked 2026-10-31 on
+# torch 2.11.0+cu128). Older cards (GTX 10 series and before) still report
+# "CUDA available", then fail on the first real calculation.
+$VoiceMinComputeCap = 7.5
+
+# The first NVIDIA card as nvidia-smi reports it (the voice engine uses the
+# first card): name, memory (MiB), driver, generation - or $null. $lines is
+# the output of the query below; a driver too old for the compute_cap field
+# answers with an error line, so that query is repeated without it.
+function ConvertFrom-NvidiaQuery($lines){
+    foreach ($line in @($lines)) {
+        $p = ([string]$line) -split ',\s*'
+        if ($p.Count -lt 3 -or $p[1].Trim() -notmatch '^\d+$') { continue }
+        $cap = $null
+        if ($p.Count -ge 4 -and $p[3].Trim() -match '^\d+(\.\d+)?$') { $cap = [double]::Parse($p[3].Trim(), [Globalization.CultureInfo]::InvariantCulture) }
+        return [pscustomobject]@{ name = $p[0].Trim(); vram_mb = [int]$p[1].Trim(); driver = $p[2].Trim(); compute_cap = $cap }
+    }
+    return $null
+}
+function Get-NvidiaCardDetails {
+    if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { return $null }
+    try {
+        $card = ConvertFrom-NvidiaQuery (& nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader,nounits 2>$null)
+        if (-not $card) { $card = ConvertFrom-NvidiaQuery (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null) }
+        return $card
+    } catch { return $null }
+}
+
+# Which PyTorch the voice engine gets: "cuda" (graphics card) or "cpu"
+# (processor). An unknown generation keeps "cuda" - step 7's real test
+# catches a card that cannot run it.
+function Select-VoiceTorchBuild($hasGpu, $computeCap){
+    if (-not $hasGpu) { return "cpu" }
+    if ($null -ne $computeCap -and [double]$computeCap -lt $VoiceMinComputeCap) { return "cpu" }
+    return "cuda"
 }
 
 # Run pip inside one of the toolboxes. Prefers the toolbox's own Python
@@ -315,12 +415,12 @@ function Invoke-PipInEnv($name, $pipArgs){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12.1) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12.2) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.12.1  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.12.2  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -525,6 +625,15 @@ try {
     #         and the rest of the packages see torch as already installed.
     $hasGpu = $false
     try { $nv = & nvidia-smi 2>&1 | Out-String; if ($nv -match "NVIDIA") { $hasGpu = $true } } catch { $hasGpu = $false }
+    $nvCard = $null; $nvCap = $null
+    if ($hasGpu) {
+        $nvCard = Get-NvidiaCardDetails
+        if ($nvCard) {
+            $nvCap = $nvCard.compute_cap
+            Log ("  Graphics card: " + $nvCard.name + " - " + $nvCard.vram_mb + " MiB, driver " + $nvCard.driver + ", generation " + $(if ($null -ne $nvCap) { $nvCap.ToString("0.0", [Globalization.CultureInfo]::InvariantCulture) } else { "unknown" }))
+        }
+    }
+    $voiceBuild = Select-VoiceTorchBuild $hasGpu $nvCap
     # One fast local check (no download): what PyTorch build is already in
     # the toolbox, and can it already see the hardware? If the right kind
     # is present and working, the 2.5 GB download is skipped entirely - a
@@ -537,17 +646,18 @@ try {
     $torchReady = $false
     if ($torchInfo -match '^T\|') {
         $tp = $torchInfo.Split('|')   # T | version | cuda build tag | can-see-GPU
-        $torchReady = ($hasGpu -and $tp[3] -eq 'True') -or ((-not $hasGpu) -and $tp[2] -eq 'cpu')
+        $torchReady = ($voiceBuild -eq 'cuda' -and $tp[3] -eq 'True') -or ($voiceBuild -eq 'cpu' -and $tp[2] -eq 'cpu')
     }
     if ($torchReady) {
         Log ("  PyTorch " + $tp[1] + " is already in place and ready for this machine - skipping the download.") "Green"
     } else {
         Invoke-PipInEnv "GPTSoVits" @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null   # clear any stale copy
-        if ($hasGpu) {
-            Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (required for RTX 50-series / Blackwell)." "Green"
+        if ($voiceBuild -eq 'cuda') {
+            Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (the graphics-card version)." "Green"
             Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") 2>&1 | Tee-Object -FilePath $pipLog
         } else {
-            Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow"
+            if ($hasGpu) { Log "  This graphics card is too old for the voice engine's graphics-card version (it needs an RTX 20 / GTX 16 series card or newer). Her voice will run on the processor instead - it works, just slower." "Yellow" }
+            else { Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow" }
             Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog
         }
         if ($LASTEXITCODE -ne 0) {
@@ -583,10 +693,29 @@ try {
     Step 7 "Checking that PyTorch can use your GPU"
     # Direct Python where the toolbox layout is standard (step 6 already
     # located it in $gptPy); the helper route stays as the fallback.
-    if ($gptPy) { $gpuCheck = & $gptPy -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
-    else { $gpuCheck = & $conda run -n GPTSoVits python -c "import torch;print('GPU_OK' if torch.cuda.is_available() else 'GPU_NO')" 2>&1 | Out-String }
-    if ($hasGpu) {
-        if ($gpuCheck -match "GPU_OK") { Log "  PyTorch can see your GPU - voice synthesis will run on it." "Green" }
+    # A real calculation on the card, not just "is a card there?": a card
+    # too old for this PyTorch says "available" and then fails here.
+    $gpuProbe = "import torch`nif not torch.cuda.is_available():`n    print('GPU_NO')`nelse:`n    try:`n        x = torch.ones(8, device='cuda')`n        print('GPU_OK' if float((x * 2).sum()) == 16.0 else 'GPU_FAIL|wrong result')`n    except Exception as e:`n        print('GPU_FAIL|' + (str(e).strip().splitlines() or [''])[0])`n"
+    if ($gptPy) { $gpuCheck = & $gptPy -c $gpuProbe 2>&1 | Out-String }
+    else { $gpuCheck = & $conda run -n GPTSoVits python -c $gpuProbe 2>&1 | Out-String }
+    try { Add-Content -Path $LogPath -Value ("  PyTorch GPU check: " + $gpuCheck.Trim()) } catch {}
+    if ($hasGpu -and $voiceBuild -eq 'cpu') {
+        Log "  Running in CPU mode (graphics card too old for the voice engine - her voice uses the processor)." "Yellow"
+    } elseif ($hasGpu) {
+        if ($gpuCheck -match "GPU_OK") { Log "  PyTorch can use your GPU - voice synthesis will run on it." "Green" }
+        elseif ($gpuCheck -match "GPU_FAIL\|.*(kernel image|not compatible|compute capability|sm_\d)") {
+            # The card is seen but too old for this PyTorch: swap in the
+            # processor version so her voice works instead of failing.
+            Log "  Your graphics card could not run the voice engine's graphics-card version. Switching her voice to the processor (works, just slower)..." "Yellow"
+            Invoke-PipInEnv "GPTSoVits" @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null
+            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog -Append
+            if ($LASTEXITCODE -ne 0) {
+                $tail = (Get-Content $pipLog -Tail 15) -join "`n"
+                throw "PyTorch (processor version) failed to install. The last lines of the error are in voice_pip.log (your Amadeus folder):`n$tail"
+            }
+            Log "  Her voice will run on the processor." "Yellow"
+        }
+        elseif ($gpuCheck -match "GPU_FAIL") { Log "  NOTE: PyTorch sees your GPU but a test calculation on it failed (details in install_log.txt). If her voice does not work, update your NVIDIA driver and re-run this installer once." "Yellow" }
         else { Log "  NOTE: PyTorch is installed but could not see the GPU yet. Update your NVIDIA driver, then re-run this installer once." "Yellow" }
     } else {
         Log "  Running in CPU mode (no GPU detected)." "Yellow"
