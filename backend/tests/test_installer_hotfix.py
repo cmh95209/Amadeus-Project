@@ -12,7 +12,10 @@ installed. Covers:
      a working Python counts as broken;
   3. nvidia-smi's card line is read, and the voice PyTorch choice: no card or
      a card older than generation 7.5 (GTX 10 series and before) -> processor
-     version; 7.5 and newer or unknown -> graphics-card version.
+     version; 7.5 and newer or unknown -> graphics-card version;
+  4. (v4.12.3) conda's "package ... appears to be corrupted" errors are read
+     into the damaged cache folders, and only those (inside "pkgs") are
+     deleted before one retry.
 """
 import json
 import os
@@ -29,7 +32,7 @@ _POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
 _EXTRACT = r"""
 param($Installer, $Out)
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Installer, [ref]$null, [ref]$null)
-$names = @('Test-InstallDirOk', 'Find-EnvPathIn', 'Test-EnvWorks', 'ConvertFrom-NvidiaQuery', 'Select-VoiceTorchBuild')
+$names = @('Test-InstallDirOk', 'Find-EnvPathIn', 'Test-EnvWorks', 'ConvertFrom-NvidiaQuery', 'Select-VoiceTorchBuild', 'Find-CorruptPackageDirs', 'Repair-CondaCache')
 $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $names -contains $n.Name }, $true)
 if (@($defs).Count -ne $names.Count) { throw ('expected ' + $names.Count + ' functions, found ' + @($defs).Count) }
 $cap = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$VoiceMinComputeCap' }, $true)
@@ -132,6 +135,53 @@ class InstallerHotfixTests(unittest.TestCase):
         body = "@(" + ", ".join(f"(Select-VoiceTorchBuild {g} {c})" for g, c, _ in cases) + \
                ") | ConvertTo-Json -Compress"
         self.assertEqual(self.run_json(body), [want for _, _, want in cases])
+
+    # 4. damaged conda download cache -----------------------------------
+    @staticmethod
+    def corrupt_lines(pkgs):
+        # conda's real wording (seen on a tester's PC, 2026-11-02)
+        return ["Preparing transaction: done", "Verifying transaction: failed", "",
+                f"CondaVerificationError: The package for tzdata located at {pkgs}\\tzdata-2026c-he532380_0",
+                "appears to be corrupted. The path 'share/zoneinfo/zone.tab'",
+                "specified in the package manifest cannot be found.", "",
+                f"CondaVerificationError: The package for tzdata located at {pkgs}\\tzdata-2026c-he532380_0",
+                "appears to be corrupted. The path 'share/zoneinfo/zone1970.tab'",
+                "specified in the package manifest cannot be found.", "",
+                f"CondaVerificationError: The package for pip located at {pkgs}\\pip-26.2.2-pyhc872135_0",
+                "appears to be corrupted. The path 'site-packages/pip-26.2.2.dist-info/licenses/AUTHORS.txt'",
+                "specified in the package manifest cannot be found.",
+                "CondaVerificationError: The package for evil located at C:\\Users\\Jo\\Documents",
+                "appears to be corrupted."]
+
+    def test_finds_damaged_package_folders(self):
+        pkgs = "C:\\Users\\Jo Doe\\miniconda3\\pkgs"
+        arr = "@(" + ", ".join(_ps_str(l) for l in self.corrupt_lines(pkgs)) + ")"
+        body = (f"@{{ hit = @(Find-CorruptPackageDirs {arr}); "
+                "none = @(Find-CorruptPackageDirs @('PackagesNotFoundError: x', '')) } | ConvertTo-Json -Compress")
+        self.assertEqual(self.run_json(body),
+                         {"hit": [pkgs + "\\tzdata-2026c-he532380_0", pkgs + "\\pip-26.2.2-pyhc872135_0"],
+                          "none": []})
+
+    def test_repair_deletes_only_named_packages_then_cleans(self):
+        pkgs = self.tmp / "mc3" / "pkgs"
+        for d in ("tzdata-2026c-he532380_0", "pip-26.2.2-pyhc872135_0", "python-3.10.16-h_0"):
+            (pkgs / d).mkdir(parents=True, exist_ok=True)
+            (pkgs / d / "info.json").write_text("{}")
+        (pkgs / "tzdata-2026c-he532380_0.conda").write_text("x")
+        outside = self.tmp / "Documents"
+        outside.mkdir(exist_ok=True)
+        lines = self.corrupt_lines(str(pkgs))
+        lines[-2] = f"CondaVerificationError: The package for evil located at {outside}"
+        arr = "@(" + ", ".join(_ps_str(l) for l in lines) + ")"
+        body = ("function Log($m, $c) {}\n$script:calls = @()\n"
+                "$conda = { $script:calls += ($args -join ' ') }\n"
+                f"$fixed = Repair-CondaCache {arr}\n"
+                "$none = Repair-CondaCache @('Solving environment: failed')\n"
+                "@{ fixed = $fixed; none = $none; calls = @($script:calls) } | ConvertTo-Json -Compress")
+        got = self.run_json(body)
+        self.assertEqual(got, {"fixed": True, "none": False, "calls": ["clean --all -y"]})
+        self.assertEqual(sorted(p.name for p in pkgs.iterdir()), ["python-3.10.16-h_0"])
+        self.assertTrue(outside.exists())
 
 
 if __name__ == "__main__":

@@ -1,9 +1,14 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12.2  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12.3  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.12.3 (November 2026, app v2.1.2):
+#   - A damaged Miniconda download cache ("CondaVerificationError ... appears
+#     to be corrupted") is repaired automatically: the damaged packages are
+#     deleted and downloaded again, then the step is retried once.
 #
 #  WHAT'S NEW IN v4.12.2 (November 2026, app v2.1.2):
 #   - A Python toolbox left broken by an earlier install that stopped
@@ -328,26 +333,88 @@ function Get-EnvPath($name){ return (Find-EnvPathIn (& $conda env list 2>$null) 
 # half-built by an install that stopped is listed by name but is empty
 # ("'pip' is not recognized" - 2026-11 tester report).
 function Test-EnvWorks($path){
+    if (-not $path) { return $false }
     $py = Join-Path $path "python.exe"
     if (-not (Test-Path $py)) { return $false }
     $out = & $py -m pip --version 2>&1 | Out-String
     return ($LASTEXITCODE -eq 0 -and $out -match 'pip \d')
 }
 
+# Remove an environment's folder (conda's own remove first; then the folder
+# itself, only when it carries the environment's name). $true when gone.
+function Remove-EnvFolder($name, $path){
+    & $conda env remove -n $name -y 2>&1 | Out-Null
+    if ($path -and (Test-Path $path) -and (Split-Path $path -Leaf) -eq $name) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
+    return (-not ($path -and (Test-Path $path)))
+}
+
+# conda's output as plain text lines (Windows PowerShell turns each line
+# conda writes to its error stream into an error object; an empty one
+# reads "System.Management.Automation.RemoteException").
+function Invoke-CondaCreate($name, $py){
+    return @(& $conda create -n $name python=$py -y 2>&1 | ForEach-Object {
+        $l = [string]$_; if ($l -eq 'System.Management.Automation.RemoteException') { '' } else { $l } })
+}
+
 # Create a conda environment only if it does not already exist (safe to
-# re-run); a broken one with that name is removed and built again.
+# re-run); a broken one with that name is removed and built again - also a
+# folder left by a create that failed halfway, which conda no longer lists
+# but which blocks the next create ("prefix already exists").
 function Ensure-Env($name, $py="3.10"){
     $path = Get-EnvPath $name
+    $left = Join-Path $condaHome ("envs\" + $name)
+    if (-not $path -and (Test-Path $left)) { $path = $left }
     if ($path) {
         if (Test-EnvWorks $path) { Log ("  Python environment '" + $name + "' already exists.") "Yellow"; return }
         Log ("  Python environment '" + $name + "' is broken (no working Python inside - probably left by an earlier install that stopped). Rebuilding it...") "Yellow"
-        & $conda env remove -n $name -y 2>&1 | Out-Null
-        if ((Test-Path $path) -and (Split-Path $path -Leaf) -eq $name) { Remove-Item -Recurse -Force $path -ErrorAction SilentlyContinue }
-        if (Test-Path $path) { throw ("Could not remove the broken '" + $name + "' Python environment (" + $path + "). Close any program using it, delete that folder, then run the installer again.") }
+        if (-not (Remove-EnvFolder $name $path)) { throw ("Could not remove the broken '" + $name + "' Python environment (" + $path + "). Close any program using it, delete that folder, then run the installer again.") }
     }
-    & $conda create -n $name python=$py -y | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw ("Could not create the '" + $name + "' Python environment.") }
+    $out = Invoke-CondaCreate $name $py
+    $ok = ($LASTEXITCODE -eq 0)
+    if (-not $ok -and (Repair-CondaCache $out)) {
+        Remove-EnvFolder $name $left | Out-Null        # what the failed try left behind
+        $out = Invoke-CondaCreate $name $py
+        $ok = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $ok) {
+        $out | Where-Object { $_ } | Select-Object -Last 40 | ForEach-Object { Log ("    " + $_) "DarkGray" }
+        if (@(Find-CorruptPackageDirs $out).Count) {
+            throw ("Miniconda's download cache is still damaged after clearing it. Rename the folder " + (Join-Path $condaHome "pkgs") + " to pkgs_old, then run the installer again. If it happens again, add " + $condaHome + " to your antivirus exclusions.")
+        }
+        throw ("Could not create the '" + $name + "' Python environment.")
+    }
     if ($path) { Log ("  Python environment '" + $name + "' rebuilt.") "Green" }
+}
+# Package folders in Miniconda's download cache that conda named as damaged
+# ("CondaVerificationError: The package for tzdata located at <folder>
+# appears to be corrupted" - files missing, usually from an earlier install
+# that stopped halfway or from antivirus). Only folders inside a "pkgs"
+# folder count, so nothing else can ever be picked.
+function Find-CorruptPackageDirs($lines){
+    $text = (@($lines) | ForEach-Object { [string]$_ }) -join "`n"
+    $dirs = @()
+    foreach ($m in [regex]::Matches($text, 'located at\s+([^\r\n]+?)\s+appears to be corrupted')) {
+        $d = $m.Groups[1].Value.Trim()
+        if ((Split-Path (Split-Path $d -Parent) -Leaf) -eq 'pkgs' -and $dirs -notcontains $d) { $dirs += $d }
+    }
+    return $dirs        # callers wrap it in @() - a list of 0 or 1 stays a list
+}
+
+# Delete the damaged package folders (and their downloaded files) so conda
+# downloads them again, then empty the rest of the cache. Programs already
+# installed keep working - they have their own copies. Returns $true when
+# conda's output named damaged packages (worth one more try), else $false.
+function Repair-CondaCache($lines){
+    $dirs = @(Find-CorruptPackageDirs $lines)
+    if ($dirs.Count -eq 0) { return $false }
+    Log ("  Miniconda's download cache is damaged (" + $dirs.Count + " package(s) with missing files - usually an earlier install that stopped halfway, or antivirus). Clearing it and downloading them again...") "Yellow"
+    foreach ($d in $dirs) {
+        Log ("    removing " + $d) "DarkGray"
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($ext in ".conda", ".tar.bz2") { Remove-Item -LiteralPath ($d + $ext) -Force -ErrorAction SilentlyContinue }
+    }
+    & $conda clean --all -y 2>&1 | Out-Null
+    return $true
 }
 
 # Locate a toolbox's own Python program (the program that actually runs the
@@ -415,12 +482,12 @@ function Invoke-PipInEnv($name, $pipArgs){
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12.2) started " + (Get-Date))
+Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12.3) started " + (Get-Date))
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.12.2  (safe to re-run - it resumes where it stopped)" "Green"
+    Log "  AMADEUS INSTALLER v4.12.3  (safe to re-run - it resumes where it stopped)" "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null

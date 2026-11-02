@@ -18,6 +18,9 @@ length, so Firefox plays and replays her voice. Chrome and Edge work as before.
 - Graphics cards older than the RTX 20 / GTX 16 series (GTX 10 series and
   before) get the processor version of her voice, which works on them; the
   graphics-card version cannot run there. The install log now names the card.
+- Windows v4.12.3: a damaged Miniconda download cache ("CondaVerificationError
+  ... appears to be corrupted") is repaired automatically. The damaged packages
+  are downloaded again and the step is retried once.
 
 To update, download the new installer and run it once more (your settings and
 conversations stay).
