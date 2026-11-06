@@ -3,6 +3,7 @@ import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
 import MoodPanel from "./components/MoodPanel";
 import { SystemPanel } from "./components/SystemPanel";
+import MobileAccess from "./components/MobileAccess";
 import { QuitPanel } from "./components/QuitPanel";
 import { useSystemStatus, RESTART_GREET_KEY } from "./useSystemStatus";
 import { ModelPicker } from "./components/ModelPicker";
@@ -259,7 +260,7 @@ export default function App() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
-  const [settingsSection, setSettingsSection] = useState<"connection" | "preferences" | "personality" | "sampling" | "system">("connection");
+  const [settingsSection, setSettingsSection] = useState<"connection" | "preferences" | "personality" | "sampling" | "mobile" | "system">("connection");
   const [statsInfo, setStatsInfo] = useState<StatInfo[]>([]);
   const [personality, setPersonalityText] = useState("");
   const [savedPersonality, setSavedPersonality] = useState("");
@@ -2639,6 +2640,10 @@ export default function App() {
                 onClick={() => setSettingsSection("sampling")}>
                 Model Sampling
               </button>
+              <button type="button" aria-pressed={settingsSection === "mobile"}
+                onClick={() => setSettingsSection("mobile")}>
+                Mobile and remote access
+              </button>
               <button type="button" aria-pressed={settingsSection === "system"}
                 onClick={() => setSettingsSection("system")}>
                 System{sys.restarting && <span className="unsaved-dot" aria-label="Restarting" />}
@@ -3381,6 +3386,10 @@ export default function App() {
 
             <section hidden={settingsSection !== "sampling"} aria-label="Model sampling">
               <SamplingSettings busy={settingsBusy || loading} />
+            </section>
+
+            <section hidden={settingsSection !== "mobile"} aria-label="Mobile and remote access">
+              <MobileAccess active={settingsOpen && settingsSection === "mobile"} busy={settingsBusy} />
             </section>
 
             <section hidden={settingsSection !== "system"} aria-label="System">

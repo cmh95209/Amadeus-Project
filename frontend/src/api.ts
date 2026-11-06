@@ -487,6 +487,32 @@ export async function requestShutdown(): Promise<void> {
   }));
 }
 
+// Remote access through Tailscale (backend/remote_access.py). "funnel" is
+// set whenever Funnel is on: her page would then be on the public internet.
+export type RemoteAccess = { funnel?: boolean } & (
+  | { state: "on"; address: string; backend: string }
+  | { state: "partly"; host: string; page: boolean; backend: boolean }
+  | { state: "off" | "missing" });
+
+export type RemoteSetupResult =
+  | { ok: true; access: RemoteAccess }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "enable"; link: string }
+  | { ok: false; reason: "failed"; message: string };
+
+export async function getRemoteAccess(): Promise<RemoteAccess> {
+  return (await parseResponse(await fetch(`${API_BASE}/remote/access`, { cache: "no-store" }))) as RemoteAccess;
+}
+
+/** Runs the two fixed `tailscale serve` commands (on) or their "off" pair. PC only. */
+export async function changeRemoteAccess(action: "on" | "off"): Promise<RemoteSetupResult> {
+  return (await parseResponse(await fetch(`${API_BASE}/remote/setup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  }))) as RemoteSetupResult;
+}
+
 // "I'm here": the window is visible. Feeds her "last seen" (a greeting
 // never mistakes a quiet visit for an absence). Fire-and-forget: a failed
 // ping is simply skipped.

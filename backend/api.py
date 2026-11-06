@@ -33,6 +33,7 @@ import defaults_refresh
 import feelings
 import llm
 import memory
+import remote_access
 import restart_control
 import speech_text
 import stats
@@ -141,6 +142,39 @@ def system_shutdown_route():
                         "reason": result["reason"]}), 409
     print("[Flask] Shutdown requested from Settings.")
     return jsonify({"ok": True})
+
+
+# Remote access (remote_access.py, settings tab "Mobile and remote access"):
+#   GET  /remote/access   this PC's Tailscale address and whether Funnel is on
+#   POST /remote/setup    {"action": "on" | "off"} runs the two fixed `tailscale
+#                         serve` commands - only from this PC itself: through
+#                         `tailscale serve` a phone's request also arrives from
+#                         127.0.0.1, but with the forwarding headers added.
+_FORWARDED_HEADERS = ("X-Forwarded-For", "Tailscale-User-Login", "Forwarded")
+
+
+def _from_this_pc() -> bool:
+    return (request.remote_addr in ("127.0.0.1", "::1")
+            and not any(request.headers.get(h) for h in _FORWARDED_HEADERS))
+
+
+@application.route("/remote/access", methods=["GET"])
+def get_remote_access():
+    response = jsonify(remote_access.access())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@application.route("/remote/setup", methods=["POST"])
+def remote_setup_route():
+    if not _from_this_pc():
+        return jsonify({"message": "Remote access can only be changed on the PC itself."}), 403
+    action = (request.get_json(silent=True) or {}).get("action")
+    if action not in ("on", "off"):
+        return jsonify({"message": 'action must be "on" or "off"'}), 400
+    result = remote_access.turn_on() if action == "on" else remote_access.turn_off()
+    print(f"[Flask] Remote access {action}: {'ok' if result['ok'] else result['reason']}")
+    return jsonify(result)
 
 _speech_requests: dict[str, tuple[float, str, int | None]] = {}
 _speech_requests_lock = threading.Lock()
