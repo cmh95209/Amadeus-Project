@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.3.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.5  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -39,6 +39,18 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.5 (November 2026):
+#   - Videos: FFmpeg (the video tool) is set up in your home folder when
+#     this Mac has none - a signed, fingerprint-checked download, or
+#     conda-forge's build when that server is down. Never stops the install.
+#   - The speech model for videos is downloaded during the install.
+#
+#  WHAT'S NEW IN v1.4 (October 2026):
+#   - Her memory (about 1.3 GB) is set up during the install, in step 5 -
+#     her first start no longer begins with that download.
+#   - The app's logs are in a normal "logs" folder inside the project
+#     folder (Finder hides the old .runtime folder).
 #
 #  WHAT'S NEW IN v1.3.1 (October 2026, app v2.1.1):
 #   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
@@ -244,7 +256,7 @@ clone_or_update() {
 #  BANNER
 # ----------------------------------------------------------------------------
 printf '%s%s%s\n' "$C_BOLD" "============================================================" "$C_RESET" | tee_to
-printf '%s AMADEUS INSTALLER for MAC OS  v1.3.1%s\n' "$C_BOLD" "$C_RESET" | tee_to
+printf '%s AMADEUS INSTALLER for MAC OS  v1.5%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s This installs everything Amadeus needs on this Mac:%s\n' "$C_BOLD" "$C_RESET" | tee_to
 printf '%s\n' "   - the app (into: $INSTALL_DIR)" | tee_to
 printf '%s\n' "   - three Python toolboxes: the app, her memory, her voice" | tee_to
@@ -465,16 +477,129 @@ if ! node_ok; then
 fi
 NPM="$NODE_BIN_DIR/npm"
 
-# --- 2e. FFmpeg (checked only - Amadeus does not need it).
-# Verified 2026-10-09 in the voice engine's code: her voice is served as
-# WAV (written with a Python audio library, no external program), the only
-# ffmpeg use in the synthesis path (speed change) is disabled upstream, and
-# Amadeus never requests the other (ffmpeg-based) audio formats. A missing
-# ffmpeg can therefore never break her voice - no install, no suggestion.
-if command -v ffmpeg >/dev/null 2>&1; then
-    log "  FFmpeg: present (Amadeus does not require it - just in case)."
+# --- 2e. FFmpeg for videos (video plan, 2026-11-06). Her voice never needs
+# it (checked 2026-10-09: served as WAV), but videos do - the app prepares
+# every video with ffmpeg + ffprobe. A Mac that already has both keeps its
+# own. Otherwise: (A) the signed build 9.0.2 from ffmpeg.martin-riedl.de (the
+# Windows installer's version), pinned and fingerprint-checked; (B) when that
+# server is down, conda-forge's ffmpeg in its own small toolbox. Both land in
+# ~/.amadeus-tools/ffmpeg/bin, where the launcher and the app look for it.
+# Never fatal: without it only videos are missing (a re-run adds it).
+FFMPEG_BIN="$TOOLS_DIR/ffmpeg/bin"
+FFMPEG_ENV="$TOOLS_DIR/ffmpeg/conda"
+FFMPEG_BASE="https://ffmpeg.martin-riedl.de/download/macos"
+if [ $IS_SILICON = 1 ]; then
+    FFMPEG_FILES=(
+        "arm64/1789931890_9.0.2/ffmpeg.zip 28395699 c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924"
+        "arm64/1789931890_9.0.2/ffprobe.zip 28317701 fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6")
 else
-    log "  FFmpeg: not present - that's fine, Amadeus does not need it."
+    FFMPEG_FILES=(
+        "amd64/1789931006_9.0.2/ffmpeg.zip 33816391 7c6b4125b191cbf773832dc51f424cf2b6bb7da43007d1e066f95909e47cacd4"
+        "amd64/1789931006_9.0.2/ffprobe.zip 33719233 2322438ed2f6319a691291b247d09c69dcaa3a982460d1f269a7e1af335cfdfd")
+fi
+ffmpeg_works() {
+    "$1/ffmpeg" -hide_banner -version >/dev/null 2>&1 \
+        && "$1/ffprobe" -hide_banner -version >/dev/null 2>&1
+}
+if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    log "  FFmpeg: present on this Mac - videos use it."
+elif ffmpeg_works "$FFMPEG_BIN"; then
+    log "  FFmpeg for videos: already set up."
+else
+    log "  FFmpeg for videos: downloading (about 60 MB)..."
+    ff_err="$INSTALL_DIR/ffmpeg-err.log"
+    : > "$ff_err"
+    mkdir -p "$FFMPEG_BIN"
+    ff_ok=1
+    for spec in "${FFMPEG_FILES[@]}"; do
+        read -r ff_path _ff_size ff_sha <<< "$spec"
+        ff_name="$(basename "$ff_path" .zip)"
+        ff_zip="$TOOLS_DIR/ffmpeg/$ff_name.zip"
+        rm -f "$ff_zip"
+        curl -L --fail --retry 3 --retry-delay 5 --connect-timeout 20 --progress-bar \
+            -o "$ff_zip" "$FFMPEG_BASE/$ff_path" 2>>"$ff_err" || true
+        if [ -f "$ff_zip" ] && [ "$(shasum -a 256 "$ff_zip" | cut -d' ' -f1)" = "$ff_sha" ]; then
+            rm -f "$FFMPEG_BIN/$ff_name"
+            # The same unzip-or-bsdtar choice as Git-LFS above (a brand-new
+            # Mac may not have 'unzip' on its path yet).
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -o -q "$ff_zip" -d "$FFMPEG_BIN" >>"$ff_err" 2>&1
+            else
+                /usr/bin/bsdtar -x -f "$ff_zip" -C "$FFMPEG_BIN" >>"$ff_err" 2>&1
+            fi
+            chmod +x "$FFMPEG_BIN/$ff_name" 2>/dev/null || true
+        else
+            echo "FFmpeg: $ff_path missing or its fingerprint did not match." >>"$ff_err"
+            ff_ok=0
+        fi
+        rm -f "$ff_zip"
+        [ $ff_ok = 1 ] || break
+    done
+    if [ $ff_ok = 1 ] && ffmpeg_works "$FFMPEG_BIN"; then
+        log "  FFmpeg for videos ready (9.0.2, in your home folder)."
+    else
+        # (B) conda-forge in its own toolbox; small scripts in the bin
+        # folder hand over to it, so the app finds it in the usual place.
+        log "  (the FFmpeg download did not work - trying conda-forge instead, a few minutes...)"
+        rm -f "$FFMPEG_BIN/ffmpeg" "$FFMPEG_BIN/ffprobe"
+        if [ ! -x "$FFMPEG_ENV/bin/ffmpeg" ] || [ ! -x "$FFMPEG_ENV/bin/ffprobe" ]; then
+            rm -rf "$FFMPEG_ENV"
+            # The "gpl" build has the H.264 encoder the app falls back on;
+            # any conda-forge ffmpeg if that one is not offered.
+            "$CONDA" create -y -q -p "$FFMPEG_ENV" -c conda-forge --override-channels \
+                "ffmpeg=*=gpl*" >>"$ff_err" 2>&1 \
+                || "$CONDA" create -y -q -p "$FFMPEG_ENV" -c conda-forge --override-channels \
+                    ffmpeg >>"$ff_err" 2>&1 || true
+        fi
+        if [ -x "$FFMPEG_ENV/bin/ffmpeg" ] && [ -x "$FFMPEG_ENV/bin/ffprobe" ]; then
+            for ff_name in ffmpeg ffprobe; do
+                printf '#!/bin/sh\nexec "%s/bin/%s" "$@"\n' "$FFMPEG_ENV" "$ff_name" > "$FFMPEG_BIN/$ff_name"
+                chmod +x "$FFMPEG_BIN/$ff_name"
+            done
+        fi
+        if ffmpeg_works "$FFMPEG_BIN"; then
+            log "  FFmpeg for videos ready (from conda-forge, in your home folder)."
+        else
+            rm -f "$FFMPEG_BIN/ffmpeg" "$FFMPEG_BIN/ffprobe"
+            printf '%s  WARNING: FFmpeg could not be set up now - Amadeus works, but videos need it. Run the installer again later (details: %s).%s\n' \
+                "$C_YEL" "$ff_err" "$C_RESET" | tee_to
+        fi
+    fi
+fi
+
+# --- 2f. Speech model for videos (video plan, MH 2026-11-03: part of every
+# install, no question): faster-whisper "small", pinned (backend/transcribe.py
+# lists the same files - a test keeps them equal). Never fatal: the app
+# fetches it itself when it is missing.
+SPEECH_REV="536b0662742c02347bc0e980a01041f333bce120"
+SPEECH_DIR="$TOOLS_DIR/speech/faster-whisper-small"
+speech_ok=1
+mkdir -p "$SPEECH_DIR"
+for spec in \
+    "config.json 2370 b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828" \
+    "model.bin 483546902 3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671" \
+    "tokenizer.json 2203239 fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab" \
+    "vocabulary.txt 459861 34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"; do
+    read -r sp_name _sp_size sp_sha <<< "$spec"
+    sp_file="$SPEECH_DIR/$sp_name"
+    if [ -f "$sp_file" ] && [ "$(shasum -a 256 "$sp_file" | cut -d' ' -f1)" = "$sp_sha" ]; then
+        continue
+    fi
+    curl -L --fail --retry 5 --retry-delay 10 -C - --progress-bar -o "$sp_file.part" \
+        "https://huggingface.co/Systran/faster-whisper-small/resolve/$SPEECH_REV/$sp_name" || true
+    if [ -f "$sp_file.part" ] && [ "$(shasum -a 256 "$sp_file.part" | cut -d' ' -f1)" = "$sp_sha" ]; then
+        mv -f "$sp_file.part" "$sp_file"
+    else
+        rm -f "$sp_file.part"
+        speech_ok=0
+        break
+    fi
+done
+if [ "$speech_ok" = 1 ]; then
+    printf '%s' "$SPEECH_REV" > "$SPEECH_DIR/.verified"
+    log "  Speech model for videos ready."
+else
+    log "  The speech model for videos could not be downloaded now - Amadeus downloads it herself later."
 fi
 
 # ----------------------------------------------------------------------------
@@ -589,8 +714,8 @@ step 5 "Setting up Amadeus's Python toolboxes"
 
 ensure_env "amadeus"
 # The memory sidecar's package list needs a newer Python (3.12+) than the
-# app environment (3.10), so it gets its own toolbox. The launcher finds it
-# on first start and builds the sidecar from it.
+# app environment (3.10), so it gets its own toolbox; the sidecar's venv is
+# built from it at the end of this step.
 ensure_env "amadeus-cm" "3.13"
 
 pip_in_env "amadeus" install --quiet --upgrade pip >/dev/null 2>&1 || true
@@ -599,19 +724,47 @@ pip_in_env "amadeus" install --quiet --upgrade pip >/dev/null 2>&1 || true
 # e2k: a small offline English->katakana model (public-domain code; its model
 # is trained on CC-BY-SA dictionaries) so her voice says English words the
 # Japanese way instead of switching to an English accent.
-pip_in_env "amadeus" install Flask flask-cors requests tqdm langchain langchain-openai pydantic ddgs e2k \
+# pillow: checks and shrinks the pictures you show her (and removes their
+# location data) before her model sees them. pypdf + python-docx: read the
+# PDF and Word documents you give her.
+pip_in_env "amadeus" install Flask flask-cors requests tqdm langchain langchain-openai pydantic ddgs e2k pillow pypdf python-docx \
     || die "Could not install the app's packages." "See the install log for details: $INSTALL_LOG"
 
 # Smoke test: the whole backend must import cleanly in this toolbox.
 # ddgs is imported lazily by the backend (web search), so also check it
 # explicitly: a machine that lost the search library must never hide
 # behind a passing smoke test.
-smoke="$(cd "$PROJ/backend" && run_in_env "amadeus" "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | tail -1)"
+smoke="$(cd "$PROJ/backend" && run_in_env "amadeus" "import api; import ddgs; import e2k; import PIL; import pypdf; import docx; print('SMOKE_OK')" 2>&1 | tail -1)"
 if [ "${smoke}" = "SMOKE_OK" ]; then
     log "  App toolbox ready (startup smoke test passed)."
 else
     log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log."
     printf '%s%s%s\n' "$C_DIM" "$smoke" "$C_RESET" | tee_to
+fi
+
+# Her memory (the CharacterMemory sidecar: its venv + about 1.3 GB of
+# packages), set up HERE rather than on her first start - by the launcher's
+# own setup code, so install and launch can never do it two different ways
+# (the launcher still repairs it at start if this could not finish). Not
+# fatal: she works without it.
+log "  Setting up her memory (about 1.3 GB, a few minutes)..."
+cm_py="$CONDA_HOME/envs/amadeus-cm/bin/python"
+setup_args=("$PROJ/scripts/launcher.py" --setup-memory)
+[ -x "$cm_py" ] && setup_args+=(--cm-python "$cm_py")
+app_py="$CONDA_HOME/envs/amadeus/bin/python"
+if [ -x "$app_py" ]; then
+    "$app_py" "${setup_args[@]}" 2>&1 | grep -v '^Progress [0-9]* of [0-9]*$' | tee_to >/dev/null
+    rc=${PIPESTATUS[0]}
+else
+    "$CONDA" run -n amadeus --no-capture-output python "${setup_args[@]}" 2>&1 \
+        | grep -v '^Progress [0-9]* of [0-9]*$' | tee_to >/dev/null
+    rc=${PIPESTATUS[0]}
+fi
+if [ "$rc" -eq 0 ]; then
+    log "  Her memory is set up."
+else
+    log "  Her memory could not be set up right now - Amadeus finishes it when she starts."
+    log "  (Details: $PROJ/logs/memory-setup.log)"
 fi
 
 # ----------------------------------------------------------------------------

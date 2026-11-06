@@ -22,10 +22,21 @@ from chat import (
     GreetingSuperseded,
 )
 
+import attachments
+import transcribe
+import video
+import builtin_llm
+import builtin_server
 import ceremony
+import concerns
+import defaults_refresh
+import feelings
 import llm
 import memory
+import restart_control
+import speech_text
 import stats
+import timing
 
 from tts import streamVoiceChunks, renderVoiceToPath
 import tts as tts_module
@@ -33,6 +44,7 @@ import requests
 
 import chat
 import json
+import queue
 import threading
 import uuid
 import time
@@ -49,7 +61,7 @@ CORS(application)
 # one it is starting. Never breaks a response.
 import re as _re
 _PRESENCE_PATHS = _re.compile(
-    r"^/(greet|conversations/\d+/greet|greetings/\d+/regenerate)$")
+    r"^/(greet|conversations/\d+/(?:greet|poke)|greetings/\d+/regenerate)$")
 
 
 @application.after_request
@@ -82,6 +94,52 @@ def presence():
     except Exception as exc:
         print("[Flask] Presence not recorded:", repr(exc))
         return jsonify({"ok": False}), 500
+    return jsonify({"ok": True})
+
+
+# Settings -> System (2026-11-01): the live state of her parts and the
+# latest restart (restart_control.py).
+@application.route("/system/status", methods=["GET"])
+def system_status_route():
+    return jsonify(restart_control.system_status())
+
+
+# pre: Amadeus was started by its launcher (AMADEUS_LAUNCHER_DIR is set)
+# post: a restart request is left for the launcher, which restarts her brain
+#       (this process), voice and memory within a second; 200 with the
+#       starting status. No launcher -> 409; one already running -> 409.
+@application.route("/system/restart", methods=["POST"])
+def system_restart_route():
+    try:
+        result = restart_control.request_restart()
+    except OSError as exc:
+        print("[Flask] Restart request failed:", repr(exc))
+        return jsonify({"message": "Could not ask for a restart."}), 500
+    if not result["ok"]:
+        message = ("Restart works only when Amadeus was started with its launcher."
+                   if result["reason"] == "no-launcher"
+                   else "She is already restarting.")
+        return jsonify({"message": message, "reason": result["reason"]}), 409
+    print("[Flask] Restart requested from Settings.")
+    return jsonify({"ok": True, "restart": result["status"]})
+
+
+# pre: Amadeus was started by a launcher that can shut down (2026-11-06)
+# post: a shutdown request is left for the launcher, which stops her brain,
+#       voice, memory and web page within a second and closes its window;
+#       200. No such launcher -> 409.
+@application.route("/system/shutdown", methods=["POST"])
+def system_shutdown_route():
+    try:
+        result = restart_control.request_shutdown()
+    except OSError as exc:
+        print("[Flask] Shutdown request failed:", repr(exc))
+        return jsonify({"message": "Could not ask for a shutdown."}), 500
+    if not result["ok"]:
+        return jsonify({"message": "Shut down works only when Amadeus was started "
+                                   "with its launcher (start it once more after this update).",
+                        "reason": result["reason"]}), 409
+    print("[Flask] Shutdown requested from Settings.")
     return jsonify({"ok": True})
 
 _speech_requests: dict[str, tuple[float, str, int | None]] = {}
@@ -130,6 +188,14 @@ def _model_not_found_message() -> str:
     )
 
 
+def _model_server_address() -> str:
+    """The model server Amadeus is using: the built-in one when that mode is
+    on, else the saved address (or the auto-detected local port)."""
+    if builtin_llm.active():
+        return builtin_llm.server_url()
+    return memory.load_llm_server() or llm._server_url()
+
+
 def _llm_error_message(exc: Exception) -> str:
     """Translate a model-server failure into a plain-English message."""
     try:
@@ -137,11 +203,27 @@ def _llm_error_message(exc: Exception) -> str:
         if isinstance(exc, openai.NotFoundError):
             return _model_not_found_message()
         if isinstance(exc, openai.APIConnectionError):
+            if builtin_llm.active():
+                if builtin_llm.model_missing():
+                    return ("Her built-in model is not installed yet. Run the installer "
+                            "again - it continues the download where it stopped.")
+                state = builtin_server.status()["state"]
+                if state == "unloaded":
+                    return ("Her built-in model is not loaded. Load it in Settings -> "
+                            "Connection.")
+                if state == "failed":
+                    return ("Her built-in model could not load - see Settings -> "
+                            "Connection for why.")
+                return ("Can't reach her built-in model. It may still be loading - "
+                        "Settings -> Connection shows how it is doing.")
             return f"Can't reach the model server at {llm._server_url()}. Is it running?"
         if isinstance(exc, openai.APITimeoutError):
             return "The model server took too long to respond. Is it busy or overloaded?"
         if isinstance(exc, openai.AuthenticationError):
             return "The model server rejected the API key. Check it in Settings."
+        if isinstance(exc, openai.APIStatusError) and exc.status_code == 402:
+            return ("Her cloud service says the account is out of credit. Add credit on "
+                    "its website (OpenRouter: Settings -> Credits), then send again.")
     except Exception:
         pass
     try:
@@ -218,6 +300,391 @@ def _register_speech(speech_id, jps_text, assistant_id) -> None:
 #     data: {"phase": "text", "assistant_id", "response": "<English line>"}
 #   the second event is bounded (120 s); on timeout the Japanese line itself
 #   is the response, so the UI never shows an empty box
+# --- The web-ON reply as a live stream (2026-10-25) -----------------------------
+# A web-ON reply can take several seconds (search, reading the pages), so it
+# streams what is really happening: status steps (searching / found / reading
+# / picking out what matters / thinking - only when the step happens), her
+# "hold on, let me check" line the moment it is ready, then the reply (the
+# same fields the old single JSON had), or an error. text/event-stream:
+#     data: {"phase": "status", "step", "text"}
+#     data: {"phase": "aside", "assistant_id", "response", "japanese", "speech_id"}
+#     data: {"phase": "reply", ...}            (last)
+#     data: {"phase": "error", "message"}      (last)
+WEB_STREAM_KEEPALIVE = 15.0   # seconds between keep-alive comments
+
+
+def _sse(payload: dict) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+def _web_stream(work, finish, with_aside: bool):
+    """Run `work()` (one reply, in a worker thread) and stream its progress;
+    `finish(result)` builds the final "reply" event."""
+    events = queue.Queue()
+
+    def on_aside(assistant_id, pack):
+        speech_id = uuid.uuid4().hex
+        _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+        events.put(("aside", {"phase": "aside", "assistant_id": assistant_id,
+                              "response": pack.assistant_reply_ENG,
+                              "japanese": pack.assistant_reply_JPS,
+                              "speech_id": speech_id}))
+
+    def runner():
+        chat._turn.progress = lambda step, text: events.put(
+            ("status", {"phase": "status", "step": step, "text": text}))
+        chat._turn.aside_emit = on_aside if with_aside else None
+        try:
+            result = work()
+        except Exception as exc:          # noqa: BLE001 - reported to the screen
+            events.put(("error", exc))
+        else:
+            events.put(("done", result))
+        finally:
+            chat._turn.progress = None
+            chat._turn.aside_emit = None
+
+    threading.Thread(target=runner, daemon=True).start()
+
+    def generate():
+        while True:
+            try:
+                kind, payload = events.get(timeout=WEB_STREAM_KEEPALIVE)
+            except queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            if kind in ("status", "aside"):
+                yield _sse(payload)
+            elif kind == "error":
+                print("[Flask] LLM failure (web stream):", repr(payload))
+                yield _sse({"phase": "error", "message": _llm_error_message(payload)})
+                return
+            else:
+                yield _sse(finish(payload))
+                return
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# --- Pictures the user attaches (attachments Phase 1, 2026-10-26) --------------
+# POST /attachments uploads on attach (one "card" per file, not sent yet);
+# the send carries their ids ("attachment_ids") on POST /. See attachments.py.
+def _check_attachments_for_send(ids, user_input):
+    """A reason this send can't go (plain words), or None."""
+    if not isinstance(ids, list) or not all(type(i) is int for i in ids):
+        return "Bad attachment list."
+    waiting = attachments.pending(ids)
+    if ids and not waiting:
+        return "Those pictures are no longer available - attach them again."
+    for r in waiting:
+        if r["kind"] != "video":
+            continue
+        # The screen sends only ready videos; another tab may be quicker.
+        state = video.load_meta(r).get("state")
+        if state == video.FAILED:
+            return "This video could not be prepared - take it off and send the rest."
+        if state != video.READY:
+            return "This video is still being prepared - send it once its card says it is ready."
+    if not waiting and not (user_input or "").strip():
+        return "Nothing to send."
+    ok, limit = attachments.fits(ids)
+    if not ok:
+        if any(r["kind"] == "video" for r in waiting):
+            return ("There is no room for this video with what is on her desk. Take something "
+                    "off her desk first, or send it on its own.")
+        if any(r["kind"] == "document" for r in waiting):
+            return ("There is no room for this with what is on her desk. Take something off "
+                    "her desk first, or send fewer files.")
+        return (f"That is more pictures than her current model can hold at once (about "
+                f"{limit}, counting the ones on her desk). Take some off her desk or send fewer.")
+    return None
+
+
+@application.route("/attachments", methods=["POST"])
+def upload_attachments():
+    files = request.files.getlist("file") or request.files.getlist("files")
+    if not files:
+        return jsonify({"message": "No file received"}), 400
+    conv = request.form.get("conversation_id", type=int)
+    items = []
+    for f in files:
+        name = f.filename or "picture"
+        data = f.read(attachments.MAX_FILE_BYTES + 1)
+        try:
+            row = attachments.save_upload(name, data, conv)
+            # A document too long to read in full: her reading notes start now
+            # (Phase 4b), the card shows the progress.
+            if attachments.maybe_start_notes(row, conv):
+                row = attachments.get(row["id"])
+            items.append({"ok": True, **attachments.card(row, conv)})
+        except attachments.AttachmentError as exc:
+            items.append({"ok": False, "name": attachments._clean_name(name),
+                          "error": exc.code, "message": str(exc)})
+        except Exception as exc:
+            print("[Flask] Attachment upload failed:", repr(exc))
+            items.append({"ok": False, "name": attachments._clean_name(name),
+                          "error": "failed", "message": "This file could not be saved."})
+    return jsonify({"status": "ok", "items": items,
+                    "room": attachments.room_left(conv)})
+
+
+# --- Videos (video plan Phase 1, 2026-11-03) -----------------------------------
+# Uploaded in pieces so a big phone video survives a dropped connection:
+# POST /attachments/video {"name", "size", "conversation_id"} -> upload id;
+# PUT /attachments/video/<id>?offset=N (raw bytes, at most "piece");
+# GET /attachments/video/<id> -> how much arrived (to go on after a drop);
+# POST /attachments/video/<id>/done -> the card (preparing starts);
+# DELETE /attachments/video/<id> -> cancel. See video.py.
+def _video_error(exc, name=""):
+    return jsonify({"ok": False, "name": name, "error": exc.code, "message": str(exc)}), 400
+
+
+@application.route("/attachments/video", methods=["POST"])
+def video_upload_start():
+    data = request.get_json(silent=True) or {}
+    name = data.get("name") or "video.mp4"
+    conv = data.get("conversation_id")
+    try:
+        return jsonify({"ok": True, **video.start_upload(
+            name, data.get("size"), int(conv) if isinstance(conv, int) else None)})
+    except attachments.AttachmentError as exc:
+        return _video_error(exc, attachments._clean_name(name))
+
+
+@application.route("/attachments/video/<upload_id>", methods=["GET"])
+def video_upload_status(upload_id):
+    try:
+        return jsonify({"ok": True, **video.upload_status(upload_id)})
+    except attachments.AttachmentError as exc:
+        return _video_error(exc)
+
+
+@application.route("/attachments/video/<upload_id>", methods=["PUT"])
+def video_upload_piece(upload_id):
+    offset = request.args.get("offset", type=int)
+    if request.content_length is not None and request.content_length > video.PIECE_MAX:
+        return jsonify({"ok": False, "error": "piece_too_big",
+                        "message": "This piece is too big."}), 413
+    data = request.stream.read(video.PIECE_MAX + 1)
+    if len(data) > video.PIECE_MAX:
+        return jsonify({"ok": False, "error": "piece_too_big",
+                        "message": "This piece is too big."}), 413
+    try:
+        out = video.add_piece(upload_id, offset, data)
+    except attachments.AttachmentError as exc:
+        return _video_error(exc)
+    return jsonify(out), (200 if out["ok"] else 409)
+
+
+@application.route("/attachments/video/<upload_id>/done", methods=["POST"])
+def video_upload_done(upload_id):
+    try:
+        row = video.finish_upload(upload_id)
+    except attachments.AttachmentError as exc:
+        return _video_error(exc)
+    except Exception as exc:
+        print("[Flask] Video upload failed:", repr(exc))
+        video.cancel_upload(upload_id)
+        return jsonify({"ok": False, "error": "failed",
+                        "message": "This video could not be saved."}), 500
+    conv = row.get("conversation_id")
+    return jsonify({"ok": True, **attachments.card(row, conv), "room": attachments.room_left(conv)})
+
+
+@application.route("/attachments/video/<upload_id>", methods=["DELETE"])
+def video_upload_cancel(upload_id):
+    try:
+        video.cancel_upload(upload_id)
+    except attachments.AttachmentError as exc:
+        return _video_error(exc)
+    return jsonify({"ok": True})
+
+
+# The speech model for videos (V2 a: a one-time download the user agrees to).
+@application.route("/attachments/speech-model", methods=["GET"])
+def speech_model_status():
+    return jsonify({"status": "ok", **transcribe.status()})
+
+
+@application.route("/attachments/speech-model", methods=["POST"])
+def speech_model_download():
+    return jsonify({"status": "ok", **transcribe.start_download()})
+
+
+@application.route("/attachments/<int:attachment_id>", methods=["DELETE"])
+def remove_attachment(attachment_id):
+    row = attachments.get(attachment_id)
+    result = attachments.remove(attachment_id)
+    if not result:
+        return jsonify({"message": "Attachment not found"}), 404
+    out = {"status": "ok", "result": result}
+    # ?react=1: a card taken back after her reaction to it - she notices it
+    # in her own words (MH 2026-10-27). Never blocks the removal itself.
+    if result == "deleted" and request.args.get("react") == "1" and has_api_key():
+        try:
+            line = chat.generate_withdraw_reaction(row, row.get("conversation_id"))
+        except GreetingSuperseded:
+            line = None
+        except Exception as exc:
+            print("[Flask] Withdraw reaction failed:", repr(exc))
+            line = None
+        if line:
+            pack, assistant_id, conv_id = line
+            speech_id = uuid.uuid4().hex
+            _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+            out["reaction"] = {"response": pack.assistant_reply_ENG,
+                               "japanese": pack.assistant_reply_JPS, "speech_id": speech_id,
+                               "assistant_id": assistant_id, "conversation_id": conv_id}
+    return jsonify(out)
+
+
+def _send_attachment_file(attachment_id, thumb, original=False):
+    full = attachments.file_path(attachment_id, thumb=thumb, original=original)
+    if not full:
+        return jsonify({"message": "Attachment not found"}), 404
+    row = attachments.get(attachment_id)
+    if row and row["kind"] == "document":
+        # A document's own file never runs in the browser (an .html one could):
+        # a PDF opens in its viewer, the text as plain text, anything else is
+        # downloaded under its own name.
+        if not original:
+            response = send_from_directory(str(Path(full).parent), Path(full).name,
+                                           mimetype="text/plain; charset=utf-8")
+        elif row.get("mime") == "application/pdf":
+            response = send_from_directory(str(Path(full).parent), Path(full).name,
+                                           mimetype="application/pdf",
+                                           download_name=row.get("name") or "document.pdf")
+        else:
+            response = send_from_directory(str(Path(full).parent), Path(full).name,
+                                           as_attachment=True,
+                                           download_name=row.get("name") or Path(full).name)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        return response
+    response = send_from_directory(str(Path(full).parent), Path(full).name, conditional=True)
+    response.headers["Cache-Control"] = "private, max-age=3600"
+    return response
+
+
+# A document as she read it (E4 a: the screen's text view + its original).
+@application.route("/attachments/<int:attachment_id>/text", methods=["GET"])
+def attachment_text(attachment_id):
+    row = attachments.get(attachment_id)
+    if not row or row["kind"] != "document":
+        return jsonify({"message": "Document not found"}), 404
+    item = memory.attachments_for_ui([row])[0]
+    notes = attachments.load_notes(row) if row.get("notes") else {}
+    # With her notes done she can look up any page: the whole text is shown.
+    text = (attachments.document_text(row) if row.get("notes") == memory.NOTES_DONE
+            else attachments.read_part(row))
+    return jsonify({"status": "ok", **item, "text": text,
+                    "notes": attachments.notes_progress(row),
+                    "notes_text": attachments._notes_lines(notes.get("sections") or [])})
+
+
+# A video for the player (video plan Phase 2): its state and what was said.
+@application.route("/attachments/<int:attachment_id>/watch", methods=["GET"])
+def attachment_watch(attachment_id):
+    row = attachments.get(attachment_id)
+    if not row or row["kind"] != "video":
+        return jsonify({"message": "Video not found"}), 404
+    meta = video.load_meta(row)
+    speech = meta.get("speech") or {}
+    return jsonify({"status": "ok", **attachments.card(row), "speech_state": speech.get("state") or "none",
+                    "speech_text": video.speech_text(speech.get("segments") or []),
+                    "language": speech.get("language") or "",
+                    "notes": video.notes_progress(row),
+                    "notes_text": video.notes_lines(video.load_watch_notes(row))})
+
+
+@application.route("/attachments/<int:attachment_id>/file", methods=["GET"])
+def attachment_file(attachment_id):
+    return _send_attachment_file(attachment_id, thumb=False)
+
+
+@application.route("/attachments/<int:attachment_id>/thumb", methods=["GET"])
+def attachment_thumb(attachment_id):
+    return _send_attachment_file(attachment_id, thumb=True)
+
+
+# The full-size picture (the viewer); the copy she sees when it was small already.
+@application.route("/attachments/<int:attachment_id>/original", methods=["GET"])
+def attachment_original(attachment_id):
+    return _send_attachment_file(attachment_id, thumb=False, original=True)
+
+
+# Cards not sent yet, worked out again (a document's "she will read the first
+# N pages" / "no room" warning changes when her desk or the tray changes).
+@application.route("/attachments/cards", methods=["GET"])
+def attachment_cards():
+    conv = request.args.get("conversation_id", type=int)
+    ids = [int(i) for i in (request.args.get("ids") or "").split(",") if i.strip().isdigit()]
+    return jsonify({"status": "ok",
+                    "items": [attachments.card(r, conv) for r in attachments.pending(ids)]})
+
+
+@application.route("/attachments/desk", methods=["GET"])
+def attachments_desk():
+    conv = request.args.get("conversation_id", type=int)
+    return jsonify({"status": "ok", "items": memory.attachments_for_ui(attachments.desk(conv))})
+
+
+@application.route("/attachments/capabilities", methods=["GET"])
+def attachments_capabilities():
+    response = jsonify(attachments.capabilities(request.args.get("conversation_id", type=int)))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# Her one line when something is attached (D8): {"attachment_ids": [...]};
+# answers {"status": "skipped"} when the reaction setting says quiet, 409
+# when the user sent first (the line is dropped).
+@application.route("/attachments/react", methods=["POST"])
+def attachments_react():
+    if not has_api_key():
+        return jsonify({"message": "No API key. Add one in Settings."}), 400
+    data = request.get_json(silent=True) or {}
+    ids = data.get("attachment_ids")
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"message": "Missing 'attachment_ids'"}), 400
+    conv = data.get("conversation_id") if type(data.get("conversation_id")) is int else None
+    try:
+        result = chat.generate_attach_reaction(ids, conv)
+    except GreetingSuperseded:
+        return jsonify({"status": "superseded"}), 409
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except Exception as exc:
+        print("[Flask] Attach reaction failed:", repr(exc))
+        return jsonify({"message": _llm_error_message(exc)}), 502
+    if result is None:
+        return jsonify({"status": "skipped"})
+    pack, assistant_id, conv_id = result
+    speech_id = uuid.uuid4().hex
+    _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+    return jsonify({"status": "ok", "response": pack.assistant_reply_ENG,
+                    "japanese": pack.assistant_reply_JPS, "speech_id": speech_id,
+                    "assistant_id": assistant_id, "conversation_id": conv_id})
+
+
+@application.route("/attachments/reactionSetting", methods=["GET"])
+def get_attach_reaction_setting():
+    return jsonify({"status": "ok", "value": attachments.load_reaction_setting(),
+                    "choices": list(attachments.REACT_CHOICES)})
+
+
+@application.route("/attachments/reactionSetting", methods=["POST"])
+def set_attach_reaction_setting():
+    data = request.get_json(silent=True) or {}
+    try:
+        value = attachments.save_reaction_setting(data.get("value"))
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    return jsonify({"status": "ok", "value": value})
+
+
 @application.route("/", methods=["POST"])
 def request_message():
     if not has_api_key():
@@ -225,38 +692,52 @@ def request_message():
     print("[Flask] / route triggered")
     content = request.get_json()
     user_input = content.get("user_input", "")
+    # Pictures attached to this message (ids from POST /attachments), if any.
+    attachment_ids = content.get("attachment_ids") or None
+    if attachment_ids is not None:
+        problem = _check_attachments_for_send(attachment_ids, user_input)
+        if problem:
+            return jsonify({"message": problem}), 400
+    started = timing.now()
+    timing.start_reports()
 
     if chat.store.load_web_access():
         # Web access ON: the reply is the original single call (both lines at
-        # once) and the client speaks the single-JSON protocol.
-        try:
-            pack, user_id, assistant_id, conv_id = getOutputPacked(user_input)
-        except Exception as exc:
-            print("[Flask] LLM failure:", repr(exc))
-            return jsonify({"message": _llm_error_message(exc)}), 502
-        print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
-        print("[Flask]: JPS:", pack.assistant_reply_JPS)
-
-        speech_id = uuid.uuid4().hex
-        _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
-        return jsonify({
-            "response": pack.assistant_reply_ENG,
-            "japanese": pack.assistant_reply_JPS,
-            "speech_id": speech_id,
-            "user_id": user_id,
-            "assistant_id": assistant_id,
-            "conversation_id": conv_id,
-        })
+        # once), streamed with its live progress (see _web_stream).
+        def finish(result):
+            pack, user_id, assistant_id, conv_id = result
+            timing.line_ready(assistant_id, started, "her reply (web access on, both lines)")
+            print("\n[Flask]: ENG:", pack.assistant_reply_ENG)
+            print("[Flask]: JPS:", pack.assistant_reply_JPS)
+            speech_id = uuid.uuid4().hex
+            _register_speech(speech_id, pack.assistant_reply_JPS, assistant_id)
+            return {
+                "phase": "reply",
+                "response": pack.assistant_reply_ENG,
+                "japanese": pack.assistant_reply_JPS,
+                "speech_id": speech_id,
+                "user_id": user_id,
+                "assistant_id": assistant_id,
+                "conversation_id": conv_id,
+                # The links she used (shown under her reply); [] when none.
+                "sources": memory.sources_for_ui(memory.load_message_sources(assistant_id)),
+                # What she read of a long document (Phase 4b); "" when none.
+                "doc_reads": memory.load_message_doc_reads(assistant_id),
+            }
+        return _web_stream(lambda: (getOutputPacked(user_input, attachment_ids) if attachment_ids
+                                    else getOutputPacked(user_input)), finish, with_aside=True)
 
     # Web access OFF: voice-first (see the doc block above).
     try:
-        turn = chat.getOutputPackedVoiceFirst(user_input)
+        turn = (chat.getOutputPackedVoiceFirst(user_input, attachment_ids) if attachment_ids
+                else chat.getOutputPackedVoiceFirst(user_input))
     except Exception as exc:
         # Call 1 failed before the stream could start: the route has not
         # switched to streaming yet, so the original JSON error protocol
         # still applies.
         print("[Flask] LLM failure (voice-first call 1):", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
+    timing.line_ready(turn.assistant_id, started)
     print("\n[Flask]: JPS (voice-first call 1):", turn.pack.assistant_reply_JPS)
 
     speech_id = uuid.uuid4().hex
@@ -266,7 +747,8 @@ def request_message():
         yield "data: " + json.dumps(
             {"phase": "voice", "speech_id": speech_id, "user_id": turn.user_id,
              "assistant_id": turn.assistant_id, "conversation_id": turn.conv_id,
-             "japanese": turn.pack.assistant_reply_JPS},
+             "japanese": turn.pack.assistant_reply_JPS,
+             "doc_reads": memory.load_message_doc_reads(turn.assistant_id)},
             ensure_ascii=False) + "\n\n"
         # Wait (bounded) for the background English backfill; her voice is
         # already playing by the time this line runs.
@@ -293,18 +775,23 @@ def speech(speech_id):
     save_path = None
     if assistant_id:
         save_path = Path(__file__).resolve().parent / "generated" / f"voice_{assistant_id}.wav"
+    watch = timing.VoiceWatch(assistant_id)
     chunks = streamVoiceChunks(jps_text, save_path=save_path)
     try:
         first = next(chunks)
     except Exception:
         chunks.close()
+        watch.finish()
         return jsonify({"message": "Speech generation failed"}), 502
 
     def generate():
         try:
-            yield from chain((first,), chunks)
+            for chunk in chain((first,), chunks):
+                watch.feed(chunk)
+                yield chunk
         finally:
             chunks.close()
+            watch.finish()
             # Keep the line for replay only if it was actually generated.
             if assistant_id and save_path is not None and save_path.exists():
                 memory.set_message_audio(assistant_id, f"generated/voice_{assistant_id}.wav")
@@ -366,8 +853,14 @@ def settingLLMModel():
 # - returns the currently active LLM model name as a string
 @application.route("/getCurrLLMModel", methods=["GET"])
 def getCurrLLMModel():
-    print("[Flask] /getCurrLLMModel triggered")  
-    LLM_Model = getLLMModel()
+    print("[Flask] /getCurrLLMModel triggered")
+    # Settings' model field is the user's OWN (custom) model. In built-in
+    # mode getLLMModel() names the built-in one, and saving that back would
+    # overwrite the user's custom choice - so the field gets the saved one.
+    if builtin_llm.active():
+        LLM_Model = (chat.LLM_Model or "").strip() or "No Model Selected."
+    else:
+        LLM_Model = getLLMModel()
     if LLM_Model:
         return jsonify({"status": "ok", "message": LLM_Model})
     else:
@@ -418,6 +911,32 @@ def settingPersonality():
     return jsonify({"status": "ok", "message": "Personality updated", "personality": new_personality})
 
 
+# Newer defaults for files the user changed (defaults_refresh): Settings shows
+# a one-time note per file; untouched old defaults were already replaced at
+# startup.
+@application.route("/defaults/notices", methods=["GET"])
+def default_notices():
+    response = jsonify({"status": "ok", "notices": defaults_refresh.notices()})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@application.route("/defaults/answer", methods=["POST"])
+def default_answer():
+    data = request.get_json(silent=True) or {}
+    name, choice = data.get("name"), data.get("choice")
+    if name not in defaults_refresh.OLD_DEFAULTS or choice not in ("use_new", "keep_mine"):
+        return jsonify({"status": "error", "message": "Unknown choice."}), 400
+    try:
+        if choice == "use_new":
+            backup = defaults_refresh.use_new_default(name)
+            return jsonify({"status": "ok", "backup": backup})
+        defaults_refresh.keep_mine(name)
+    except (OSError, ValueError):
+        return jsonify({"status": "error", "message": "Could not update the file. Please try again."}), 500
+    return jsonify({"status": "ok"})
+
+
 # pre: Interaction number is given. e.g., 1,2,3
 # post: use SpecialInteraction() from chat to update accordingly
 @application.route("/doSpecialInteraction", methods=["POST"])
@@ -455,6 +974,25 @@ def get_web_access():
     return jsonify({"enabled": memory.load_web_access()})
 
 
+@application.route("/webReading", methods=["GET"])
+def get_web_reading():
+    """How she reads pages after a search: the saved choice and what is used
+    right now ("quick" on a model server that runs one task at a time)."""
+    effective, reason = chat.web_reading_plan()[0], chat.web_reading_reason()
+    return jsonify({"mode": memory.load_web_reading(), "effective": effective,
+                    "reason": reason})
+
+
+@application.route("/webReading", methods=["POST"])
+def set_web_reading():
+    data = request.get_json(silent=True)
+    try:
+        mode = memory.save_web_reading((data or {}).get("mode") if isinstance(data, dict) else None)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    return jsonify({"status": "ok", "mode": mode})
+
+
 @application.route("/setWebAccess", methods=["POST"])
 def set_web_access():
     """Turn the web-access toggle on or off (persisted)."""
@@ -466,20 +1004,45 @@ def set_web_access():
     return jsonify({"status": "ok", "enabled": enabled})
 
 
+@application.route("/reasoning", methods=["GET"])
+def get_reasoning():
+    """Settings -> Reasoning: the three levels (defaults applied), which brain
+    is active, and whether the custom model is a cloud service."""
+    return jsonify({**llm.reasoning_levels(),
+                    "mode": "builtin" if builtin_llm.active() else "custom",
+                    "custom_is_cloud": not llm._is_local_host(llm._configured_server_url()),
+                    "levels": list(llm.REASONING_LEVELS)})
+
+
+@application.route("/reasoning", methods=["POST"])
+def set_reasoning():
+    """Save one or more levels: {"replies_builtin": "off", ...}."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"message": "Expected a JSON object"}), 400
+    bad = [k for k, v in data.items()
+           if k not in memory.REASONING_KEYS or v not in memory.REASONING_LEVELS]
+    if bad or not data:
+        return jsonify({"message": "Unknown setting or level: " + ", ".join(map(str, bad or ["(none)"]))}), 400
+    memory.save_reasoning(data)
+    return get_reasoning()
+
+
+# The old Deep thinking switch (replaced 2026-10-20) - kept one release for
+# older pages: "on" = her replies above Off for the active brain.
 @application.route("/getDeepThinking", methods=["GET"])
 def get_deep_thinking():
-    """Current state of the deep-thinking (search judgement) toggle."""
-    return jsonify({"enabled": memory.load_deep_thinking()})
+    return jsonify({"enabled": llm.reasoning_for("replies") != "off"})
 
 
 @application.route("/setDeepThinking", methods=["POST"])
 def set_deep_thinking():
-    """Turn deep thinking on or off (persisted)."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or "enabled" not in data:
         return jsonify({"message": "Missing 'enabled' field"}), 400
     enabled = bool(data["enabled"])
-    memory.save_deep_thinking(enabled)
+    key = "replies_builtin" if builtin_llm.active() else "replies_custom"
+    memory.save_reasoning({key: "medium" if enabled else "off"})
     return jsonify({"status": "ok", "enabled": enabled})
 
 
@@ -517,9 +1080,12 @@ def edit_message(message_id):
 # post: the message row is removed from her memory
 @application.route("/memory/<int:message_id>", methods=["DELETE"])
 def delete_message(message_id):
+    titled = attachments.picture_titled_chat(message_id)   # (before the row is gone)
     if not memory.delete_message(message_id):
         return jsonify({"message": "Message not found"}), 404
     _unlink_voice(message_id)
+    if titled is not None:
+        attachments.untitle_chat(titled)   # its title came from the deleted picture
     return jsonify({"status": "ok"})
 
 
@@ -547,6 +1113,25 @@ def undo_last_reply():
 def regenerate():
     if not has_api_key():
         return jsonify({"message": "No API key. Add one in Settings."}), 400
+    if chat.store.load_web_access():
+        # Web ON: the same live progress as a new reply (no hold-on line -
+        # the first one is still in the chat).
+        last = memory.get_last_message()
+        if last is not None and last["role"] == "assistant" and (
+                memory.get_message_is_greeting(last["id"])
+                or memory.get_message_is_aside(last["id"])):
+            return jsonify({"message": "Nothing to regenerate here"}), 400
+
+        def finish(result):
+            pack, new_id = result
+            speech_id = uuid.uuid4().hex
+            with _speech_requests_lock:
+                _speech_requests[speech_id] = (time.monotonic(), pack.assistant_reply_JPS, new_id)
+            return {"phase": "reply", "response": pack.assistant_reply_ENG,
+                    "japanese": pack.assistant_reply_JPS, "speech_id": speech_id,
+                    "assistant_id": new_id,
+                    "sources": memory.sources_for_ui(memory.load_message_sources(new_id))}
+        return _web_stream(regenerateReply, finish, with_aside=False)
     try:
         pack, new_id = regenerateReply()
     except ValueError as exc:
@@ -597,6 +1182,29 @@ def regenerate_voice(message_id):
     return jsonify({"status": "ok", "audio_url": "/message_audio/" + rel})
 
 
+# pre: message_id is one of her lines with a saved Japanese voice line
+# post: Replay without a saved clip (2026-10-24, VM test: an interrupted line
+#       is never saved, and /memory/<id>/voice above renders the WHOLE clip
+#       before the first sound - minutes on a processor). A saved clip ->
+#       {"audio_url"}; otherwise a single-use speech id for the same
+#       streaming voice path her live lines use -> {"speech_id"}. The stream
+#       keeps the clip for the next Replay when it is heard to the end.
+_GENERATED_DIR = Path(__file__).resolve().parent / "generated"
+
+
+@application.route("/memory/<int:message_id>/speak", methods=["POST"])
+def speak_message(message_id):
+    japanese = memory.get_message_japanese(message_id)
+    if japanese is None:
+        return jsonify({"message": "This reply has no saved voice line to re-speak."}), 400
+    rel = f"generated/voice_{message_id}.wav"
+    if (_GENERATED_DIR / f"voice_{message_id}.wav").exists():
+        memory.set_message_audio(message_id, rel)
+        return jsonify({"status": "ok", "audio_url": "/message_audio/" + rel})
+    return jsonify({"status": "ok",
+                    "speech_id": _mint_speech_id_text(japanese, message_id)})
+
+
 @application.route("/getVoiceRetention", methods=["GET"])
 def get_voice_retention():
     """How many voice recordings are kept on disk (0 = unlimited)."""
@@ -617,10 +1225,146 @@ def set_voice_retention():
     return jsonify({"status": "ok", "limit": saved})
 
 
+@application.route("/getNames", methods=["GET"])
+def get_names():
+    """The user's name list (Settings -> Names she knows): how each name is
+    written in her Japanese line and said by her voice."""
+    return jsonify({"names": [{"word": w, "reading": r}
+                              for w, r in speech_text.load_user_names()]})
+
+
+@application.route("/setNames", methods=["POST"])
+def set_names():
+    """Replace the user's name list. Each reading must be kana; rows that are
+    not (or have no name) are refused with the first bad row named."""
+    data = request.get_json(silent=True)
+    rows = data.get("names") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return jsonify({"message": "Missing 'names' list"}), 400
+    pairs = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        word = str(row.get("word") or "").strip()
+        reading = str(row.get("reading") or "").strip()
+        if not word and not reading:
+            continue  # an empty row the user never filled
+        if not word or "=" in word:
+            return jsonify({"message": f"Name missing or not allowed: '{word}'"}), 400
+        if not speech_text.is_kana(reading):
+            return jsonify({"message": f"'{word}': write how she says it in katakana or hiragana"}), 400
+        pairs.append((word, reading))
+    saved = speech_text.save_user_names(pairs)
+    return jsonify({"status": "ok", "names": [{"word": w, "reading": r} for w, r in saved]})
+
+
 @application.route("/getContextBudget", methods=["GET"])
 def get_context_budget():
-    """The user's conversation-history token budget (estimated tokens)."""
-    return jsonify({"budget": memory.load_context_budget()})
+    """The conversation-memory number Settings shows (estimated tokens): the
+    built-in model's own number in built-in mode, else the custom model's.
+    builtin_cap = the most the built-in model's context holds (null when
+    built-in mode is off); default = what a fresh install starts with."""
+    own = builtin_llm.history_budget()
+    if own is not None:
+        return jsonify({"budget": own, "builtin_cap": builtin_llm.history_budget_cap(),
+                        "default": builtin_llm.history_default(), "mode": "builtin"})
+    return jsonify({"budget": memory.load_context_budget(), "builtin_cap": None,
+                    "default": memory.DEFAULT_CONTEXT_BUDGET, "mode": "custom"})
+
+
+# pre: none
+# post: how she thinks - the built-in model the installer set up (option A)
+#       or the user's own / a cloud model. "available" = the installer set a
+#       built-in model up on this install (option B never did).
+@application.route("/brainMode", methods=["GET"])
+def get_brain_mode():
+    return jsonify(builtin_llm.describe())
+
+
+# pre: body {"mode": "builtin" | "custom"}; "builtin" only when available
+# post: the choice is saved in data/local_llm.json and applied at once:
+#       "builtin" loads her model (in the background), "custom" unloads it
+#       and frees its graphics memory.
+@application.route("/setBrainMode", methods=["POST"])
+def set_brain_mode():
+    data = request.get_json(silent=True)
+    mode = data.get("mode") if isinstance(data, dict) else None
+    if mode not in ("builtin", "custom"):
+        return jsonify({"message": "mode must be 'builtin' or 'custom'"}), 400
+    try:
+        builtin_llm.save_mode(mode)
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"message": f"Could not save the choice: {exc}"}), 500
+    reset_llm()   # rebuild the model clients for the new server
+    if mode == "builtin":
+        try:
+            if builtin_server.status()["state"] not in ("loading", "loaded"):
+                builtin_server.load()
+        except (LookupError, ValueError) as exc:
+            print(f"[Flask] /setBrainMode: her model was not loaded: {exc}")
+    else:
+        builtin_server.unload()
+    info = builtin_llm.describe()
+    info["restart_needed"] = False
+    info["server"] = builtin_server.status()
+    return jsonify(info)
+
+
+# pre: none
+# post: her built-in model's server: state ("unloaded" | "loading" |
+#       "loaded" | "failed"), the file it runs (or tried), why it failed,
+#       and every chat-model GGUF in the models folder (Settings' dropdown;
+#       asking again = "Refresh list").
+@application.route("/builtinModel", methods=["GET"])
+def get_builtin_model():
+    info = builtin_llm.describe()
+    info["server"] = builtin_server.status()
+    info["files"] = builtin_llm.list_models()
+    info["selected"] = builtin_llm.selected_file()
+    folder = builtin_llm.models_dir()
+    info["folder"] = str(folder) if folder else ""
+    info["catalog"] = builtin_llm.catalog()
+    return jsonify(info)
+
+
+# pre: body {"file": "<a GGUF name from /builtinModel's files>"} (optional:
+#      default = the saved choice); built-in mode on
+# post: her model (re)loads in the background; a file that loads fine is
+#       the one she starts with next time
+@application.route("/builtinModel/load", methods=["POST"])
+def load_builtin_model():
+    data = request.get_json(silent=True)
+    file = data.get("file") if isinstance(data, dict) else None
+    if file is not None and not isinstance(file, str):
+        return jsonify({"message": "'file' must be a file name"}), 400
+    try:
+        status = builtin_server.load(file or None)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 409
+    return jsonify({"status": "ok", "server": status})
+
+
+# post: her models folder opens in Explorer / Finder (Settings' "Open
+#       models folder", for putting a downloaded GGUF in place)
+@application.route("/builtinModel/openFolder", methods=["POST"])
+def open_builtin_models_folder():
+    try:
+        return jsonify({"status": "ok", "folder": builtin_llm.open_models_folder()})
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 409
+    except OSError as exc:
+        return jsonify({"message": f"Could not open the folder: {exc}"}), 500
+
+
+# post: her model stops and its graphics memory is free; she cannot answer
+#       until it is loaded again
+@application.route("/builtinModel/unload", methods=["POST"])
+def unload_builtin_model():
+    return jsonify({"status": "ok", "server": builtin_server.unload()})
 
 
 @application.route("/setContextBudget", methods=["POST"])
@@ -633,7 +1377,13 @@ def set_context_budget():
         budget = int(data["budget"])
     except (TypeError, ValueError):
         return jsonify({"message": "'budget' must be a number"}), 400
-    saved = memory.save_context_budget(budget)
+    if builtin_llm.active():
+        try:
+            saved = builtin_llm.save_history_budget(budget)
+        except (LookupError, OSError) as exc:
+            return jsonify({"message": f"Could not save: {exc}"}), 500
+    else:
+        saved = memory.save_context_budget(budget)
     return jsonify({"status": "ok", "budget": saved})
 
 
@@ -647,7 +1397,7 @@ def get_sampling():
         "sampling": memory.load_sampling(),
         "params": memory.SAMPLING_PARAMS,
         "local_only": list(memory.SAMPLING_LOCAL_ONLY),
-        "rejected": llm.rejected_sampling_params(llm._server_url()),
+        "rejected": llm.rejected_sampling_params(_model_server_address()),
     })
 
 
@@ -814,8 +1564,9 @@ def _model_in_list(model_name: str, server_models: list[str]) -> bool:
 #       endpoint and reports reachability plus the model names it offers
 @application.route("/testConnection", methods=["GET"])
 def test_connection():
-    configured = memory.load_llm_server()
-    address = configured or llm._server_url()
+    builtin = builtin_llm.active()
+    configured = True if builtin else memory.load_llm_server()
+    address = _model_server_address()
     probe = llm.test_server(address, api_key=chat.API_KEY)
     model_name = getLLMModel()
     model_configured = bool(model_name.strip()) and model_name != "No Model Selected."
@@ -847,6 +1598,9 @@ def test_connection():
         "batch_warning": batch_warning,
         "error": probe["error"],
         "voice_reachable": _voice_engine_reachable(),
+        "builtin": builtin,
+        "builtin_model_missing": builtin and builtin_llm.model_missing(),
+        "builtin_state": builtin_server.status()["state"] if builtin else None,
     })
 
 
@@ -885,6 +1639,36 @@ def get_stats():
     response = jsonify({"status": "ok", "stats": stats.all_stats()})
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# pre: None
+# post: her mood right now in plain words ([] = all normal) and the things
+#       on her mind about the user, for Settings -> Personality & mood
+@application.route("/mood", methods=["GET"])
+def get_mood():
+    trust = stats.load_stat("trust")
+    items = concerns.load(chat._concerns_path())
+    response = jsonify({
+        "status": "ok",
+        "feelings": feelings.describe_for_user(trust=trust, path=chat._feelings_path()),
+        "concerns": [
+            {"index": n, "text": i["text"], "status": i["status"],
+             "added": i["added"].isoformat() if i["added"] else None,
+             "due": i["due"].isoformat() if i["due"] else None,
+             "done": i["done"].isoformat() if i["done"] else None}
+            for n, i in enumerate(items)],
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# pre: index = a position in the /mood concerns list
+# post: that concern is removed from data/concerns.txt
+@application.route("/concerns/<int:index>", methods=["DELETE"])
+def delete_concern(index):
+    if not concerns.remove(index, path=chat._concerns_path()):
+        return jsonify({"message": "That item is no longer on the list."}), 404
+    return jsonify({"status": "ok"})
 
 
 # ---------- CONVERSATIONS (chat sessions) ----------
@@ -965,8 +1749,10 @@ def model_ready() -> Dict[str, object]:
     route only fires when the footer would show 'connected'. No LLM generation
     is attempted here - this is a cheap reachability + model-name check only.
     """
-    address = memory.load_llm_server() or llm._server_url()
+    address = _model_server_address()
     model_name = getLLMModel()
+    if builtin_llm.active() and builtin_llm.model_missing():
+        return {"ready": False, "reason": "built-in model not installed"}
     if not model_name or model_name == "No Model Selected.":
         return {"ready": False, "reason": "no model configured"}
     probe = llm.test_server(address, api_key=chat.API_KEY, timeout=5.0)
@@ -1031,6 +1817,8 @@ def _serve_ceremony_line(kind: str, ready: Dict[str, object],
         "conversation_id": conv_id,
         "ceremony": new_state,
         "kind": kind,
+        # A wait line: spoken, but the ceremony goes on (box stays locked).
+        "wait": True,
     })
 
 
@@ -1057,11 +1845,11 @@ def _serve_wake_up():
             voice = pack.assistant_reply_JPS
         except Exception as exc:
             print("[Flask] Wake-up failure:", repr(exc))
-            en, ja_display, ja_voice = ceremony.line("fallback")
+            kind = "builtin_fallback" if builtin_llm.active() else "fallback"
+            en, ja_display, ja_voice = ceremony.line(kind)
             pack = AmadeusPack(assistant_reply_ENG=en, assistant_reply_JPS=ja_display)
             assistant_id, conv_id = _store_greeting_line(pack)
             voice = ja_voice
-            kind = "fallback"
         ceremony.note(kind, memory.CEREMONY_DONE)
         speech_id = _mint_speech_id_text(voice, assistant_id)
         return jsonify({
@@ -1096,6 +1884,8 @@ def _serve_wake_up():
 def greet():
     body = request.get_json(silent=True)
     just_saved = bool(body.get("just_saved")) if isinstance(body, dict) else False
+    # The page reloaded after a restart from Settings: she says she is back.
+    restarted = bool(body.get("restarted")) if isinstance(body, dict) else False
     state = memory.load_ceremony_state()
 
     if state != memory.CEREMONY_DONE:
@@ -1109,9 +1899,18 @@ def greet():
         # added). Until a key is present she stays on the waiting lines.
         if ready["ready"] and not has_api_key():
             ready = {"ready": False, "reason": "API key not set yet"}
-        kind, new_state = ceremony.decide(
-            state, bool(ready["ready"]), _connection_settings_present(),
-            just_saved=just_saved)
+        if builtin_llm.active():
+            # Built-in model: nothing to connect, NAME FIRST (ceremony.py).
+            kind, new_state = ceremony.decide_builtin(
+                state, bool(ready["ready"]), builtin_llm.model_missing(),
+                bool(memory.load_username().strip()), just_saved=just_saved,
+                server_state=builtin_server.status()["state"],
+                runner_missing=builtin_llm.runner_missing())
+        else:
+            kind, new_state = ceremony.decide(
+                state, bool(ready["ready"]), _connection_settings_present(),
+                just_saved=just_saved,
+                name_set=bool(memory.load_username().strip()))
         if kind in ceremony.FIXED_KINDS:
             return _serve_ceremony_line(kind, ready, new_state)
         if kind == "wake":
@@ -1135,7 +1934,8 @@ def greet():
         return jsonify({"ready": False, "reason": ready["reason"],
                         "ceremony": memory.CEREMONY_DONE})
     try:
-        pack, assistant_id, conv_id = generate_greeting()
+        pack, assistant_id, conv_id = generate_greeting(
+            mode="restart" if restarted else "startup")
     except GreetingSuperseded:
         # The user spoke first while the line was being written: no line,
         # not an error - the conversation is already going.
@@ -1213,6 +2013,45 @@ def greet_conversation(conversation_id):
                         "superseded": True})
     except Exception as exc:
         print("[Flask] Switch-greeting failure:", repr(exc))
+        return jsonify({"message": _llm_error_message(exc)}), 502
+    speech_id = _mint_speech_id(pack, assistant_id)
+    return jsonify({
+        "ready": True,
+        "response": pack.assistant_reply_ENG,
+        "speech_id": speech_id,
+        "assistant_id": assistant_id,
+        "conversation_id": conv_id,
+    })
+
+
+# pre: the conversation exists and is the one the user is looking at; the
+#      configured model is servable
+# post: the user poked her (the Poke button or a tap on her shoulders): she
+#       starts talking with ONE line, stored as a poke line in that tab, in
+#       the /greet shape. Not ready / first launch / the user spoke first ->
+#       200 {"ready": false, "reason": ...}; a model failure -> 502.
+@application.route("/conversations/<int:conversation_id>/poke", methods=["POST"])
+def poke_conversation(conversation_id):
+    ceremony_state = memory.load_ceremony_state()
+    if ceremony_state != memory.CEREMONY_DONE:
+        return jsonify({"ready": False,
+                        "reason": "first launch in progress",
+                        "ceremony": ceremony_state})
+    if not has_api_key():
+        return jsonify({"message": "No API key. Add one in Settings."}), 400
+    if not memory.conversation_exists(conversation_id):
+        return jsonify({"message": "Conversation not found"}), 404
+    ready = model_ready()
+    if not ready["ready"]:
+        return jsonify({"ready": False, "reason": ready["reason"]})
+    try:
+        pack, assistant_id, conv_id = generate_greeting(
+            mode="poke", conversation_id=conversation_id)
+    except GreetingSuperseded:
+        return jsonify({"ready": False, "reason": "user spoke first",
+                        "superseded": True})
+    except Exception as exc:
+        print("[Flask] Poke failure:", repr(exc))
         return jsonify({"message": _llm_error_message(exc)}), 502
     speech_id = _mint_speech_id(pack, assistant_id)
     return jsonify({

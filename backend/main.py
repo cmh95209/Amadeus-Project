@@ -9,6 +9,12 @@ apply_all_patches()
 import console_encoding
 console_encoding.force_utf8_stdio()
 
+# After an update: her personality / voice files that are still an untouched
+# older default get the new default (edited ones are kept; Settings offers
+# the new default). Before anything reads them.
+import defaults_refresh
+defaults_refresh.refresh_untouched()
+
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import logging
@@ -19,10 +25,69 @@ from api import application
 import threading as _threading
 import chat as _chat
 _threading.Thread(target=_chat.backfill_japanese_voice, daemon=True, name="ja-backfill").start()
+# One-time: things already on her mind about you, from the last 30 days.
+_threading.Thread(target=_chat.seed_concerns_once, daemon=True, name="concerns-seed").start()
+
+# Pictures attached but never sent (over a day old) are cleaned up.
+import attachments as _attachments
+
+
+def _clean_unsent_attachments():
+    try:
+        gone = _attachments.cleanup_unsent()
+        if gone:
+            print(f"[Amadeus] Removed {gone} picture(s) that were attached but never sent.")
+    except Exception as exc:
+        print("[Amadeus] Unsent-picture clean-up skipped:", repr(exc))
+    try:   # reading notes the last session did not finish (Phase 4b)
+        going = _attachments.resume_notes()
+        if going:
+            print(f"[Amadeus] Going on with the reading notes of {going} document(s).")
+    except Exception as exc:
+        print("[Amadeus] Reading notes not resumed:", repr(exc))
+    try:   # videos the last session did not finish preparing (video plan)
+        import video as _video
+        going = _video.resume()
+        if going:
+            print(f"[Amadeus] Going on with preparing {going} video(s).")
+    except Exception as exc:
+        print("[Amadeus] Video preparing not resumed:", repr(exc))
+    try:   # the speech model for videos, when the installer could not get it
+        import transcribe as _transcribe
+        if _transcribe.status()["state"] in ("missing", "failed"):
+            print("[Amadeus] Downloading the speech model for videos (~0.5 GB, once).")
+            _transcribe.start_download()
+    except Exception as exc:
+        print("[Amadeus] Speech model download not started:", repr(exc))
+
+
+_threading.Thread(target=_clean_unsent_attachments, daemon=True, name="attachments-cleanup").start()
+
+# Her built-in model (option A): loads in the background, unless the
+# launcher said "start without it". Settings can unload / load / switch it.
+import builtin_server as _builtin_server
+_builtin_server.start_at_launch()
+
+# Her voice: one short throw-away line once the engine is up, so the first
+# real reply is not the slowest.
+import tts as _tts
+_threading.Thread(target=_tts.warm_up, daemon=True, name="voice-warm-up").start()
 logging.basicConfig(level=logging.ERROR)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module='torch')
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _QuietStatusPolls(logging.Filter):
+    """The launcher asks GET /builtinModel every few seconds (to print her
+    model's load / unload in its window) - one log line each would bury
+    backend.log. Every other request is still logged."""
+
+    def filter(self, record):
+        return '"GET /builtinModel ' not in record.getMessage()
+
+
+logging.getLogger("werkzeug").addFilter(_QuietStatusPolls())
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 from tqdm import tqdm

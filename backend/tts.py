@@ -16,7 +16,10 @@ OUT_WAV = BACKEND_DIR / "generated" / "generated.wav"
 REF_TXT = "ん? ほっと来てくれませんか?ん? ふざけてないでちょっと来てくださいアニカって何ですか?人激の悪い私は"
 
 GPTSOVITS_API_URL = os.getenv("GPTSOVITS_API_URL", "http://127.0.0.1:9880")
-STREAMING_MODE = int(os.getenv("GPTSOVITS_STREAMING_MODE", "1"))
+# 2 = the engine streams inside a sentence: first sound after ~1 s instead
+# of 2-5 s on long first sentences (2026-10-21/22: MH's ear test - sounds
+# almost identical to 1; mode 3 is more tinny). Env overrides.
+STREAMING_MODE = int(os.getenv("GPTSOVITS_STREAMING_MODE", "2"))
 _speech_lock = threading.Lock()
 
 
@@ -252,6 +255,35 @@ def generateVoice(text: str):
     """Generate a complete WAV without starting playback."""
     with _speech_lock:
         _stream_audio(text, play=False)
+
+
+WARM_UP_LINE = "うん、準備できたわ。"
+
+
+def warm_up(wait_s: float = 600.0) -> None:
+    """Speak one short line into a throw-away file once the voice engine is
+    up, so her first real reply is not the slowest (cold first line on the
+    processor: first sound 4.7-6.3 s, up to 1.26x real time - 2026-10-21).
+    Background only; any failure is just logged."""
+    import time
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            requests.get(f"{GPTSOVITS_API_URL}/docs", timeout=2)
+            break
+        except requests.RequestException:
+            time.sleep(2)
+    else:
+        return
+    started = time.monotonic()
+    target = OUT_WAV.with_name("warm_up.wav")
+    ok = renderVoiceToPath(WARM_UP_LINE, target)
+    try:
+        target.unlink()
+    except OSError:
+        pass
+    if ok:
+        print(f"[Timing] voice warm-up took {time.monotonic() - started:.1f} s", flush=True)
 
 
 def renderVoiceToPath(text: str, path) -> bool:

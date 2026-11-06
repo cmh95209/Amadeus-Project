@@ -21,6 +21,10 @@ export class SpeechPlayer {
   private speaking = false;
   private smoothedAmplitude = 0;
   private destroyed = false;
+  // A line is loading or playing: set by play(), cleared only when it ends,
+  // fails or is stopped - NOT by a mid-line buffering pause (the "waiting"
+  // event), so a streamed line counts as busy from request to last word.
+  private busy = false;
   private generation = 0;
   private lastFrameTime = 0;
 
@@ -30,6 +34,7 @@ export class SpeechPlayer {
     this.audio.preload = "auto";
     this.audio.addEventListener("playing", this.handlePlaying);
     this.audio.addEventListener("ended", this.handleEnded);
+    this.audio.addEventListener("ended", this.handleDone);
     this.audio.addEventListener("error", this.handleError);
     this.audio.addEventListener("pause", this.handleEnded);
     this.audio.addEventListener("waiting", this.handleEnded);
@@ -67,6 +72,7 @@ export class SpeechPlayer {
     await this.prepare();
     if (this.destroyed || generation !== this.generation) return;
 
+    this.busy = true;
     this.audio.src = url;
     this.audio.load();
 
@@ -74,13 +80,20 @@ export class SpeechPlayer {
       await this.audio.play();
     } catch (error) {
       if (this.destroyed || generation !== this.generation) return;
+      this.busy = false;
       this.finishSpeaking();
       throw error;
     }
   }
 
+  /** Is a line loading or still being spoken? */
+  isBusy(): boolean {
+    return this.busy && !this.destroyed;
+  }
+
   stop(): void {
     this.generation++;
+    this.busy = false;
     cancelAnimationFrame(this.animationFrame);
     this.animationFrame = 0;
 
@@ -107,7 +120,12 @@ export class SpeechPlayer {
     this.finishSpeaking();
   };
 
+  private handleDone = (): void => {
+    this.busy = false;
+  };
+
   private handleError = (): void => {
+    this.busy = false;
     this.finishSpeaking();
     if (!this.destroyed && this.audio.error) {
       this.callbacks.onError?.("Speech playback failed. Check the TTS server and try again.");
@@ -165,6 +183,7 @@ export class SpeechPlayer {
 
     this.audio.removeEventListener("playing", this.handlePlaying);
     this.audio.removeEventListener("ended", this.handleEnded);
+    this.audio.removeEventListener("ended", this.handleDone);
     this.audio.removeEventListener("error", this.handleError);
     this.audio.removeEventListener("pause", this.handleEnded);
     this.audio.removeEventListener("waiting", this.handleEnded);

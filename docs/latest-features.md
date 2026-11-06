@@ -28,9 +28,10 @@ The current version (v2.1) includes:
 - Browser-side streamed speech playback
 - Audio-amplitude-driven Live2D lip synchronization
 - Paired text + prerecorded audio variants for special interactions
-- Optional local web search (DuckDuckGo, no API key; also reads the top
-  result's page for real content), with optional "deep thinking" for the
-  search decision, plus live weather and air quality
+- Optional web search (Firecrawl keyless search with a DuckDuckGo-style
+  backup, no API key; dated results; also reads the top result's page for
+  real content), with optional "deep thinking" for the search decision, plus
+  live weather and air quality; the pages she used are listed under her reply
 - Live connection status with the server's model list and a "Test
   connection" button
 - Trust-based relationship stats and trust-aware voice lines

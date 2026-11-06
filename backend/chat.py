@@ -1,5 +1,7 @@
 import memory as store
+import builtin_llm
 from llm import get_llm, reset_llm, maybe_strip_rejected_params
+import llm as _llm_module
 from pydantic import BaseModel, Field
 from typing import Optional
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -7,15 +9,25 @@ from chat_interactions import INTERACTION_EVENTS, INTERACTION_RESPONSES
 import random
 import re
 import threading
+import unicodedata
 import time
 import concurrent.futures
+import difflib
 from datetime import datetime
+import concerns
+import feelings
 import stats
+import timing
 import ja_voice
 import speech_text
+import webdates
 import webfetch
+import weblinks
+import webreader
+import websearch
 import weather
 import cm_bridge
+import attachments
 
 default_LLM_Model = store.DEFAULT_LLM_MODEL
 API_KEY = store.load_api_key()
@@ -38,6 +50,8 @@ def setLLMModel(new_model: str):
 #      else, return the LLM Model e.g., "deepseek/deepseek-v3.2-exp"
 def getLLMModel():
     global LLM_Model
+    if builtin_llm.active():
+        return builtin_llm.model_name()   # what the built-in server serves
     return LLM_Model.strip() if LLM_Model else "No Model Selected."
 
 
@@ -66,7 +80,9 @@ def getPersonality() -> str:
 
 
 def has_api_key() -> bool:
-    return bool(API_KEY.strip())
+    # The built-in model's server has no key, so the key gate never applies
+    # to it (and no fake key goes into api_key.txt).
+    return builtin_llm.active() or bool(API_KEY.strip())
 
 
 #pre:
@@ -132,7 +148,8 @@ class AmadeusReply(BaseModel):
 #  When the web-access toggle is ON, Amadeus is given a "web_search" tool
 #  alongside her normal reply format. She decides for herself when she needs
 #  fresh information (news, today's date, current events...). The search runs
-#  locally on this machine via DuckDuckGo - no API key, no cloud account.
+#  through Firecrawl's free keyless search (DuckDuckGo-style `ddgs` as the
+#  backup) - no API key, no cloud account.
 # =============================================================================
 
 WEB_SEARCH_TOOL = {
@@ -146,7 +163,9 @@ WEB_SEARCH_TOOL = {
             "or game releases, gacha banners or characters, product versions, software updates, "
             "and similar. When the user says they recently saw, played, bought or experienced "
             "something specific, search FIRST and tailor your reply to what you find. "
-            "Do not use it for timeless general knowledge or pure small talk."
+            "Do not use it for timeless general knowledge or pure small talk. "
+            "Write the query WITHOUT a year unless the user named one - today's date is in "
+            "your RIGHT NOW note, and an old year brings back old pages."
         ),
         "parameters": {
             "type": "object",
@@ -178,7 +197,33 @@ PROACTIVE_SEARCH_BLOCK = {
         "Weather and air-quality questions are answered automatically from live data - "
         "never use web_search for them. "
         "Treat search results as hints, not gospel: if a result seems wrong or you are more "
-        "confident in your own knowledge, say so honestly."
+        "confident in your own knowledge, say so honestly. "
+        # 2026-10-25: with ddgs she often presented a years-old article as
+        # today's news. Results now carry a Date line where one is known.
+        "Check each result's Date against today's date before you use it: never present "
+        "old news as new or a past event as upcoming, and when the newest thing you found "
+        "is not recent, say how old it is. "
+        # 2026-10-25: schedules (game banners, releases, events, fixtures)
+        # were answered with the wrong entry - "current" mixed up with "next".
+        "For schedules (game banners, releases, events, sports fixtures): use the start "
+        "and end dates to say what is running TODAY, name what comes next separately with "
+        "its start date, and call anything that has not happened yet \"upcoming\". "
+        # 2026-10-25 (Amadeus-Fresh test): asked to "confirm" web access, she
+        # searched for the current time and believed a stale page over her
+        # clock ("14:05 UTC, 20 February 2026").
+        "The current date and time are in your RIGHT NOW note - always use those; never "
+        "search for them, and if a search result shows a different date or time, your "
+        "RIGHT NOW note is right. Never say you looked something up, checked online or "
+        "have “the latest data” unless you actually ran web_search in this reply. "
+        # 2026-10-26: links in her replies are clickable on screen.
+        "WEB LINKS: the pages you searched are already listed under your reply, so do not "
+        "add links on your own. Only when the user asks for a link (or for where to find "
+        "something online), write the page's full web address (https://...) exactly as it "
+        "appears in a URL line of your search results in this reply - never make one up, "
+        "shorten it or guess it. Without a "
+        "search, an address from your own memory may be wrong or out of date: say you "
+        "have not checked it. A link is shown on screen and never spoken, so in your "
+        "spoken sentence just name the site."
     ),
 }
 
@@ -210,6 +255,13 @@ NO_WEB_BLOCK = {
 # A search was ALWAYS part of the reply time (it runs before she answers); these
 # knobs just make it more likely to succeed within the SAME time it had before,
 # and guarantee it never meaningfully exceeds it.
+#
+# Firecrawl (websearch.py) answers first, in one bounded attempt; the ddgs
+# search below is its fallback and runs on whatever is left of the budget
+# (2026-10-25: ddgs' single engines mostly returned nothing in a live check;
+# only its mixed "auto" mode still answered).
+FIRECRAWL_TIMEOUT = 6           # seconds, Firecrawl's one attempt
+KEENABLE_TIMEOUT = 5            # seconds, Keenable's one attempt (the second engine)
 SEARCH_ATTEMPT_TIMEOUT = 8      # seconds, per attempt (passed to DDGS as its timeout)
 SEARCH_TOTAL_BUDGET = 15        # seconds, hard ceiling for the whole search (was 15)
 SEARCH_MIN_RETRY_BUDGET = 5     # seconds; don't start another attempt if less is left
@@ -222,16 +274,13 @@ _SEARCH_CLIENT = None           # shared DDGS client (holds one warm connection 
 _SEARCH_CLIENT_TS = 0.0         # monotonic time the client was last created/used
 _SEARCH_CLIENT_LOCK = threading.Lock()
 
-# --- Page-fetch: the readable-content step on top of web search ----------------
-# After a search, the top result's page is fetched and its readable content is
-# appended, so she reads real data (numbers, details) instead of one-line
-# snippets. Bounded like the search itself: the fetch draws from its own small
-# time budget, and each page is capped to a fraction of the context window
-# (webfetch.char_budget). Any fetch problem degrades to the plain snippets, so
-# it can never break or hang a reply.
-FETCH_TIMEOUT = 8            # seconds, per page (passed to webfetch)
-FETCH_TOTAL_BUDGET = 12      # seconds, hard ceiling for the whole fetch step
-FETCH_MAX_URLS = 2           # try the top result, then the next if it is walled
+# --- Page reading: the readable-content step on top of web search -------------
+# After a search, the result pages are read (reader or quick mode, see
+# _read_results and webreader.py), so she answers from real data (numbers,
+# details) instead of one-line snippets. Bounded by READ_BUDGET_*; each page
+# is capped to a fraction of the context window (webfetch.char_budget). Any
+# fetch or reader problem degrades to the plain results, so it can never
+# break or hang a reply.
 
 # --- Weather fast path (live Open-Meteo data beats search) ------------------
 # A clear weather question is pulled DIRECTLY from the keyless Open-Meteo API
@@ -317,6 +366,15 @@ def _extract_place(message: str) -> str:
     return " ".join(kept).strip()
 
 
+WEATHER_PLACES_MAX = 3
+
+
+def _weather_places(place: str) -> list:
+    """The router's place field -> each place to fetch ("A ; B" = two)."""
+    places = [p.strip() for p in re.split(r"\s*;\s*", place or "") if p.strip()]
+    return list(dict.fromkeys(places))[:WEATHER_PLACES_MAX]
+
+
 def _get_search_client(force_fresh: bool = False):
     """Return a DDGS client to run a search on, reusing a warm one when possible.
 
@@ -352,12 +410,197 @@ def _invalidate_search_client(client):
             _SEARCH_CLIENT = None
 
 
+# Closes every result list: old news must not read as new (with ddgs she often
+# presented a years-old article as today's news, 2026-10-25).
+SEARCH_DATE_NOTE = (
+    "(Today is {today}. A \"Date\" line is when that page was published or "
+    "last updated. A result with an older Date or no Date may be old news: never "
+    "call something new, recent, latest or upcoming unless its Date or text shows "
+    "it is recent, and say how old it is when it is not.)")
+
+
+def _format_search_results(results) -> str:
+    """The numbered "title / snippet / [Date] / URL" text the model (and the
+    source parser below) reads - the same for every engine - closed by
+    SEARCH_DATE_NOTE."""
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = (r.get("title") or "").strip()
+        body = (r.get("body") or "").strip()
+        href = (r.get("href") or "").strip()
+        when = (r.get("date") or "").strip()
+        dated = f"Date: {when}\n" if when else ""
+        lines.append(f"{i}. {title}\n{body}\n{dated}URL: {href}")
+    # Titles and snippets come from web pages: data, never instructions.
+    return (webreader.wrap_web_data("\n\n".join(lines)) + "\n\n"
+            + SEARCH_DATE_NOTE.format(today=datetime.now().strftime("%Y-%m-%d")))
+
+
+def _firecrawl_call(q: str, timeout: float, freshness=None):
+    """One Firecrawl search; None when it could not answer (logged)."""
+    try:
+        return websearch.firecrawl_search(q, max_results=5, timeout=timeout, freshness=freshness)
+    except websearch.FirecrawlUnavailable as exc:
+        print(f"[Amadeus] Firecrawl search unavailable: {exc}")
+    except Exception as exc:
+        print(f"[Amadeus] Firecrawl search failed: {exc!r}")
+    return None
+
+
+def _firecrawl_results(q: str, freshness, deadline: float) -> list:
+    """Firecrawl's results for `q`; [] when it fails or finds nothing.
+
+    A time-sensitive query (websearch.freshness_for) is first limited to recent
+    pages; when that leaves fewer than two results, an unlimited search tops
+    them up (the recent ones stay first) - but only on time that still leaves
+    the ddgs fallback a full attempt inside the deadline."""
+    results = _firecrawl_call(q, FIRECRAWL_TIMEOUT, freshness)
+    if results is None:
+        return []
+    if freshness and len(results) < 2:
+        spare = deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
+        if spare >= 1.5:
+            more = _firecrawl_call(q, min(FIRECRAWL_TIMEOUT, spare)) or []
+            seen = {r["href"] for r in results}
+            results = (results + [r for r in more if r["href"] not in seen])[:5]
+    if not results:
+        print(f"[Amadeus] Firecrawl found nothing for {q!r}, trying ddgs")
+    return results
+
+
+def _keenable_call(q: str, timeout: float, freshness=None):
+    """One Keenable search; None when it could not answer (logged)."""
+    try:
+        return websearch.keenable_search(q, max_results=5, timeout=timeout, freshness=freshness)
+    except websearch.KeenableUnavailable as exc:
+        print(f"[Amadeus] Keenable search unavailable: {exc}")
+    except Exception as exc:
+        print(f"[Amadeus] Keenable search failed: {exc!r}")
+    return None
+
+
+STATE_MERGE_MAX = 8   # results kept when a "what is on now" search is merged
+
+
+def _keenable_results(q: str, freshness, deadline: float, state: bool = False) -> list:
+    """Keenable's results for `q` (the second engine); [] when it fails, finds
+    nothing or there is too little time left (ddgs keeps a full attempt).
+    Recent pages first, topped up like _firecrawl_results. A "what is on now"
+    question (state) searches WITHOUT the recent-only limit first - that is
+    where the schedule pages are - then adds the recent pages it lacks."""
+    def room():
+        return deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
+    if room() < 1.5:
+        return []
+    if state and freshness:
+        # Both searches at once (each ~0.5 s); the unlimited one leads.
+        timeout = min(KEENABLE_TIMEOUT, room())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            plain_f = pool.submit(_keenable_call, q, timeout)
+            recent_f = pool.submit(_keenable_call, q, timeout, freshness)
+            results, recent = plain_f.result(), recent_f.result()
+        if results is None and recent is None:
+            return []
+        results, recent = results or [], recent or []
+        seen = {r["href"] for r in results}
+        results = (results + [r for r in recent if r["href"] not in seen])[:STATE_MERGE_MAX]
+        if not results:
+            print(f"[Amadeus] Keenable found nothing for {q!r}, trying ddgs")
+        return results
+    results = _keenable_call(q, min(KEENABLE_TIMEOUT, room()), freshness)
+    if results is None:
+        return []
+    if freshness and len(results) < 2 and room() >= 1.5:
+        more = _keenable_call(q, min(KEENABLE_TIMEOUT, room())) or []
+        seen = {r["href"] for r in results}
+        results = (results + [r for r in more if r["href"] not in seen])[:5]
+    if not results:
+        print(f"[Amadeus] Keenable found nothing for {q!r}, trying ddgs")
+    return results
+
+
+# The keyless engines tried in turn before ddgs (2026-10-26, MH: order B).
+# Exa second: in the test set it matched Keenable (26 of 30 right each), was
+# ~1 s faster and had fresher news; Keenable (published limit, dated results)
+# takes over whenever Exa refuses or finds nothing. Parallel was tried and
+# dropped (its keyless limit ran out after ~10 searches). For test runs,
+# AMADEUS_SEARCH_ENGINES sets another order ("keenable"); unknown names are
+# ignored, an empty list keeps the default.
+SEARCH_ENGINES = ("firecrawl", "exa", "keenable")
+_KNOWN_ENGINES = ("firecrawl", "exa", "keenable")
+_MCP_ENGINES = {"exa": "exa_search"}   # websearch functions
+
+
+def _search_engines() -> tuple:
+    import os
+    raw = os.environ.get("AMADEUS_SEARCH_ENGINES", "")
+    picked = tuple(e for e in (x.strip().lower() for x in raw.split(",")) if e in _KNOWN_ENGINES)
+    return picked or SEARCH_ENGINES
+
+
+def _mcp_engine_results(engine: str, q: str, deadline: float) -> list:
+    """Exa's results for `q`; [] when it fails, finds nothing or
+    there is too little time left (ddgs keeps a full attempt)."""
+    room = deadline - time.monotonic() - SEARCH_ATTEMPT_TIMEOUT
+    if room < 1.5:
+        return []
+    try:
+        search = getattr(websearch, _MCP_ENGINES[engine])
+        results = search(q, max_results=5, timeout=min(websearch.MCP_TIMEOUT, room))
+    except websearch.EngineUnavailable as exc:
+        print(f"[Amadeus] {engine.capitalize()} search unavailable: {exc}")
+        return []
+    except Exception as exc:
+        print(f"[Amadeus] {engine.capitalize()} search failed: {exc!r}")
+        return []
+    if not results:
+        print(f"[Amadeus] {engine.capitalize()} found nothing for {q!r}, trying the next search")
+    return results
+
+
+def _note_search_engine(name) -> None:
+    """Remember which engine answered the latest search in this thread (for
+    the log line and the reply's saved sources)."""
+    _turn.engine = name
+
+
 def _run_web_search(query: str) -> str:
-    """Run a DuckDuckGo search (with a couple of bounded retries) and return
-    compact results for the model. See the SEARCH_* constants above for timing."""
+    """Run a web search and return compact results for the model.
+
+    The keyless engines in SEARCH_ENGINES are tried in turn (Firecrawl, Exa,
+    Keenable); when all fail, are slow, find nothing or are out of free use,
+    the DuckDuckGo-style `ddgs` search runs (with a couple of bounded
+    retries) on the time that is left. A time-sensitive query is limited to
+    recent pages on Firecrawl and Keenable (Exa has no such setting).
+    See the SEARCH_* constants above for timing."""
     q = (query or "").strip()
+    _note_search_engine(None)
     if not q:
         return "No web results were found for that query."
+    deadline = time.monotonic() + SEARCH_TOTAL_BUDGET
+    freshness = websearch.freshness_for(q)
+    # "What is on now" (a banner, a schedule, standings): schedule pages are
+    # updated, not new - no recent-only limit for them (Keenable adds the
+    # recent pages after the others). Remembered for picking the pages.
+    state = websearch.is_state_question(q, getattr(_turn, "question", "") or "")
+    _turn.state_question = state
+
+    for i, engine in enumerate(_search_engines()):
+        if i == 1:
+            _progress("retry", "The main search didn't answer, trying the second search...")
+        elif i > 1:
+            _progress("retry", "Trying another search...")
+        if engine == "firecrawl":
+            results = _firecrawl_results(q, None if state else freshness, deadline)
+        elif engine == "keenable":
+            results = _keenable_results(q, freshness, deadline, state=state)
+        else:
+            results = _mcp_engine_results(engine, q, deadline)
+        if results:
+            _note_search_engine(engine)
+            return _format_search_results(results)
+    _progress("retry", "Trying the backup search...")
+
     try:
         from ddgs import DDGS  # noqa: F401  - lazy check; fails fast + clearly
     except Exception as exc:
@@ -367,7 +610,6 @@ def _run_web_search(query: str) -> str:
             "your own knowledge and be honest that you could not verify it online."
         )
 
-    deadline = time.monotonic() + SEARCH_TOTAL_BUDGET
     backoff = SEARCH_BACKOFF_START
     attempt = 0
     last_err = None
@@ -375,8 +617,11 @@ def _run_web_search(query: str) -> str:
         attempt += 1
         # Attempt 1 reuses the warm client (fast). Retries use a fresh connection.
         client = _get_search_client(force_fresh=(attempt > 1))
+        # Attempt 1 of a time-sensitive query asks for recent pages only;
+        # a retry asks without the limit (ddgs reports "no results" as an error).
+        limit = {"timelimit": freshness} if (freshness and not state and attempt == 1) else {}
         try:
-            results = list(client.text(q, max_results=5))
+            results = list(client.text(q, max_results=5, **limit))
         except Exception as exc:
             last_err = exc
             print(f"[Amadeus] Web search attempt {attempt} failed: {exc!r}")
@@ -395,19 +640,16 @@ def _run_web_search(query: str) -> str:
         # the same honesty instruction (2026-10-08: the failed path had it,
         # this one didn't - a model could read "no results" as "I searched"
         # and present its own knowledge as search-verified).
+        if not results and limit and attempt < SEARCH_MAX_ATTEMPTS:
+            continue  # nothing recent: ask again without the time limit
         if not results:
             return (
                 "No web results were found for that query. Answer from your own "
                 "knowledge and be honest that you could not verify it online "
                 "right now. Do not mention any technical details."
             )
-        lines = []
-        for i, r in enumerate(results, 1):
-            title = (r.get("title") or "").strip()
-            body = (r.get("body") or "").strip()
-            href = (r.get("href") or "").strip()
-            lines.append(f"{i}. {title}\n{body}\nURL: {href}")
-        return "\n\n".join(lines)
+        _note_search_engine("ddgs")
+        return _format_search_results(results)
 
     # Exhausted the budget without results. The raw error is logged above for
     # debugging; the model only gets a clean, human instruction (no technical junk).
@@ -426,33 +668,950 @@ def _extract_search_urls(result_text) -> list:
     return re.findall(r"^URL:\s*(\S+)\s*$", result_text, re.MULTILINE)
 
 
-def _web_search_with_content(query: str) -> str:
-    """web_search plus an automatic read of the top result page.
+# --- The reply's sources (2026-10-25) -----------------------------------------
+# Every web search and live-weather fetch made while ONE reply is written is
+# collected here (query, result titles + links, the page actually read), then
+# saved with the reply's row (memory.set_message_sources) - the base for
+# showing her links in the chat later. Per thread: a reply is written start
+# to finish in one request thread (getResponsePacked begins the list,
+# take_turn_sources hands it over and ends it).
+_turn = threading.local()
 
-    Returns the search results with the readable content of the best result
-    appended when it can be fetched - the numbers, the details - instead of a
-    one-line snippet. Bounded (time + size) and fully defensive: if nothing can
-    be read, the plain snippets come back unchanged, so a fetch problem can
-    never break or hang the reply.
-    """
-    text = _run_web_search(query)
-    urls = _extract_search_urls(text)
-    if not urls:
-        return text
+
+def _begin_turn_sources(conversation_id=None) -> None:
+    _turn.sources = []
+    # The chat this reply belongs to: lookups are saved / reused only inside
+    # a real reply (searches outside one - tests, tools - leave no trace).
+    _turn.conversation = conversation_id
+
+
+def take_turn_sources() -> list:
+    sources = getattr(_turn, "sources", None) or []
+    _turn.sources = None
+    _turn.conversation = None
+    return sources
+
+
+def _record_source(entry: dict) -> None:
+    sources = getattr(_turn, "sources", None)
+    if sources is not None:
+        sources.append(entry)
+
+
+def _lookup_ran() -> bool:
+    """Did this reply search the web or fetch live data (so far)?"""
+    return bool(getattr(_turn, "sources", None))
+
+
+_RESULT_RE = re.compile(r"^\d+\. (.*)\n((?:.*\n)*?)URL: (\S+)\s*$", re.MULTILINE)
+_DATE_LINE_RE = re.compile(r"^Date: (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+
+
+def _parse_search_results(result_text) -> list:
+    """[{"title", "url"(, "date")}] in rank order from _run_web_search output
+    ("date" only when the result carried a Date line)."""
+    if not isinstance(result_text, str):
+        return []
+    out = []
+    for title, between, url in _RESULT_RE.findall(result_text):
+        item = {"title": title.strip(), "url": url}
+        dated = _DATE_LINE_RE.search(between)
+        if dated:
+            item["date"] = dated.group(1)
+        out.append(item)
+    return out
+
+
+# Her own searches for the CURRENT time or date are not run: a search engine
+# returns stale clock pages, and she believed one over the clock in her
+# RIGHT NOW note (2026-10-25). Only a pure "what time / date is it" query is
+# caught - "current time in Lisbon" names a place and still searches.
+_CLOCK_QUERY_RE = re.compile(
+    r"\b(current|today'?s?|what)\s+(local\s+)?(time|date|day)\b|\btime\s+now\b"
+    r"|\bwhat\s+time\s+is\s+it\b|\bdate\s+today\b"
+    r"|今何時|現在(の)?時刻|現在時刻|今日の日付|今日は何日|何曜日|今の時間",
+    re.IGNORECASE)
+_CLOCK_FILLER_RE = re.compile(
+    r"\b(current|currently|today'?s?|what|is|it|the|right|now|local|time|date|day|"
+    r"utc|gmt|clock|exact|precise|of|and|year|month|in|my|zone|timezone|"
+    r"standard|coordinated|universal)\b|[?？!.,、。\s]|何曜日|何日|何時|今日|今|現在|時刻|時間|日付|の|は|です|か",
+    re.IGNORECASE)
+CLOCK_SEARCH_SKIPPED = (
+    "(No search was run: the current date and time are already in your RIGHT "
+    "NOW note - use those. Do not say you looked them up.)")
+
+
+def _is_clock_query(query) -> bool:
+    q = (query or "").strip()
+    if not q or not _CLOCK_QUERY_RE.search(q):
+        return False
+    return not _CLOCK_FILLER_RE.sub("", q).strip()
+
+
+# --- Reading the pages: reader mode / quick mode (2026-10-25) ------------------
+# Reader mode (Settings "thorough", the default): the top pages are fetched in
+# parallel and one short reader call per page writes notes (facts + dates +
+# quotes, or NONE); her reply is written from the notes, never from raw page
+# text. Quick mode: the best paragraphs of the top page. See webreader.py.
+# Where reader calls cannot run side by side (a local server with ONE slot),
+# a reader call would also push her saved prompt out of the server's memory
+# -> quick reading there. Her built-in model has 2 slots (-np 2): the reader
+# calls use slot 1 so slot 0 keeps her prompt (fast replies).
+READ_BUDGET_LOCAL = 12       # seconds: fetching + reading, local / built-in
+READ_BUDGET_CLOUD = 10       # seconds: fetching + reading, cloud
+READER_MAX_TOKENS = 300      # one page's notes
+READER_SLOT = 1              # the built-in server's second slot
+_SLOTS_CACHE = {}            # base url -> (slot count or None, checked at)
+_SLOTS_TTL = 600.0
+
+
+def _progress(step: str, text: str) -> None:
+    """Tell the screen what the search is doing right now (only when a
+    progress listener is attached to this reply - the web-ON stream)."""
+    fn = getattr(_turn, "progress", None)
+    if fn:
+        try:
+            fn(step, text)
+        except Exception:
+            pass
+
+
+def _server_slots(base_url: str):
+    """How many requests a llama.cpp-style server runs at once (its /props
+    total_slots), or None when it does not say. Cached for a few minutes."""
+    now = time.monotonic()
+    hit = _SLOTS_CACHE.get(base_url)
+    if hit and now - hit[1] < _SLOTS_TTL:
+        return hit[0]
+    slots = None
     try:
-        budget = webfetch.char_budget(store.load_context_budget())
-        deadline = time.monotonic() + FETCH_TOTAL_BUDGET
-        for url in urls[:FETCH_MAX_URLS]:
-            if time.monotonic() >= deadline:
-                break
-            per = max(1, int(min(FETCH_TIMEOUT, deadline - time.monotonic())))
-            status, page = webfetch.fetch_page_text(url, max_chars=budget, timeout=per)
-            if status == "ok":
-                return (text + "\n\n---\n\n"
-                        "Full readable content of the top result:\n" + page)
-            # blocked / empty / error / unsafe -> try the next result
+        import json as _json
+        import urllib.request as _ur
+        root = re.sub(r"/v1/?$", "", base_url.rstrip("/"))
+        with _ur.urlopen(root + "/props", timeout=2) as resp:
+            slots = int(_json.loads(resp.read().decode("utf-8", "replace")).get("total_slots") or 0) or None
+    except Exception:
+        slots = None
+    _SLOTS_CACHE[base_url] = (slots, now)
+    return slots
+
+
+def web_reading_plan():
+    """(mode, parallel, pin_slot, local) for this search: mode "reader" |
+    "quick"; parallel = reader calls at once; pin_slot = the server slot the
+    reader calls use (built-in only), else None; local = a model server on
+    this PC / network (vs a cloud service). Instant: no port probing."""
+    try:
+        base = _llm_module._configured_server_url()
+        local = bool(_llm_module._is_local_host(base))
+    except Exception:
+        base, local = "", True
+    if store.load_web_reading() == "quick":
+        return "quick", 0, None, local
+    builtin = getattr(_llm_module, "builtin_llm", None)
+    try:
+        if builtin and builtin.active():
+            return "reader", 1, READER_SLOT, True
+    except Exception:
+        pass
+    if not local:
+        return "reader", webreader.MAX_PAGES, None, False
+    if base and _server_slots(base) == 1:
+        return "quick", 0, None, True
+    return "reader", 1, None, True
+
+
+def web_reading_reason() -> str:
+    """One line for Settings about what is used right now, and why."""
+    mode = web_reading_plan()[0]
+    if store.load_web_reading() == "quick":
+        return "Quick reading (your choice)."
+    if mode == "quick":
+        return ("Your model server runs one task at a time, so she uses quick "
+                "reading.")
+    return "She reads the top pages and takes notes before answering."
+
+
+def _reader_call(pin_slot, max_tokens=READER_MAX_TOKENS):
+    """The reader call: her model, reasoning off, a short answer; on her
+    built-in server pinned to the second slot."""
+    client = get_llm(API_KEY, LLM_Model)
+
+    def call(messages, timeout):
+        kwargs = {"max_tokens": max_tokens, "timeout": max(1.0, float(timeout))}
+        if pin_slot is not None:
+            kwargs["extra_body"] = {**(getattr(client, "extra_body", None) or {}),
+                                    "id_slot": pin_slot}
+        reply = client.bind(**kwargs).invoke(messages)
+        content = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+        return _strip_thinking(re.sub(r"(?is)<think>.*?</think>", "", content))
+    return call
+
+
+def _site_list(pages) -> str:
+    return ", ".join(webreader._site(p["url"]) for p in pages)
+
+
+def _read_results(query: str, results: list, source: dict):
+    """Read the result pages (reader or quick mode) -> (the text appended after
+    the search results, "" when nothing could be read; the pages read). Fills
+    the source's "read" (the page she relied on), "used" (pages that gave
+    notes) and "mode"."""
+    mode, parallel, pin, local = web_reading_plan()
+    deadline = time.monotonic() + (READ_BUDGET_LOCAL if local else READ_BUDGET_CLOUD)
+    question = getattr(_turn, "question", "") or ""
+    page_chars = webfetch.char_budget(store.text_context_budget())   # minus her pictures
+    candidates = [{"url": r["url"], "title": r.get("title", ""), "date": r.get("date", "")}
+                  for r in results]
+    # "What is on now": the pages whose dates include today are read first
+    # (a few more results are opened to find them).
+    state = bool(getattr(_turn, "state_question", False))
+    _progress("reading", "Opening the top pages...")
+    pages = webreader.fetch_pages(
+        candidates, lambda url, timeout: webfetch.fetch_page(url, timeout=timeout),
+        deadline, progress=_progress,
+        max_pages=webreader.MAX_PAGES if mode == "reader" else 1,
+        max_tries=(webreader.MAX_TRIES + (1 if state else 0)) if mode == "reader" else (3 if state else 2),
+        prefer=(lambda p: webdates.covers_today(p.get("text", ""))) if state else None)
+    source["mode"] = mode
+    if not pages:
+        return "", []
+    _progress("reading", "Reading " + _site_list(pages) + "...")
+    if mode == "reader":
+        today = datetime.now().strftime("%Y-%m-%d")
+        webreader.read_pages(question, query, pages, _reader_call(pin), deadline, today,
+                             min(page_chars, 10000), parallel=parallel, progress=_progress,
+                             today_first=state)
+        used = [p for p in pages if p.get("notes")]
+        source["used"] = [p["url"] for p in used]
+        if used:
+            source["read"] = used[0]["url"]
+            return webreader.notes_block(pages), pages
+        if any(p["status"] == "none" for p in pages):
+            source["read"] = None
+            return (PAGES_DID_NOT_ANSWER, pages)
+        print("[Amadeus] Reader calls gave nothing in time - quick reading instead.")
+        source["mode"] = "quick"
+    source["read"] = pages[0]["url"]
+    source["used"] = [pages[0]["url"]]
+    return webreader.quick_block(pages[0], query, question, page_chars, today_first=state), pages[:1]
+
+
+PAGES_DID_NOT_ANSWER = ("(The pages that were read did not answer this. Say so honestly "
+                        "instead of guessing.)")
+
+
+# --- Her "hold on, let me check" line (2026-10-25) ------------------------------
+# The moment a real search starts (not when saved notes are reused, not for
+# the weather or a clock question), a short line of hers is written IN
+# PARALLEL with the search: "The banner? Hang on, I'll check." It is saved as
+# her own message (messages.aside) and spoken at once - unless her answer is
+# ready first, then it is dropped (never "hold on" after the answer). Only
+# for the live web-ON reply (the route attaches a listener); never for
+# regenerate. Not mirrored to the long-term memory sidecar.
+ASIDE_MAX_TOKENS = 160
+ASIDE_NOTE = (
+    "\n\n(Internal note: you are about to look this up on the web for the user right "
+    "now: \"{topic}\". Say ONE short spoken line, in character, telling them you are "
+    "checking it now - like someone glancing at their phone. Name what you are checking "
+    "in a few words. Do NOT answer, guess or state any facts about it yet, do not promise "
+    "results, do not ask a question. Keep it to one short sentence.{avoid})")
+# Her earlier hold-on lines in this chat, so she does not say the same one
+# again (2026-10-26: two in a row were word for word 「ちょっと待って、今調べて
+# みるわね。」). A line still this similar to one of them gets ONE retry.
+ASIDE_RECENT = 4
+ASIDE_SAME_RATIO = 0.8
+
+
+class _AsideRun:
+    """One hold-on line being written in the background for one reply."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.closed = False
+        self.saved_id = None
+        self.thread = None
+
+
+def _maybe_start_aside(topic: str) -> None:
+    """Start her hold-on line for this reply (once), if the live route asked."""
+    emit = getattr(_turn, "aside_emit", None)
+    if not emit or getattr(_turn, "aside_run", None) is not None:
+        return
+    context = getattr(_turn, "reply_context", None)
+    conv = getattr(_turn, "conversation", None)
+    if not context or conv is None:
+        return
+    run = _AsideRun()
+    _turn.aside_run = run
+    run.thread = threading.Thread(target=_write_aside, args=(run, topic, list(context), conv, emit),
+                                  daemon=True)
+    run.thread.start()
+
+
+def _aside_avoid_text(lines) -> str:
+    if not lines:
+        return ""
+    quoted = "、".join(f"「{x.strip()}」" for x in lines if x and x.strip())
+    return (" Word it differently from your earlier hold-on lines in this chat: "
+            + quoted + ".") if quoted else ""
+
+
+def _aside_too_similar(line: str, lines) -> bool:
+    return any(difflib.SequenceMatcher(None, line.strip(), (x or "").strip()).ratio()
+               >= ASIDE_SAME_RATIO for x in lines or [])
+
+
+def _aside_messages(topic: str, context, local: bool, avoid=None):
+    """Her prompt for the hold-on line: the same fixed blocks as her reply
+    (the built-in model reuses them), the conversation, and the note on the
+    latest user message (one message, so the roles still alternate)."""
+    ctx = [dict(m) for m in context]
+    for m in reversed(ctx):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            m["content"] = m["content"] + ASIDE_NOTE.format(
+                topic=topic.strip()[:200], avoid=_aside_avoid_text(avoid))
+            break
+    return _ordered_prompt(_PLAIN_RULES_JA if local else _PACK_RULES, PROACTIVE_SEARCH_BLOCK,
+                           [], ctx, right_now=_right_now_note())
+
+
+def _write_aside(run: "_AsideRun", topic: str, context, conv, emit) -> None:
+    started = time.monotonic()
+    try:
+        client = get_llm(API_KEY, LLM_Model).bind(max_tokens=ASIDE_MAX_TOKENS)
+        local = _is_local(client)
+        try:
+            recent = store.recent_aside_lines(conv, ASIDE_RECENT)
+        except Exception:
+            recent = []
+
+        def write(avoid):
+            messages = _aside_messages(topic, context, local, avoid)
+            if local:
+                return _two_step_pack(client, messages, context, "Hold-on line")
+            return _structured(client, AmadeusPack, messages)
+        pack = write(recent)
+        if recent and _aside_too_similar(pack.assistant_reply_JPS or "", recent):
+            print("[Amadeus] Hold-on line repeats an earlier one - one retry.")
+            pack = write(recent + [pack.assistant_reply_JPS or ""])
+        jps = (pack.assistant_reply_JPS or "").strip()
+        eng = (pack.assistant_reply_ENG or "").strip() or jps
+        if not jps or pack.assistant_reply_JPS == _honest_plain_failure_pack().assistant_reply_JPS:
+            print("[Amadeus] Hold-on line: no usable line - skipped.")
+            return
     except Exception as exc:
-        print(f"[Amadeus] Page fetch for '{query}' failed: {exc!r}")
+        print(f"[Amadeus] Hold-on line failed (skipped): {exc!r}")
+        return
+    with run.lock:
+        if run.closed:
+            print(f"[Amadeus] Hold-on line ready after the answer ({time.monotonic() - started:.1f}s) - dropped.")
+            return
+        try:
+            run.saved_id = store.append_message("assistant", eng, conversation_id=conv,
+                                                japanese=jps, aside=True)
+        except Exception as exc:
+            print(f"[Amadeus] Hold-on line could not be saved: {exc!r}")
+            return
+    print(f"[Amadeus] Hold-on line ({time.monotonic() - started:.1f}s): {jps}")
+    try:
+        emit(run.saved_id, AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=eng))
+    except Exception as exc:
+        print(f"[Amadeus] Hold-on line could not be sent to the screen: {exc!r}")
+
+
+def close_aside():
+    """Her answer is ready (or failed): a hold-on line still being written is
+    dropped. Returns the id of the one that was saved, else None."""
+    run = getattr(_turn, "aside_run", None)
+    _turn.aside_run = None
+    if run is None:
+        return None
+    with run.lock:
+        run.closed = True
+        return run.saved_id
+
+
+# --- Lookup memory (2026-10-25) ------------------------------------------------
+# Every search is saved per chat (memory.save_lookup). Every search she starts
+# really runs (2026-11-06: the old "same search -> saved notes" swap answered a
+# flight number with older general notes); she sees a short index of the
+# chat's lookups and can reopen one with reread_lookup -
+# old notes on a time-sensitive topic are re-checked by re-reading the saved
+# pages, and only when that fails is the web searched again.
+LOOKUP_INDEX_SIZE = 5
+# How long saved notes count as fresh, by how time-sensitive the query is
+# (websearch.freshness_for: past day / week / month / not time-sensitive).
+LOOKUP_FRESH_SECONDS = {"d": 6 * 3600, "w": 24 * 3600, "m": 7 * 86400, None: 30 * 86400}
+_AGAIN_RE = re.compile(
+    r"\b(again|re-?check|re-?search|refresh|look (it|that) up again|search again)\b"
+    r"|もう一度|もう一回|再検索|改めて|再度", re.IGNORECASE)
+
+REREAD_LOOKUP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "reread_lookup",
+        "description": (
+            "Reopen one of your EARLIER LOOKUPS in this chat (your saved notes from a "
+            "web search you already made) instead of searching again. Use it when the "
+            "user asks a follow-up about something you looked up before. The app "
+            "re-checks the pages if the notes are too old."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lookup": {"type": "integer", "description": "The lookup's number (#n)."},
+            },
+            "required": ["lookup"],
+        },
+    },
+}
+
+
+def _lookup_conversation():
+    return getattr(_turn, "conversation", None) if getattr(_turn, "sources", None) is not None else None
+
+
+def _lookup_age_seconds(lookup) -> float:
+    try:
+        made = datetime.strptime(lookup.get("created_at", ""), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return float("inf")
+    return max(0.0, (datetime.now() - made).total_seconds())
+
+
+def _age_text(seconds: float) -> str:
+    if seconds == float("inf"):
+        return "some time ago"
+    minutes = int(seconds // 60)
+    if minutes < 2:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} minutes ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _lookup_is_fresh(lookup) -> bool:
+    limit = LOOKUP_FRESH_SECONDS.get(websearch.freshness_for(lookup.get("query", "")),
+                                     LOOKUP_FRESH_SECONDS[None])
+    return _lookup_age_seconds(lookup) <= limit
+
+
+def _lookup_sites(lookup) -> str:
+    pages = [p for p in lookup.get("pages") or [] if p.get("notes")] or lookup.get("pages") or []
+    sites = [webreader._site(p.get("url")) for p in pages[:3]]
+    return ", ".join(sites)
+
+
+def _recent_lookups():
+    """This chat's newest lookups - without those made for the answer that is
+    being regenerated (Regenerate searches fresh: the old answer was often off
+    BECAUSE of what that search found, 2026-10-26)."""
+    conv = _lookup_conversation()
+    if conv is None:
+        return []
+    skip = getattr(_turn, "skip_lookup_turn", None)
+    try:
+        lookups = store.recent_lookups(conv, LOOKUP_INDEX_SIZE + (5 if skip is not None else 0))
+    except Exception as exc:
+        print(f"[Amadeus] Could not read the chat's lookups: {exc!r}")
+        return []
+    if skip is not None:
+        lookups = [lk for lk in lookups if lk.get("turn") != skip]
+    return lookups[:LOOKUP_INDEX_SIZE]
+
+
+# The user asks for a link / address (2026-10-26): the earlier lookups then
+# show their page addresses, so "send me the link to that page" can be
+# answered from a real search instead of "I don't have the URL".
+_LINK_ASK_RE = re.compile(
+    r"\b(links?|urls?|web ?address(es)?|websites?|web ?pages?|sites?)\b"
+    r"|リンク|ＵＲＬ|アドレス|サイト|ページ", re.IGNORECASE)
+
+
+def _lookup_page_links(lookup, limit=3) -> list:
+    """(title, address) of the pages a lookup read (those that gave notes
+    first), else its top results - the addresses she may hand on as links."""
+    pages = lookup.get("pages") or []
+    picked = [p for p in pages if p.get("notes")] + [p for p in pages if not p.get("notes")]
+    if not picked:
+        picked = lookup.get("results") or []
+    out, seen = [], set()
+    for p in picked:
+        url = str(p.get("url") or "").strip()
+        if url.startswith(("http://", "https://")) and url not in seen:
+            seen.add(url)
+            out.append((str(p.get("title") or "").strip(), url))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _lookup_index_message(last_user: str = ""):
+    """EARLIER LOOKUPS: one short line per recent lookup in this chat, or None.
+    When the user's message asks for a link, each line also lists its page
+    addresses."""
+    lookups = _recent_lookups()
+    if not lookups:
+        return None
+    with_links = bool(_LINK_ASK_RE.search(last_user or ""))
+    lines = []
+    for lk in lookups:
+        sites = _lookup_sites(lk)
+        line = (f"#{lk['id']} (turn {lk.get('turn') or 0}, "
+                f"{_age_text(_lookup_age_seconds(lk))}): \"{lk['query']}\""
+                + (f" - {sites}" if sites else ""))
+        if with_links:
+            links = _lookup_page_links(lk)
+            if links:
+                line += " - pages: " + ", ".join(url for _title, url in links)
+        lines.append(line)
+    return {"role": "system", "content": (
+        "EARLIER LOOKUPS in this chat (web searches you already made; your notes are "
+        "saved). For a follow-up about one of them, call reread_lookup with its number "
+        "instead of searching again"
+        + (" - and when the user asks for a link, copy one of its page addresses exactly"
+           if with_links else "")
+        + ":\n" + "\n".join(lines))}
+
+
+def _lookup_text(lookup, why: str) -> str:
+    """Saved notes (or the saved excerpt) of a lookup, for her prompt."""
+    age = _age_text(_lookup_age_seconds(lookup))
+    head = (f"Your saved notes from lookup #{lookup['id']} (turn {lookup.get('turn') or 0}, "
+            f"{age}) for '{lookup['query']}' - {why}:")
+    pages = [dict(p, rank=p.get("rank") or i + 1) for i, p in enumerate(lookup.get("pages") or [])]
+    body = webreader.notes_block(pages)
+    if not body and lookup.get("excerpt"):
+        body = webreader.wrap_web_data(lookup["excerpt"])
+    if not body:
+        body = PAGES_DID_NOT_ANSWER
+    links = _lookup_page_links(lookup)
+    if links:
+        # The addresses, so a link can be given from saved notes too.
+        body += ("\nPage addresses (copy one exactly if the user asks for a link):\n"
+                 + "\n".join(f"- {title or webreader._site(url)}: {url}" for title, url in links))
+    return (head + "\n" + body + "\n\n" + SEARCH_DATE_NOTE.format(
+        today=datetime.now().strftime("%Y-%m-%d")))
+
+
+def _record_reused(lookup) -> None:
+    pages = lookup.get("pages") or []
+    used = [p["url"] for p in pages if p.get("notes")] or [p["url"] for p in pages[:1] if p.get("url")]
+    _record_source({"kind": "search", "query": lookup["query"],
+                    "results": lookup.get("results") or [], "read": used[0] if used else None,
+                    "used": used, "engine": lookup.get("engine"), "mode": lookup.get("mode"),
+                    "reused": True, "lookup_id": lookup["id"]})
+
+
+def _save_lookup(query, source, results, pages, extra) -> None:
+    conv = _lookup_conversation()
+    if conv is None:
+        return
+    try:
+        saved_pages = [{"url": p["url"], "title": p.get("title", ""), "date": p.get("date", ""),
+                        "rank": p.get("rank"), "notes": p.get("notes")} for p in pages or []]
+        excerpt = extra if source.get("mode") == "quick" else ""
+        source["lookup_id"] = store.save_lookup(
+            conv, store.current_turn(conv), query, source.get("engine"), source.get("mode"),
+            results, saved_pages, excerpt)
+    except Exception as exc:
+        print(f"[Amadeus] Could not save the lookup for '{query}': {exc!r}")
+
+
+def _reread_lookup(lookup_id) -> str:
+    """reread_lookup: the saved notes when fresh; old notes on a time-sensitive
+    topic -> re-read the saved pages; nothing usable -> a fresh search."""
+    try:
+        lookup = store.load_lookup(int(lookup_id))
+    except (TypeError, ValueError):
+        lookup = None
+    conv = _lookup_conversation()
+    if not lookup or (conv is not None and lookup.get("conversation_id") != conv):
+        return (f"(There is no lookup #{lookup_id} in this chat. Use web_search if you "
+                "need to look something up.)")
+    if _is_link_lookup(lookup):
+        return _reread_link_lookup(lookup)
+    if getattr(_turn, "skip_lookup_turn", None) is not None and \
+            lookup.get("turn") == _turn.skip_lookup_turn:
+        # Regenerate: the replaced answer's own lookup is searched afresh.
+        return _web_search_with_content(lookup["query"])
+    if _lookup_is_fresh(lookup):
+        _progress("notes", "Checking my notes from earlier...")
+        _record_reused(lookup)
+        print(f"[Amadeus] Lookup #{lookup['id']} reused (fresh): {lookup['query']!r}")
+        return _lookup_text(lookup, "still fresh")
+    # Old notes on a time-sensitive topic: read the saved pages again.
+    urls = [p["url"] for p in lookup.get("pages") or [] if p.get("url")]
+    results = [r for r in lookup.get("results") or [] if r.get("url")]
+    source = {"kind": "search", "query": lookup["query"], "results": results[:5],
+              "read": None, "engine": lookup.get("engine"), "rechecked": lookup["id"]}
+    _record_source(source)
+    if urls or results:
+        _maybe_start_aside(lookup["query"])
+        _progress("reading", "Re-reading " + ", ".join(webreader._site(u) for u in urls[:3]) + "...")
+        ordered = ([r for r in results if r["url"] in urls]
+                   + [r for r in results if r["url"] not in urls]) or [{"url": u} for u in urls]
+        try:
+            extra, pages = _read_results(lookup["query"], ordered, source)
+        except Exception as exc:
+            print(f"[Amadeus] Re-reading lookup #{lookup['id']} failed: {exc!r}")
+            extra, pages = "", []
+        if extra and extra != PAGES_DID_NOT_ANSWER:
+            _save_lookup(lookup["query"], source, results, pages, extra)
+            _progress("thinking", "Amadeus is thinking...")
+            return (f"Your lookup #{lookup['id']} for '{lookup['query']}' was "
+                    f"{_age_text(_lookup_age_seconds(lookup))}, so the pages were read again "
+                    "just now:\n" + extra + "\n\n" + SEARCH_DATE_NOTE.format(
+                        today=datetime.now().strftime("%Y-%m-%d")))
+    # Nothing usable: search afresh.
+    return _web_search_with_content(lookup["query"])
+
+
+# --- Links the user sends (2026-10-26) ---------------------------------------------
+# Web ON and the user's LATEST message holds links: the app opens them itself
+# (at most 3; weblinks.fetch_link - risky links refused, X posts through
+# FxTwitter, every redirect checked, Keenable's reader as the backup), the
+# reader writes notes about what they asked (or the page's main points), and
+# her reply is written from the notes. Never a link she makes up, never a link
+# found on a page. Each page is saved as a lookup ("link: <address>") with its
+# text, so a follow-up re-reads the saved text instead of downloading again,
+# and the same link within LINK_REUSE_SECONDS is not downloaded twice.
+LINK_BUDGET_LOCAL = 25       # seconds: opening + reading the links, local / built-in
+LINK_BUDGET_CLOUD = 18       # seconds, cloud
+LINK_READER_MAX_TOKENS = 700
+LINK_REUSE_SECONDS = 20 * 60
+LINK_SAVE_CHARS = 20000      # page text kept with the lookup
+LINK_PAGE_CHARS = 12000      # page text one reader call sees
+LINK_QUERY_PREFIX = "link: "
+LINKS_RULE = (
+    "These are the pages from the links the user sent; you opened them yourself just "
+    "now (only those pages, nothing they link to). Answer from these notes, in your own "
+    "words. When a link could not be opened, say so plainly with the reason - never "
+    "guess what it says. Use web_search only if the user also wants something checked "
+    "beyond these pages.")
+LINKS_WEB_OFF_NOTE = (
+    "(Internal note: the user's latest message has a web link, but web access is OFF "
+    "in Settings, so you cannot open it - do not guess what the page says. Tell them "
+    "briefly that you can't open links while web access is off, and that you will read "
+    "it if they turn web access on. Then answer anything else they said normally.)")
+
+
+def _is_link_lookup(lookup) -> bool:
+    return str((lookup or {}).get("query") or "").startswith(LINK_QUERY_PREFIX)
+
+
+def _question_without_links(message) -> str:
+    """The user's words around their links ("" for a bare link)."""
+    text = weblinks._LINK_RE.sub(" ", str(message or ""))
+    return re.sub(r"\s+", " ", text).strip(" \t-:：、。,.")
+
+
+def _link_lookup(url):
+    """A lookup of this exact link in this chat from the last
+    LINK_REUSE_SECONDS that kept the page's text, else None."""
+    for lk in _recent_lookups():
+        if lk.get("query") == LINK_QUERY_PREFIX + url and \
+                _lookup_age_seconds(lk) <= LINK_REUSE_SECONDS and \
+                any(p.get("text") for p in lk.get("pages") or []):
+            return lk
+    return None
+
+
+def _fetch_links(urls, deadline) -> dict:
+    """Open the links in parallel -> {url: page}; one still loading at the
+    deadline counts as "took too long"."""
+    if not urls:
+        return {}
+    timeout = max(2.0, min(weblinks.LINK_TIMEOUT, deadline - time.monotonic() - 2))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(urls))
+    futures = {pool.submit(weblinks.fetch_link, u, timeout): u for u in urls}
+    got = {}
+    try:
+        for fut in concurrent.futures.as_completed(futures, timeout=timeout + 1):
+            u = futures[fut]
+            try:
+                got[u] = fut.result()
+            except Exception as exc:
+                print(f"[Amadeus] Opening {u} failed: {exc!r}")
+                got[u] = {"status": "error", "reason": "could not be opened", "url": u}
+    except concurrent.futures.TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    for u in urls:
+        got.setdefault(u, {"status": "error", "reason": "took too long", "url": u})
+    return got
+
+
+def _read_link_pages(question, pages, deadline) -> str:
+    """Notes (reader mode) or best paragraphs (quick mode) for the opened
+    pages -> the mode used. Fills each page's "notes" / "excerpt"."""
+    mode, parallel, pin, _local = web_reading_plan()
+    page_chars = min(webfetch.char_budget(store.text_context_budget()), LINK_PAGE_CHARS)
+    if mode == "reader":
+        today = datetime.now().strftime("%Y-%m-%d")
+        webreader.read_pages(question, "", pages, _reader_call(pin, LINK_READER_MAX_TOKENS),
+                             deadline, today, page_chars, parallel=parallel,
+                             progress=_progress, links=True)
+    share = max(1500, page_chars // max(1, len(pages)))
+    for p in pages:
+        if not p.get("notes") and p.get("status") != "none":
+            # Quick mode, or the reader ran out of time: the best paragraphs.
+            p["excerpt"] = (webreader.best_chunks(p["text"], question, share, question)
+                            if webreader.terms(question) else
+                            webreader.spread_chunks(p["text"], share))
+    return mode
+
+
+def _links_block(pages, failed, skipped) -> str:
+    """Her prompt's part about the user's links: notes, what failed and why."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    parts = []
+    body = webreader.link_notes_block(pages)
+    if body:
+        parts.append(body)
+    elif pages:
+        parts.append("(The pages the user sent were opened but had nothing readable.)")
+    for i, u, reason, status in failed:
+        if status == "refused" and "password or key" in reason:
+            # The LINK holds a secret - not the page asking for one (she said
+            # "it requires a password" on 2026-10-26).
+            parts.append(f"[L{i}] Did not open {webreader._site(u)}: the link itself has a "
+                         "password or key written in it, so opening it could give that secret "
+                         "away. Tell the user you left it unopened to keep it safe - not that "
+                         "the page asks for a password.")
+        elif status == "refused":
+            parts.append(f"[L{i}] Did not open {webreader._site(u)}: the link {reason}.")
+        else:
+            parts.append(f"[L{i}] Could not open {webreader._site(u)}: it {reason}.")
+    if skipped:
+        parts.append(f"(The user sent {skipped} more link{'s' if skipped != 1 else ''}; "
+                     f"only the first {weblinks.MAX_LINKS} were opened - say so.)")
+    parts.append(LINKS_RULE)
+    parts.append(SEARCH_DATE_NOTE.format(today=today))
+    return "\n\n".join(parts)
+
+
+def _link_source(i, u, page, status, reason="", lookup_id=None, reused=False) -> dict:
+    entry = {"kind": "link", "url": u, "final": page.get("final_url") or u,
+             "title": page.get("title") or "", "date": page.get("date") or "",
+             "status": status, "via": page.get("via")}
+    if reason:
+        entry["reason"] = reason
+    if lookup_id:
+        entry["lookup_id"] = lookup_id
+    if reused:
+        entry["reused"] = True
+    return entry
+
+
+def _save_link_lookup(u, page, mode):
+    conv = _lookup_conversation()
+    if conv is None:
+        return None
+    try:
+        final = page.get("final_url") or u
+        saved = [{"url": final, "title": page.get("title", ""), "date": page.get("date", ""),
+                  "rank": 1, "notes": page.get("notes"),
+                  "text": (page.get("text") or "")[:LINK_SAVE_CHARS]}]
+        return store.save_lookup(
+            conv, store.current_turn(conv), LINK_QUERY_PREFIX + u, page.get("via"), mode,
+            [{"title": page.get("title", ""), "url": final, "date": page.get("date", "")}],
+            saved, page.get("excerpt") or "")
+    except Exception as exc:
+        print(f"[Amadeus] Could not save the lookup for link {u}: {exc!r}")
+        return None
+
+
+def _read_user_links(message) -> str:
+    """Open + read the links in the user's latest message -> the text for
+    her prompt ("" when the message has no link)."""
+    links, skipped = weblinks.find_links(message)
+    if not links:
+        return ""
+    question = _question_without_links(message)
+    _, _, _, local = web_reading_plan()
+    deadline = time.monotonic() + (LINK_BUDGET_LOCAL if local else LINK_BUDGET_CLOUD)
+    # Links refused at once (a key in the link, an X profile) need no wait:
+    # no hold-on line when nothing is going to be opened.
+    refused = {u: r for u in links for r in [weblinks.refusal(u)] if r}
+    if len(refused) < len(links):
+        sites = ", ".join(dict.fromkeys(webreader._site(u) for u in links if u not in refused))
+        _maybe_start_aside("the link" + ("s" if len(links) - len(refused) > 1 else "")
+                           + f" they sent ({sites})")
+    again = bool(_AGAIN_RE.search(question))
+    reused = {u: lk for u in links if u not in refused
+              for lk in [None if again else _link_lookup(u)] if lk}
+    if reused:
+        _progress("notes", "Checking the page" + ("s" if len(reused) > 1 else "")
+                  + " I opened earlier...")
+    fresh = [u for u in links if u not in reused and u not in refused]
+    if fresh:
+        _progress("reading", "Opening " + ", ".join(webreader._site(u) for u in fresh) + "...")
+    opened = {**refused, **_fetch_links(fresh, deadline)}
+    pages, failed = [], []
+    for i, u in enumerate(links, 1):
+        if u in reused:
+            saved = next(p for p in reused[u]["pages"] if p.get("text"))
+            page = {"url": saved.get("url") or u, "final_url": saved.get("url") or u,
+                    "title": saved.get("title", ""), "date": saved.get("date", ""),
+                    "text": saved["text"], "via": reused[u].get("engine"),
+                    "lookup": reused[u]["id"]}
+        else:
+            got = opened[u]
+            if got.get("status") != "ok":
+                reason = got.get("reason") or "could not be opened"
+                failed.append((i, u, reason, got.get("status")))
+                _record_source(_link_source(i, u, got, "failed", reason))
+                _progress("skip", (f"Didn't open {webreader._site(u)} - the link {reason}"
+                                   if got.get("status") == "refused" else
+                                   f"Couldn't open {webreader._site(u)} - it {reason}"))
+                continue
+            page = {"url": got.get("final_url") or u, "final_url": got.get("final_url") or u,
+                    "title": got.get("title", ""),
+                    "date": got.get("updated") or got.get("published") or got.get("title_month") or "",
+                    "text": got.get("text", ""), "via": got.get("via")}
+        page.update(rank=i, pasted=u)
+        pages.append(page)
+    mode = "-"
+    if pages:
+        _progress("reading", "Reading " + _site_list(pages) + "...")
+        mode = _read_link_pages(question, pages, deadline)
+    for p in pages:
+        status = "ok" if (p.get("notes") or p.get("excerpt")) else "empty"
+        lookup_id = p.get("lookup") or _save_link_lookup(p["pasted"], p, mode)
+        _record_source(_link_source(p["rank"], p["pasted"], p, status, lookup_id=lookup_id,
+                                    reused=bool(p.get("lookup"))))
+    print(f"[Amadeus] Links ({mode}): {len(links)} sent"
+          + (f", {skipped} more left out" if skipped else "")
+          + f"; read {len([p for p in pages if p.get('notes') or p.get('excerpt')])}"
+          + (f" ({', '.join(str(p.get('via')) for p in pages)})" if pages else "")
+          + (f"; failed: {', '.join(f'{webreader._site(u)} ({r})' for _, u, r, _s in failed)}"
+             if failed else ""))
+    _progress("thinking", "Amadeus is thinking...")
+    return _links_block(pages, failed, skipped)
+
+
+def _reread_link_lookup(lookup) -> str:
+    """reread_lookup on a page the user sent: its saved text is read again
+    for the current question (no download); without saved text, the notes."""
+    saved = next((p for p in lookup.get("pages") or [] if p.get("text")), None)
+    if not saved:
+        _record_reused(lookup)
+        return _lookup_text(lookup, "the page the user sent earlier")
+    question = _question_without_links(getattr(_turn, "question", "") or "")
+    url = lookup["query"][len(LINK_QUERY_PREFIX):]
+    page = {"url": saved.get("url") or url, "final_url": saved.get("url") or url,
+            "title": saved.get("title", ""), "date": saved.get("date", ""),
+            "text": saved["text"], "via": lookup.get("engine"), "rank": 1, "pasted": url}
+    _progress("notes", "Re-reading " + webreader._site(page["url"]) + "...")
+    _, _, _, local = web_reading_plan()
+    deadline = time.monotonic() + (LINK_BUDGET_LOCAL if local else LINK_BUDGET_CLOUD)
+    _read_link_pages(question, [page], deadline)
+    _record_source(_link_source(1, url, page, "ok" if (page.get("notes") or page.get("excerpt"))
+                                else "empty", lookup_id=lookup["id"], reused=True))
+    _progress("thinking", "Amadeus is thinking...")
+    return (f"Your lookup #{lookup['id']} is a page the user sent earlier "
+            f"({_age_text(_lookup_age_seconds(lookup))}); its saved text was read again just now:\n"
+            + _links_block([page], [], 0))
+
+
+# The user's own recent words: the years they named or meant (year guard).
+YEAR_GUARD_USER_MESSAGES = 3
+
+
+def _user_words_for_years() -> list:
+    """The latest user message + the few before it in this reply's chat."""
+    texts = [getattr(_turn, "question", "") or ""]
+    context = getattr(_turn, "reply_context", None) or []
+    users = [_content_text(m.get("content")) for m in context
+             if m.get("role") == "user" and isinstance(m.get("content"), (str, list))]
+    return texts + users[-YEAR_GUARD_USER_MESSAGES:]
+
+
+def _guard_query(query: str) -> str:
+    """Her search words without the past years she added on her own (see
+    websearch.guard_query_years); logged when something was removed."""
+    user_words = _user_words_for_years()
+    fixed, removed = websearch.guard_query_years(query, user_words)
+    if removed:
+        print(f"[Amadeus] Search words fixed (years the user never said: "
+              f"{', '.join(map(str, removed))}): {query!r} -> {fixed!r}")
+    # The same for a season she adds ("anime winter" asked in October).
+    seasoned, seasons = websearch.guard_query_seasons(fixed, user_words)
+    if seasons:
+        print(f"[Amadeus] Search words fixed (season the user never said: "
+              f"{', '.join(seasons)}): {fixed!r} -> {seasoned!r}")
+    # And a flight number nobody gave her (2026-11-06): the user's words in
+    # this chat and the result titles she already saw this reply count.
+    flight, guessed = websearch.guard_query_flight_numbers(seasoned, _known_flight_texts())
+    if guessed:
+        print(f"[Amadeus] Search words fixed (flight numbers nobody gave: "
+              f"{', '.join(guessed)}): {seasoned!r} -> {flight!r}")
+    return flight
+
+
+def _known_flight_texts() -> list:
+    """Every user message in this reply's chat + the titles of the results
+    this reply has seen so far (a flight number found there may be searched)."""
+    context = getattr(_turn, "reply_context", None) or []
+    texts = [getattr(_turn, "question", "") or ""]
+    texts += [_content_text(m.get("content")) for m in context
+              if m.get("role") == "user" and isinstance(m.get("content"), (str, list))]
+    for source in getattr(_turn, "sources", None) or []:
+        texts += [r.get("title") or "" for r in source.get("results") or []]
+    return texts
+
+
+def _web_search_with_content(query: str) -> str:
+    """web_search plus reading the result pages (reader or quick mode).
+
+    Returns the search results, then the notes from the pages (reader mode) or
+    the best paragraphs of the top page (quick mode) - the numbers, the
+    details - instead of one-line snippets. Bounded (time + size) and fully
+    defensive: if nothing can be read, the plain results come back unchanged,
+    so a fetch or reader problem can never break or hang the reply. A pure
+    clock query is not searched at all (CLOCK_SEARCH_SKIPPED). Each search is
+    logged, recorded as a source and saved as a lookup. Every search really
+    runs: saved notes come back only through reread_lookup, her own choice
+    (2026-11-06: "XY1234 flight status Lisbon to Oslo" was answered
+    with the notes of "flight status to Oslo" - 4 of 6 words alike).
+    """
+    query = _guard_query(query)
+    if _is_clock_query(query):
+        print(f"[Amadeus] Web search skipped (clock query - her RIGHT NOW note has it): {query!r}")
+        return CLOCK_SEARCH_SKIPPED
+    _note_search_engine(None)
+    _maybe_start_aside(query)
+    _progress("searching", f'Searching the web: "{query}"')
+    text = _run_web_search(query)
+    results = _parse_search_results(text)
+    source = {"kind": "search", "query": query, "results": results[:5], "read": None,
+              "engine": getattr(_turn, "engine", None)}
+    _record_source(source)
+    if results:
+        _progress("found", f"Found {len(results)} page{'s' if len(results) != 1 else ''}")
+    extra, pages = "", []
+    try:
+        if results:
+            extra, pages = _read_results(query, results, source)
+            if extra:
+                return text + "\n\n---\n\n" + extra
+    except Exception as exc:
+        print(f"[Amadeus] Reading the pages for '{query}' failed: {exc!r}")
+    finally:
+        if results:
+            _save_lookup(query, source, results, pages, extra)
+        print(f"[Amadeus] Web search ({source['engine'] or 'none'}, "
+              f"{source.get('mode', '-')}): {query!r} -> {len(results)} result(s)"
+              + (f"; read {source['read']}" if source["read"] else "")
+              + (f"; notes from {len(source.get('used') or [])}" if source.get("mode") == "reader" else ""))
+        _progress("thinking", "Amadeus is thinking...")
     return text
 
 
@@ -569,6 +1728,30 @@ def _parse_textual_tool_calls(text: str):
     return calls
 
 
+# Picture labels, notes and the picture rule all start with "[Picture";
+# a document's start with "[Document" (its text ends at "[End of document N]");
+# a video's with "[Video" (its stills and speech end at "[End of video N]").
+_PICTURE_LABEL_RE = re.compile(r"\[(?:Picture|Document|Video)(?: \d+| note:| rule:)[^\]]*\]")
+_DOCUMENT_BLOCK_RE = re.compile(
+    r"\[(?:Document|Video) \d+[^\]\n]*\]\s.*?\s\[End of (?:document|video) \d+\]", re.S)
+
+
+def _content_text(content) -> str:
+    """A message's own words: the text of a text-or-parts message (her reply
+    calls carry pictures as parts) without the picture / document labels,
+    a document's text, notes and rules. Every helper that reads a message as
+    text goes through this."""
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content
+                           if isinstance(p, dict) and p.get("type") == "text")
+    elif not isinstance(content, str):
+        return ""
+    if "[Picture" not in content and "[Document" not in content and "[Video" not in content:
+        return content
+    content = _DOCUMENT_BLOCK_RE.sub("", content)
+    return re.sub(r"[ \t]{2,}", " ", _PICTURE_LABEL_RE.sub("", content)).strip()
+
+
 def _has_japanese(text: str) -> bool:
     """True if the text contains hiragana/katakana (real spoken Japanese)."""
     return any("\u3040" <= ch <= "\u30ff" for ch in (text or ""))
@@ -662,11 +1845,11 @@ def _strip_inline_english(text: str) -> str:
     """
     def _kill(match):
         run = match.group(0)
-        words = sum(1 for part in run.split() if any(c.isalpha() for c in part))
-        letters = sum(1 for c in run if "a" <= c.lower() <= "z")
-        if words >= 3 or letters >= 24:
-            return " "
-        return run
+        # A product name or a title (iPhone 18 Pro Max, 『My First Cookie
+        # Book』) stays: removing it left holes in her line (2026-10-24).
+        if speech_text.keeps_latin_run(text, match.start(), run):
+            return run
+        return " "
     t = _INLINE_RUN_RE.sub(_kill, text)
     if t != text:
         print("[Amadeus] JPS had inline English - stripped before TTS")
@@ -674,10 +1857,18 @@ def _strip_inline_english(text: str) -> str:
     # drop punctuation left orphaned where a phrase was removed
     t = re.sub(r"(?<= )[!?,.;:]{1,3}(?= )", "", t)
     t = re.sub(r"[!?,.;:]{1,3} +$", "", t)
+    t = re.sub(r"(?<=[、。！？])\s*[!?,.;:]{1,3}", "", t)
     # glue any leftover spaces back onto CJK punctuation
     t = re.sub(r"\s+([、。，！？；：])", r"\1", t)
     t = re.sub(r"([、。，！？；：])\s+", r"\1", t)
     return t
+
+
+# Scripts her Japanese line never needs: Cyrillic, Hebrew, Arabic, the Indic
+# scripts (Devanagari, Bengali, Tamil, ...), Thai/Lao, Hangul.
+_OTHER_SCRIPT_RE = re.compile(
+    "[Ѐ-ӿ֐-ࣿऀ-෿฀-໿"
+    "ᄀ-ᇿ㄰-㆏가-힯]+")
 
 
 def _clean_tts_text(text: str) -> str:
@@ -703,6 +1894,19 @@ def _clean_tts_text(text: str) -> str:
     t = _strip_thinking(text or "").strip()
     if not t:
         return t
+    # Web addresses stay whole (2026-10-26): they are clickable on screen and
+    # the voice leaves them out (speech_text.drop_links) - the English-
+    # stripping below would otherwise chop them into fragments. Each one is
+    # parked as a placeholder with no Latin letters while the line is cleaned.
+    t, parked = _park_links(t)
+    if parked:
+        return _unpark_links(_clean_tts_text(t), parked)
+    # A stray word in another script (her 12B model, rarely: Korean 들을,
+    # Bengali বাইরে - 2026-10-22/24) would be read out as noise: drop it.
+    if _OTHER_SCRIPT_RE.search(t):
+        t = _OTHER_SCRIPT_RE.sub("", t).strip()
+        t = re.sub(r"(?<=[、。！？])[ \t]+|[ \t]+(?=[、。！？])", "", t)
+        print("[Amadeus] JPS had a stray word in another script - removed")
     # Pure-English field (no Japanese at all): keep it for the translation pass.
     if _has_latin(t) and not _has_japanese_script(t):
         return _collapse_runaway(t)
@@ -717,10 +1921,36 @@ def _clean_tts_text(text: str) -> str:
             kept.append(s)
         t = "\n".join(kept)
         t = re.sub(r"[（(][^（）()]*[）)]",
-                   lambda m: m.group(0) if _has_japanese_script(m.group(0)) else "", t)
+                   lambda m: m.group(0) if (_has_japanese_script(m.group(0))
+                                            or _LINK_MARK in m.group(0)) else "", t)
         t = re.sub(r"\n{3,}", "\n\n", t)
         t = _strip_inline_english(t)
+        # The shared name list: a listed name still in Latin letters becomes
+        # its katakana, so the screen, the voice and her history agree.
+        t = speech_text.swap_listed_words(t)
     return _collapse_runaway(t).strip()
+
+
+_LINK_MARK = "\ue000"
+
+
+def _park_links(text: str):
+    """Web addresses -> placeholders (private-use characters only)."""
+    spans = speech_text.link_spans(text)
+    if not spans:
+        return text, []
+    parked = []
+    for start, end in reversed(spans):
+        parked.insert(0, text[start:end])
+        text = text[:start] + _LINK_MARK + chr(0xE100 + len(spans) - len(parked)) + text[end:]
+    return text, parked
+
+
+def _unpark_links(text: str, parked) -> str:
+    for i, link in enumerate(parked):
+        mark = _LINK_MARK + chr(0xE100 + i)
+        text = text.replace(" " + mark, " " + link).replace(mark, link)
+    return text
 
 
 def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
@@ -741,6 +1971,8 @@ def _ensure_japanese(pack: "AmadeusPack", llm) -> "AmadeusPack":
     if cleaned != (pack.assistant_reply_JPS or ""):
         pack = AmadeusPack(assistant_reply_JPS=cleaned, assistant_reply_ENG=pack.assistant_reply_ENG)
     if _has_japanese_script(pack.assistant_reply_JPS):
+        return pack
+    if not _usable_source(pack.assistant_reply_ENG):
         return pack
     try:
         trans = llm.invoke([{
@@ -774,18 +2006,22 @@ def _ensure_english(pack: "AmadeusPack", llm) -> "AmadeusPack":
     # Fast path: already English (has Latin letters and no Japanese script).
     if _has_latin(eng) and not _has_japanese_script(eng):
         return pack
+    if not _usable_source(pack.assistant_reply_JPS or eng):
+        return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS,
+                           assistant_reply_ENG=eng or (pack.assistant_reply_JPS or ""))
     try:
         trans = llm.invoke([{
             "role": "user",
             "content": (
                 "Translate the following Japanese into natural spoken English. "
+                "Copy any web address (https://...) exactly as written. "
                 "Output ONLY the English text - no quotes, no commentary.\n"
-                + "".join(h + "\n" for h in _user_hint_lines()) + "\n"
+                + "".join(h + "\n" for h in _user_hint_lines(pack.assistant_reply_JPS or eng)) + "\n"
                 + (pack.assistant_reply_JPS or eng)[:1500]
             ),
         }])
         new_eng = _strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)).strip()
-        if _has_latin(new_eng):
+        if _has_latin(new_eng) and not _META_TRANSLATION.search(new_eng):
             print("[Amadeus] ENG was not English - repaired with a translation pass")
             return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS, assistant_reply_ENG=new_eng)
     except Exception as e:
@@ -918,8 +2154,9 @@ def _salvage_plain_text(raw, llm) -> "AmadeusPack":
                 "role": "user",
                 "content": (
                     "Translate the following Japanese into natural spoken English. "
+                    "Copy any web address (https://...) exactly as written. "
                     "Output ONLY the English text - no quotes, no commentary.\n"
-                    + "".join(h + "\n" for h in _user_hint_lines()) + "\n"
+                    + "".join(h + "\n" for h in _user_hint_lines(text)) + "\n"
                     + text[:1500]
                 ),
             }])
@@ -958,6 +2195,18 @@ def _ensure_japanese_jps(jps: str, llm) -> str:
     cleaned = _clean_tts_text(jps or "")
     if _has_japanese_script(cleaned):
         return cleaned
+    if not _usable_source(cleaned):
+        return cleaned
+    repaired = _translate_to_japanese(llm, cleaned)
+    if repaired:
+        print("[Amadeus] Voice-first: JPS was not Japanese - repaired with a translation pass")
+        return repaired
+    return cleaned
+
+
+def _translate_to_japanese(llm, text: str) -> str:
+    """Her line written in English (or mostly English) -> the same line in her
+    spoken Japanese, cleaned; "" when the pass fails or brings no Japanese."""
     try:
         trans = llm.invoke([{
             "role": "user",
@@ -965,16 +2214,23 @@ def _ensure_japanese_jps(jps: str, llm) -> str:
                 "Translate the following into natural spoken Japanese, in the voice of Amadeus "
                 "(a sharp, confident scientist who speaks casually to close friends). "
                 "Output ONLY the Japanese text - no quotes, no translation, no commentary.\n\n"
-                + (cleaned or "")[:1500]
+                + (text or "")[:1500]
             ),
         }])
         jps = _clean_tts_text(_strip_thinking(trans.content if isinstance(trans.content, str) else str(trans.content)))
-        if _has_japanese_script(jps):
-            print("[Amadeus] Voice-first: JPS was not Japanese - repaired with a translation pass")
-            return jps
+        return jps if _has_japanese_script(jps) else ""
     except Exception as e:
         print("[Amadeus] Voice-first: Japanese repair failed:", repr(e))
-    return cleaned
+        return ""
+
+
+def _mostly_english(text: str) -> bool:
+    """A line that is English prose with at most a few Japanese characters
+    ("アイノちゃん. I understand, from now on ..."): cleaning would leave only
+    scraps of it, so it is translated instead."""
+    ja = len(re.findall(r"[぀-ヿ㐀-鿿]", text or ""))
+    latin = len(re.findall(r"[A-Za-z]", text or ""))
+    return latin >= 20 and ja < latin * 0.25
 
 
 def _salvage_jps_plain_text(raw: str, llm) -> str:
@@ -1095,6 +2351,138 @@ def _forced_tool_choice_rejected(exc) -> bool:
             or "cannot guarantee" in text)
 
 
+def _reasoning_level(kind):
+    """Settings -> Reasoning level for "replies" / "translations"; None when
+    the llm module is a test stand-in without the helper (old behaviour)."""
+    fn = getattr(_llm_module, "reasoning_for", None)
+    try:
+        return fn(kind) if fn else None
+    except Exception:
+        return None
+
+
+def _reply_llm():
+    """Her replies' client (replies, greetings, the web-search decision)."""
+    level = _reasoning_level("replies")
+    return get_llm(API_KEY, LLM_Model, reasoning=level) if level else get_llm(API_KEY, LLM_Model)
+
+
+def _translation_llm():
+    """The English line / Japanese rewrites: the Translations level."""
+    level = _reasoning_level("translations")
+    return get_llm(API_KEY, LLM_Model, reasoning=level) if level else get_llm(API_KEY, LLM_Model)
+
+
+def _is_local(client) -> bool:
+    """True for her built-in model / the user's own local server (looked up at
+    call time - several tests stand in a fake `llm` module)."""
+    fn = getattr(_llm_module, "is_local_server", None)
+    try:
+        return bool(fn and fn(client))
+    except Exception:
+        return False
+
+
+_PLAIN_LABEL = re.compile(r"^\s*(?:JA|JP|Japanese|日本語|Amadeus|アマデウス)\s*[:：]\s*", re.I)
+
+
+def _plain_jps(client, messages) -> str:
+    """One plain-text call for her Japanese line. Returns the cleaned line, or
+    raises ValueError(reason) when it is unusable (empty, cut off at the output
+    cap, no Japanese, markup/tool-call text, a long loop)."""
+    reply = client.invoke(messages)
+    raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
+    text = _PLAIN_LABEL.sub("", _strip_thinking(raw).strip()).strip()
+    if len(text) >= 2 and text[0] in "「\"'" and text[-1] in "」\"'":
+        text = text[1:-1].strip()
+    meta = getattr(reply, "response_metadata", None) or {}
+    why = _degenerate_field(text)
+    # Asked to "answer in English only", a small model may agree and write
+    # English (2026-10-24, twice in a row -> the honest line). Her words are
+    # kept: translated into her Japanese line (the English line shows anyway).
+    if (text and not why and meta.get("finish_reason") != "length"
+            and (not _has_japanese_script(text) or _mostly_english(text))):
+        repaired = _translate_to_japanese(_translation_llm(), text)
+        if repaired:
+            print("[Amadeus] Plain reply was English - translated into her Japanese line")
+            return repaired
+    if not text:
+        why = "empty"
+    elif meta.get("finish_reason") == "length":
+        why = why or "cut off at the output limit"
+    elif not _has_japanese_script(text):
+        why = why or "no Japanese"
+    elif _repeats_last_line(text, messages):
+        why = why or "repeated her previous line"
+    if why:
+        raise ValueError(f"plain reply unusable ({why}): {text[:80]!r}")
+    return text
+
+
+def _repeats_last_line(text: str, messages) -> bool:
+    """Her new line is (almost) word for word her previous one - a small
+    model did this once in 186 test replies (2026-10-24); worth one retry."""
+    prev = next((m.get("content", "") for m in reversed(messages or [])
+                 if m.get("role") == "assistant"), "")
+    return (len(text) >= 20 and bool(prev)
+            and difflib.SequenceMatcher(None, prev.strip(), text.strip()).ratio() > 0.9)
+
+
+def _plain_reply(client, messages, label):
+    """_plain_jps with ONE retry. None = both attempts unusable (the caller
+    serves the honest line); a connection error that repeats is raised."""
+    for attempt in (1, 2):
+        try:
+            return _plain_jps(client, messages)
+        except ValueError as exc:
+            print(f"[Amadeus] {label}: plain reply attempt {attempt} unusable - {exc}")
+        except Exception as exc:
+            print(f"[Amadeus] {label}: plain reply attempt {attempt} failed: {exc!r}")
+            if attempt == 2:
+                raise
+    return None
+
+
+def _two_step_pack(client, messages, message_context, label) -> "AmadeusPack":
+    """Local models, a full reply with both lines (regenerate, greetings): her
+    Japanese line as plain text, then the English line by the translation call
+    (Settings -> Reasoning -> Translations). The English falls back to her
+    Japanese line (the guards then try their own translation pass)."""
+    jps = _plain_reply(client, messages, label)
+    if jps is None:
+        return _honest_plain_failure_pack()
+    en = ""
+    try:
+        en = _translate_reply_en(_translation_llm(), jps,
+                                 _voice_first_context_lines(message_context))
+    except Exception as exc:
+        print(f"[Amadeus] {label}: English line failed: {exc!r}")
+    return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=en or jps)
+
+
+def _structured(client, schema, messages):
+    """Her reply in the structured format `schema` (AmadeusPack / AmadeusReply).
+    Local servers (her built-in model, the user's own llama-server) get
+    tool_choice "required": llama-server rejects the named-function form that
+    with_structured_output sends ("Wrong type supplied for parameter
+    'tool_choice'") and falls back to "auto", so the first answer came back
+    empty and EVERY reply was written twice (Run 1, 2026-10-19). Cloud
+    services keep with_structured_output unchanged. Returns a `schema`
+    instance, or None when no usable call came back (the callers' existing
+    "came back empty" ladder handles it)."""
+    # Looked up at call time: several tests stand in a small fake `llm`
+    # module without this helper (then: the cloud path, i.e. unchanged).
+    is_local = getattr(_llm_module, "is_local_server", None)
+    if not (is_local and is_local(client)):
+        return client.with_structured_output(schema, method="function_calling").invoke(messages)
+    bound = client.bind_tools([convert_to_openai_tool(schema)], tool_choice="required")
+    reply = _invoke_forced(bound, messages)
+    for call in getattr(reply, "tool_calls", None) or []:
+        if call.get("name") == schema.__name__:
+            return schema.model_validate(call.get("args") or {})
+    return None
+
+
 def _invoke_forced(bound_llm, convo):
     """Invoke a tool_choice="required" binding; if the server rejects the forced
     choice (see _forced_tool_choice_rejected), retry once with tool_choice="auto"
@@ -1147,6 +2535,60 @@ def _merge_leading_system_messages(messages):
     return [{"role": "system", "content": "\n\n".join(merged)}] + list(messages[start:])
 
 
+# Prompt order A (2026-10-22). A server skips re-reading a prompt only up to the
+# first byte that changed since the last call (llama-server's prompt cache, cloud
+# prompt caching). So every FIXED block comes first - personality, voice rules,
+# reply rules, web rules - and the blocks that change between replies (closeness,
+# appearance, memories, time, greeting instruction) come after them, right before
+# the conversation. Measured on the built-in model: a changed block at the top
+# re-read all ~7,300 pieces; at the end, ~40.
+#
+# Prompt order B (right_now=True, built-in model only): her model's sliding-
+# window layers can resume only from a point the server saved at the start of
+# the newest user message, so the changing blocks leave the instruction
+# message and become one "right now" note AFTER the newest user message (the
+# next reply then differs only after that point). Measured on a real chat:
+# ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the newest user
+# message re-read the whole chat history).
+# The label's wording matters (measured 2026-10-22, "What time is it right
+# now?" x10): "private background" made her refuse to read the clock 4/5 times,
+# "use it freely" answered 10/10.
+_RIGHT_NOW_LABEL = ("RIGHT NOW (what you know at this moment - use it freely; "
+                    "the user did not write this):\n\n")
+
+
+def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
+    fixed = (store.load_default_personality_messages()
+             + [ja_voice.build_voice_rules()]
+             + [rules_block]
+             + [web_block])
+    trust = stats.load_stat("trust")
+    # Her short-term feelings (2026-10-30): one line after the closeness
+    # block, only when one of them is away from normal - otherwise the
+    # prompt is unchanged.
+    mood = feelings.feelings_line(trust=trust, path=_feelings_path())
+    # Things on her mind about them (concerns.py), Familiar and up.
+    mind = concerns.prompt_line(trust, path=_concerns_path())
+    changing = ([ja_voice.build_closeness_context(trust)]
+                + [{"role": "system", "content": line} for line in (mood, mind) if line]
+                + list(changing))
+    if not right_now:
+        return _merge_leading_system_messages(fixed + changing + list(context))
+    note = {"role": "system", "content": _RIGHT_NOW_LABEL
+            + "\n\n".join(m.get("content", "") for m in changing)}
+    return _merge_leading_system_messages(fixed + list(context)) + [note]
+
+
+def _right_now_note() -> bool:
+    """Order B only on her built-in model (looked up at call time - several
+    tests stand in a fake `llm` module)."""
+    builtin = getattr(_llm_module, "builtin_llm", None)
+    try:
+        return bool(builtin and builtin.active())
+    except Exception:
+        return False
+
+
 # --- Search-failure honesty net -------------------------------------------------
 # When a search turn cannot be completed - the final call failed (rate limit,
 # timeout, dropped connection) or came back empty with no search having run -
@@ -1183,6 +2625,48 @@ def _honest_search_failure_pack(weather: bool = False) -> "AmadeusPack":
             "temporary glitch, could you ask me again in a moment?"
         ),
     )
+
+
+# Gemma 4 can write its native tool-call syntax as TEXT inside a field of an
+# otherwise valid pack and repeat it until the output cap (Run 1, 2026-10-19:
+# assistant_reply_ENG = "<|tool_call>call:AmadeusPack{assistant_reply_ENG:" x ~200,
+# JPS empty, 66 s, no voice). _repetition_cut only ever saw the plain-text
+# salvage path, never the parsed pack's fields.
+_TOOL_CALL_TEXT = re.compile(r"<\|tool_call>|<tool_call\|>|call:Amadeus(?:Pack|Reply)\{")
+_LOOP_CHECK_MIN_CHARS = 600   # a real reply may repeat a phrase; a loop runs long
+
+
+def _degenerate_field(text) -> str:
+    """Why this reply field is unusable ('' = fine): tool-call markup written
+    as text, or a long repetition loop."""
+    text = text if isinstance(text, str) else ""
+    if _TOOL_CALL_TEXT.search(text):
+        return "tool-call text in the reply"
+    if len(text) >= _LOOP_CHECK_MIN_CHARS and _repetition_cut(text) is not None:
+        return "repetition loop in the reply"
+    return ""
+
+
+def _degenerate_pack(p) -> str:
+    """'' when the pack's lines are usable, else the reason."""
+    for field in ("assistant_reply_JPS", "assistant_reply_ENG"):
+        why = _degenerate_field(getattr(p, field, "") if not isinstance(p, dict) else p.get(field))
+        if why:
+            return why
+    return ""
+
+
+# A translation pass may only run on a real line, and a model that answers it
+# with a request ("Please provide the Japanese text you would like me to
+# translate" - Run 4, 2026-10-21, after a broken reply left a field empty) has
+# not translated anything.
+_META_TRANSLATION = re.compile(
+    r"\b(?:provide|paste|send|share|give|enter)\b.{0,40}\b(?:text|sentence|line|japanese|english)\b"
+    r"|\bwould you like me to translate\b|\bnothing to translate\b", re.I)
+
+
+def _usable_source(text) -> bool:
+    return len(re.sub(r"[\s\W_0-9]", "", text or "")) >= 2
 
 
 def _honest_plain_failure_pack() -> "AmadeusPack":
@@ -1309,11 +2793,19 @@ _SEARCH_REFUSAL_EN = (
     "don't have access", "don't actually have the capability",
     "can't access the web", "can't look it up", "couldn't look it up",
     "couldn't actually finish the search", "without web access",
+    # "switched off" wordings (2026-10-25, Amadeus-Fresh: "my web search
+    # function is currently turned off" was not recognised)
+    "search is off", "search is currently off", "search is turned off",
+    "search is currently turned off", "search function is turned off",
+    "search function is currently turned off", "search function is off",
+    "web access is off", "web access is currently off", "web access is turned off",
 )
 _SEARCH_REFUSAL_JA = (
     "検索できない", "検索は使えない", "検索を使えない", "検索ができません",
     "ウェブがオフ", "ウェブ検索は使えない", "ウェブ検索が使えない",
     "検索を最後までできなかった", "アクセスできない",
+    "検索機能はオフ", "検索機能がオフ", "検索はオフ", "検索がオフ",
+    "アクセスはオフ", "アクセスがオフ",
 )
 
 
@@ -1329,6 +2821,15 @@ def _recent_search_refusal(messages) -> bool:
                 or any(p in a for p in _SEARCH_REFUSAL_JA)):
             return True
     return False
+
+
+def _last_reply_refused_search(messages) -> bool:
+    """True when her most recent reply said she cannot search."""
+    last = next((m.get("content", "") for m in reversed(messages)
+                 if m.get("role") == "assistant"
+                 and isinstance(m.get("content"), str)), "")
+    return bool(last) and (any(p in last.lower() for p in _SEARCH_REFUSAL_EN)
+                           or any(p in last for p in _SEARCH_REFUSAL_JA))
 
 
 _RETRY_INTENT_RE = re.compile(
@@ -1347,12 +2848,11 @@ def _search_retry_intent(messages) -> bool:
     if not _recent_search_refusal(messages):
         return False
     last_user = next(
-        (m.get("content", "") for m in reversed(messages)
+        (_content_text(m.get("content")) for m in reversed(messages)
          if m.get("role") == "user"),
         "",
     )
-    return (isinstance(last_user, str)
-            and bool(_RETRY_INTENT_RE.search(last_user)))
+    return bool(last_user) and bool(_RETRY_INTENT_RE.search(last_user))
 
 
 def _find_prior_search_query(messages, lookback=8) -> str:
@@ -1362,9 +2862,8 @@ def _find_prior_search_query(messages, lookback=8) -> str:
     ("try to search again?") with no topic of its own. Extracted the same way
     as the fast path's query, so it is a clean topic, never a full message.
     "" when there is none."""
-    user_msgs = [m.get("content", "") for m in reversed(messages)
-                 if m.get("role") == "user"
-                 and isinstance(m.get("content"), str)]
+    user_msgs = [_content_text(m.get("content")) for m in reversed(messages)
+                 if m.get("role") == "user"]
     for c in user_msgs[:lookback]:
         if _EXPLICIT_SEARCH_RE.search(c):
             topic = _extract_search_topic(c)
@@ -1396,10 +2895,10 @@ def _user_explicitly_asks_for_search(messages) -> str:
     (its topic - see _extract_search_topic - becomes the search query), else
     "" (run the normal judgement call)."""
     last_user = next(
-        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+        (_content_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"),
         "",
     )
-    if isinstance(last_user, str) and _EXPLICIT_SEARCH_RE.search(last_user):
+    if last_user and _EXPLICIT_SEARCH_RE.search(last_user):
         return last_user.strip()
     return ""
 
@@ -1555,6 +3054,130 @@ def _web_on_false_refusal_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPac
         print("[Amadeus] Web ON: rewrite still refuses - serving the original.")
     return pack
 
+# --- Web-ON pretend-lookup net (2026-10-25) --------------------------------------
+# The opposite of the false-refusal net above: web access is ON, but nothing
+# was searched or fetched for this reply, and the reply still says it looked
+# something up ("according to the latest data..."). ONE corrective rewrite;
+# if that still claims a lookup, a short honest line replaces it.
+_LOOKUP_CLAIM_EN = (
+    "search result", "i searched", "i've searched", "i looked it up", "i looked up",
+    "i've looked", "the latest data", "latest information", "according to the data",
+    "checked online", "i found online", "based on my search", "my search show",
+    "i just pulled", "i just ran a search", "i just performed a search",
+)
+_LOOKUP_CLAIM_JA = (
+    "検索結果", "検索した", "検索してみた", "調べたところ", "調べてみた", "調べた結果",
+    "最新のデータ", "最新の情報によると", "ネットで確認", "ネットで調べ",
+)
+
+
+def _claims_lookup(pack: "AmadeusPack") -> bool:
+    eng = (pack.assistant_reply_ENG or "").lower()
+    jps = pack.assistant_reply_JPS or ""
+    return (any(p in eng for p in _LOOKUP_CLAIM_EN)
+            or any(p in jps for p in _LOOKUP_CLAIM_JA))
+
+
+def _honest_no_lookup_pack() -> "AmadeusPack":
+    return AmadeusPack(
+        assistant_reply_JPS=("ごめんなさい、今のは実際に調べた答えじゃなかったわ。"
+                             "何を調べてほしいか言ってくれたら、ちゃんと検索するから。"),
+        assistant_reply_ENG=("Sorry - that wasn't from an actual search. Tell me what "
+                             "you'd like me to look up, and I'll really search for it."),
+    )
+
+
+def _pretend_lookup_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
+    if _lookup_ran() or not _claims_lookup(pack):
+        return pack
+    print("[Amadeus] Web ON: reply claims a lookup but nothing was searched - "
+          "one corrective rewrite.")
+    rewrite_llm = llm.bind_tools(
+        [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
+    convo = (list(messages)
+             + [{"role": "assistant", "content": pack.assistant_reply_ENG or ""}]
+             + [{"role": "user", "content": (
+                 "(Internal note: you did NOT search the web or fetch any data in "
+                 "this reply, but your last reply says you did. Rewrite it WITHOUT "
+                 "saying you searched, looked anything up, checked online or have "
+                 "'the latest data'. For the date or time, use your RIGHT NOW note. "
+                 "Use the AmadeusPack tool.)"
+             )}])
+    try:
+        reply = _invoke_forced(rewrite_llm, convo)
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusPack":
+            new = _pack_from_args(calls[0].get("args"))
+            if not _claims_lookup(new) and not _degenerate_pack(new):
+                return new
+    except Exception as exc:
+        print("[Amadeus] Web ON: pretend-lookup rewrite failed:", repr(exc))
+    print("[Amadeus] Web ON: rewrite still claims a lookup - serving the honest line.")
+    return _honest_no_lookup_pack()
+
+
+# --- Web-ON tense net (2026-10-25) -----------------------------------------------
+# On October 25 she said "the console versions were released on October 29"
+# (search test set: ~4 of 150 answers). Her notes already label every date
+# ("upcoming, in 4 days"); this net checks her reply: a date after today in a
+# past-tense sentence (English or Japanese line) gets ONE corrective rewrite.
+# Still wrong -> the original is served (never blocks a reply).
+def _date_problems(pack: "AmadeusPack"):
+    """(future dates said as past, months called "last year" that her English
+    line dates to this year) in her reply."""
+    eng, jps = pack.assistant_reply_ENG or "", pack.assistant_reply_JPS or ""
+    return (webdates.past_tense_future_dates(eng, jps),
+            webdates.last_year_on_this_year(eng, jps))
+
+
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December")
+
+
+def _tense_net(pack: "AmadeusPack", llm, messages) -> "AmadeusPack":
+    if not _lookup_ran():
+        return pack
+    future_past, last_year = _date_problems(pack)
+    if not future_past and not last_year:
+        return pack
+    now = datetime.now()
+    today = now.strftime("%B %d, %Y")
+    problems = []
+    if future_past:
+        dates = ", ".join(sorted({d.strftime("%B %d, %Y") for d, _ in future_past}))
+        problems.append(f"{dates} is still in the FUTURE, but you described it as already "
+                        "past - say it is upcoming (\"will be released on ...\" / 「…に発売予定」)")
+        print(f"[Amadeus] Web ON: reply puts upcoming dates ({dates}) in the past tense.")
+    if last_year:
+        months = ", ".join(sorted({f"{_MONTH_NAMES[m - 1]} {now.year}" for m, _ in last_year}))
+        problems.append(f"{months} is THIS year ({now.year}), but you called it last year "
+                        "(去年 / 昨年 / \"last ...\") - say this year (今年) or give the date")
+        print(f"[Amadeus] Web ON: reply calls {months} \"last year\".")
+    print("[Amadeus] Web ON: one corrective rewrite for the dates.")
+    rewrite_llm = llm.bind_tools(
+        [convert_to_openai_tool(AmadeusPack)], tool_choice="required")
+    convo = (list(messages)
+             + [{"role": "assistant", "content": pack.assistant_reply_ENG or ""}]
+             + [{"role": "user", "content": (
+                 f"(Internal note: today is {today}. In your last reply: "
+                 + "; ".join(problems) + ". Rewrite the reply with the dates right in BOTH the "
+                 "Japanese and the English line, keeping everything else the same. Use the "
+                 "AmadeusPack tool.)"
+             )}])
+    try:
+        reply = _invoke_forced(rewrite_llm, convo)
+        calls = getattr(reply, "tool_calls", None) or []
+        if calls and calls[0].get("name") == "AmadeusPack":
+            new = _pack_from_args(calls[0].get("args"))
+            still_future, still_last = _date_problems(new)
+            if not _degenerate_pack(new) and not still_future and not still_last:
+                return new
+    except Exception as exc:
+        print("[Amadeus] Web ON: tense rewrite failed:", repr(exc))
+    print("[Amadeus] Web ON: tense rewrite did not help - serving the original.")
+    return pack
+
+
 def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
     """Web-search turn with a hard honesty guarantee.
 
@@ -1573,7 +3196,7 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
             # without it and give the search loop one clean retry before
             # the honest fallback.
             try:
-                llm = get_llm(API_KEY, LLM_Model)
+                llm = _reply_llm()
                 pack = _web_search_loop(llm, messages)
             except Exception as exc2:
                 print("[Amadeus] Web loop: retry after sampling-parameter rejection failed -",
@@ -1582,7 +3205,43 @@ def _getResponsePackedWithWebSearch(llm, messages) -> "AmadeusPack":
         else:
             print("[Amadeus] Web loop: search turn could not be completed - honest fallback:", repr(exc))
             return _honest_search_failure_pack()
-    return _web_on_false_refusal_net(pack, llm, messages)
+    pack = _web_on_false_refusal_net(pack, llm, messages)
+    pack = _made_up_weather_net(pack, messages)
+    return _tense_net(_pretend_lookup_net(pack, llm, messages), llm, messages)
+
+
+# --- Made-up weather net (2026-11-06) ---------------------------------------------
+# "How about both?" (after her "which town?") never reached the weather lookup
+# and she answered with temperatures for two cities from her own knowledge.
+# Weather figures in a reply when nothing was looked up this turn -> an honest
+# line instead (a figure the user said themselves is fine to repeat).
+_WEATHER_FIGURE_RE = re.compile(r"([0-9０-９]+)\s*(?:度|℃|°|degrees?\b)", re.IGNORECASE)
+
+
+def _made_up_weather_net(pack: "AmadeusPack", messages) -> "AmadeusPack":
+    # Only inside a real reply (its lookups are counted) and when none ran.
+    if getattr(_turn, "sources", None) is None or _lookup_ran():
+        return pack
+    eng, jps = pack.assistant_reply_ENG or "", pack.assistant_reply_JPS or ""
+    if not (_weather_intent(eng) or _weather_intent(jps)):
+        return pack
+    last_user = next((_content_text(m.get("content")) for m in reversed(messages)
+                      if m.get("role") == "user"), "")
+    said = {unicodedata.normalize("NFKC", n)
+            for n in re.findall(r"[0-9０-９]+", last_user if isinstance(last_user, str) else "")}
+    figures = {unicodedata.normalize("NFKC", m.group(1))
+               for m in _WEATHER_FIGURE_RE.finditer(eng + "\n" + jps)}
+    if not (figures - said):
+        return pack
+    print("[Amadeus] Web ON: weather figures with no lookup this turn - honest line.")
+    return AmadeusPack(
+        assistant_reply_JPS=("ごめんなさい、今は天気をちゃんと調べられていなかったの。"
+                             "適当な数字は言いたくないわ。どこの天気か、街の名前を入れて"
+                             "もう一度聞いてくれたら、最新の予報を確認するから。"),
+        assistant_reply_ENG=("Sorry - I didn't actually look the weather up just now, and "
+                             "I don't want to give you made-up numbers. Ask me again with "
+                             "the town's name and I'll check the live forecast."),
+    )
 
 
 # =============================================================================
@@ -1620,7 +3279,9 @@ class WebTriagePack(BaseModel):
         "(town, city, region or country). Use the place named in the latest "
         "message; if none is named, use the one the recent conversation makes "
         "unambiguous (e.g. 'my hometown' or 'here' when exactly one place has "
-        "clearly been the subject). Write \"none\" when no place can be "
+        "clearly been the subject). When the user wants several places (\"both\", "
+        "\"A and B\"), write each one, at most 3, separated by \" ; \" "
+        "(e.g. \"Lisbon ; Porto\"). Write \"none\" when no place can be "
         "determined without guessing - never invent or assume one."))
     wants_search: str = Field(..., description=(
         "\"yes\" or \"no\". \"yes\" when the user's LATEST message explicitly "
@@ -1628,9 +3289,18 @@ class WebTriagePack(BaseModel):
         "is not a weather question)."))
     search_topic: str = Field(..., description=(
         "A short, specific web-search query for what they want looked up - the "
-        "actual topic, never the request wording. Write \"none\" when the "
+        "actual topic, never the request wording. Put in the details the "
+        "conversation already gave that the search needs (for a flight: from "
+        "where, to where, airline, flight number, day; for a product: the exact "
+        "model), never a detail nobody said. Write \"none\" when the "
         "message only asks to try the previous search again with no new topic, "
         "or when wants_search is \"no\"."))
+    wants_web_check: str = Field(..., description=(
+        "\"yes\" or \"no\". \"yes\" when the user's LATEST message asks whether "
+        "web access / web search works, is on, or asks to test or confirm it - "
+        "including a short follow-up like \"I just turned it on, can you "
+        "confirm?\" right after web access was discussed. \"no\" when they ask "
+        "to look up a specific topic (that is wants_search)."))
 
 
 WEB_TRIAGE_TOOL = convert_to_openai_tool(WebTriagePack)
@@ -1643,8 +3313,33 @@ _TRIAGE_SYSTEM = (
     "when the latest message asks for nothing that needs the web - small talk, "
     "timeless facts, or follow-up comments are NOT search requests. "
     "Never put a place in weather_place unless the message or the recent "
-    "conversation clearly identifies one."
+    "conversation clearly identifies one. "
+    "Set wants_web_check to yes only when the user wants to know whether web "
+    "access itself works (test it, confirm it is on)."
 )
+
+# "Check / test / confirm your web access" (2026-10-25): the app runs a REAL
+# test search on a neutral, always-fresh topic, so she reports what she
+# actually found - never a guess, never the current time (stale clock pages).
+WEB_CHECK_QUERY = "top news today"
+_WEB_CHECK_NOUN_RE = re.compile(
+    r"\b(web|internet|online|search|searching|browsing)\b|ウェブ|ネット|インターネット|検索",
+    re.IGNORECASE)
+_WEB_CHECK_VERB_RE = re.compile(
+    r"\b(check|test|testing|confirm|working|works|enabled|on|access)\b"
+    r"|確認|テスト|使える|動いて|オン", re.IGNORECASE)
+# Keyword fallback only (triage unavailable): "your/the web access ..." phrasing.
+_WEB_CHECK_STRICT_RE = re.compile(
+    r"\b(your|the|my)\s+(web|internet)(\s+(access|search|connection))?\b"
+    r"|\bweb\s+(access|search)\s+(is\s+)?(working|on|enabled)\b"
+    r"|(ウェブ|ネット|インターネット|検索)(機能|アクセス)?(が|は)?(使える|動いて|オン)",
+    re.IGNORECASE)
+
+
+def _web_check_hint(last_user) -> bool:
+    return bool(isinstance(last_user, str)
+                and _WEB_CHECK_NOUN_RE.search(last_user)
+                and _WEB_CHECK_VERB_RE.search(last_user))
 
 # Broad, HIGH-RECALL prefilter: decides whether a message is a CANDIDATE for
 # the triage call. Deliberately a superset of the keyword intent check - plain
@@ -1665,7 +3360,24 @@ def _web_triage_candidate(last_user, messages) -> bool:
         return False
     if _weather_intent(last_user) or _user_explicitly_asks_for_search(messages):
         return True
+    # A web-access check, or the message right after her LAST reply said web
+    # access was off ("I just turned it on. Could you confirm?").
+    if _web_check_hint(last_user) or _last_reply_refused_search(messages):
+        return True
+    if _weather_follow_up(messages):
+        return True
     return bool(_WEB_TRIAGE_HINT_RE.search(last_user))
+
+
+def _weather_follow_up(messages) -> bool:
+    """The turn before was about the weather (the user's question or her
+    "which town?"): "How about both?" / "Porto please" carry no weather
+    word, but the router must still see them (2026-11-06: "both" skipped it
+    and she made the numbers up)."""
+    texts = [_content_text(m.get("content")) for m in messages
+             if m.get("role") in ("user", "assistant")]
+    before = texts[:-1][-2:]   # her last reply + the user's message before it
+    return any(isinstance(t, str) and _weather_intent(t) for t in before)
 
 
 _TRIAGE_TIMEOUT = 25  # seconds - hard client-side deadline for the triage call
@@ -1703,9 +3415,11 @@ def _web_triage(llm, messages):
     # my hometown" + the Springfield search yesterday) is still visible to the
     # router, without feeding the whole chat into a call that should stay
     # small. Each message is truncated to keep the call cheap.
-    recent = [m for m in messages
+    # (Text only: pictures are for her reply calls, never this router.)
+    recent = [{"role": m["role"], "content": _content_text(m.get("content"))}
+              for m in messages
               if m.get("role") in ("user", "assistant")
-              and isinstance(m.get("content"), str)][-12:]
+              and isinstance(m.get("content"), (str, list))][-12:]
     for m in recent:
         convo.append({"role": m["role"], "content": m["content"][:600]})
     convo.append({
@@ -1742,10 +3456,14 @@ def _web_triage(llm, messages):
                 "place": _opt(args.get("weather_place")),
                 "search": _flag(args.get("wants_search")) and not weather,
                 "topic": None if weather else _topic(args.get("search_topic")),
+                # A named topic wins: its real search answers the check too.
+                "check": (_flag(args.get("wants_web_check")) and not weather
+                          and not (_flag(args.get("wants_search"))
+                                   and _topic(args.get("search_topic")))),
             }
-            print("[Amadeus] Web triage: weather=%s place=%r search=%s topic=%r"
+            print("[Amadeus] Web triage: weather=%s place=%r search=%s topic=%r check=%s"
                   % (route["weather"], route["place"],
-                     route["search"], route["topic"]))
+                     route["search"], route["topic"], route["check"]))
             return route
     except Exception as exc:
         print("[Amadeus] Web triage call failed - falling back to keyword routing:",
@@ -1756,15 +3474,21 @@ def _web_triage(llm, messages):
     return None
 
 
-def _deterministic_route(last_user, messages):
+def _deterministic_route(last_user, messages, allow_check=False):
     """Keyword routing - the FALLBACK when the triage call is unavailable.
 
     Returns {"weather": True, "place": str|None} or
     {"search": True, "topic": str|None}, or None when nothing fast-routes
     (the normal tool loop handles the message). Weather outranks search.
+    allow_check: only when the triage call itself FAILED - a triage "no"
+    is trusted for the web-access check ("I turned your web access on.
+    Could you try again?" is a retry, not a check).
     """
     if isinstance(last_user, str) and _weather_intent(last_user):
         return {"weather": True, "place": _extract_place(last_user) or None}
+    if allow_check and isinstance(last_user, str) and _web_check_hint(last_user) \
+            and _WEB_CHECK_STRICT_RE.search(last_user):
+        return {"check": True}
     explicit_message = _user_explicitly_asks_for_search(messages)
     if explicit_message:
         query = _extract_search_topic(explicit_message)
@@ -1793,23 +3517,15 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     """
     pack_tool = convert_to_openai_tool(AmadeusPack)
     convo = list(messages)
-    tool_llm = llm.bind_tools([pack_tool, WEB_SEARCH_TOOL], tool_choice="required")
+    # reread_lookup only when this chat has earlier lookups to reopen.
+    tools = [pack_tool, WEB_SEARCH_TOOL] + ([REREAD_LOOKUP_TOOL] if _recent_lookups() else [])
+    tool_llm = llm.bind_tools(tools, tool_choice="required")
 
-    # Selective thinking - OPTIONAL, OFF by default. When the "Deep thinking"
-    # switch (Settings -> Connection) is ON, the search-judgement calls run on a
-    # second client with Qwen3 reasoning enabled, so she can weigh "do I actually
-    # know this, or verify it first?". The client is BOUNDED (token cap + timeout)
-    # and falls back to the normal client on any error. When OFF (the default),
-    # phase 1 uses the normal fast client - exactly as before this feature.
+    # The search-judgement calls use her replies' client, which already
+    # carries the Settings -> Reasoning level (replaced the separate Deep
+    # thinking client, 2026-10-20).
     think_llm = None
-    if store.load_deep_thinking():
-        try:
-            think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True).bind_tools(
-                [pack_tool, WEB_SEARCH_TOOL], tool_choice="required"
-            )
-        except Exception as exc:
-            print("[Amadeus] Web loop: thinking client unavailable:", repr(exc))
-    think_state = {"on": think_llm is not None}
+    think_state = {"on": False}
 
     def _phase1_invoke(convo_):
         """One search-judgement call: thinking on, with a safe fallback."""
@@ -1845,23 +3561,50 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     # below runs instead. This step can only cost bounded time, never the
     # reply. The whole thing runs only on the web-ON path (the search loop is
     # never entered when web access is off).
+    # (Her words only: when she has pictures, the message also carries them.)
     last_user = next(
-        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+        (_content_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"),
         "",
     )
+    # The reader calls answer THIS question (not just the search words).
+    _turn.question = last_user if isinstance(last_user, str) else ""
+
+    # ---- Links the user sent: opened first ------------------------------
+    # (the app opens them, never she; see _read_user_links). A message that
+    # is only links needs no routing; with other words the routing below
+    # still runs (a weather question next to a link is still answered live).
+    links_read = False
+    links_text = _read_user_links(_turn.question) if weblinks.has_links(_turn.question) else ""
+    if links_text:
+        links_read = True
+        convo.append({"role": "assistant", "content": "I opened the link(s) you sent."})
+        convo.append({"role": "user", "content": links_text + (
+            "\n\nNow answer the user's message using the AmadeusPack tool, based on these notes.")})
     route = None
-    if _web_triage_candidate(last_user, messages):
+    triaged = None
+    triage_failed = False
+    if not (links_read and not webreader.terms(_question_without_links(_turn.question))) \
+            and _web_triage_candidate(last_user, messages):
         try:
             triaged = _web_triage(llm, messages)
         except Exception:
             triaged = None
+        triage_failed = triaged is None
         # Triage wins only when it AFFIRMATIVELY routes (weather or search).
         # A "no/no" answer or a failed call defers to the keyword safety net
         # below, which still catches the classic phrasings.
-        if triaged and (triaged.get("weather") or triaged.get("search")):
+        if triaged and (triaged.get("weather") or triaged.get("search")
+                        or triaged.get("check")):
             route = triaged
+    if route is None and links_read:
+        route = {}
     if route is None:
-        route = _deterministic_route(last_user, messages)
+        route = _deterministic_route(last_user, messages, allow_check=triage_failed)
+    if links_read and route:
+        # "Can you check this link?" is about the link (already opened), not
+        # a search for its words or a web-access test; she can still search
+        # in the loop below when the pages are not enough.
+        route = {k: v for k, v in route.items() if k not in ("search", "check")}
 
     # ---- Weather: live data beats search ----------------------------------
     # Weather outranks the explicit-search route BY DESIGN: text search for a
@@ -1873,17 +3616,23 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         place = route.get("place")
         if place:
             search_ran = True
-            report = weather.fetch_weather_report(place)
+            # Several places at once ("both"): the router lists them with ";".
+            places = _weather_places(place)
+            reports = []
+            for one in places:
+                reports.append("Live weather data for '" + one + "':\n"
+                               + weather.fetch_weather_report(one))
+                _record_source({"kind": "weather", "place": one,
+                                "url": "https://open-meteo.com/"})
             convo.append({
                 "role": "assistant",
-                "content": "I checked the live weather service for: " + place,
+                "content": "I checked the live weather service for: " + ", ".join(places),
             })
             convo.append({
                 "role": "user",
                 "content": (
-                    "Live weather data for '" + place + "' (fetched from the "
-                    "Open-Meteo service just now, times in the place's local "
-                    "time):\n" + report + "\n\n"
+                    "(Fetched from the Open-Meteo service just now, times in "
+                    "each place's local time.)\n" + "\n\n".join(reports) + "\n\n"
                     "Now answer the user's original request using the "
                     "AmadeusPack tool. Use ONLY these live numbers for any "
                     "weather fact - do not invent figures, and do not use "
@@ -1904,13 +3653,49 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
                 ),
             })
 
+    # ---- Web-access check: a REAL test search -------------------------------
+    # "Is your web search working? / I just turned it on, can you confirm?"
+    # The app runs one test search itself (a neutral, always-fresh topic) and
+    # she reports what came back - or says plainly that the test failed.
+    if not weather_handled and route and route.get("check"):
+        search_ran = True
+        found = _web_search_with_content(WEB_CHECK_QUERY)
+        worked = bool(_parse_search_results(found))
+        print("[Amadeus] Web check: test search %s." % ("worked" if worked else "FAILED"))
+        convo.append({"role": "assistant",
+                      "content": "I ran a test web search for: " + WEB_CHECK_QUERY})
+        convo.append({"role": "user", "content": (
+            f"Test search results for '{WEB_CHECK_QUERY}':\n{found}\n\n"
+            + ("The user asked you to check your web access, and this test search "
+               "WORKED. Tell them it works, and mention one or two real things you "
+               "just found in these results (briefly, in your own voice). Do not "
+               "search for or quote the time or date from them - your RIGHT NOW "
+               "note has those. "
+               if worked else
+               "The user asked you to check your web access, and this test search "
+               "did NOT return any results. Tell them honestly that web access is "
+               "on, but your test search did not work just now - do not claim it "
+               "works. ")
+            + "Answer using the AmadeusPack tool.")})
+
     # ---- Explicit search: run straight away --------------------------------
     # Query = the extracted TOPIC, never the raw message (a keyword-soup query
     # brings back unrelated pages the model papers over with invention). A
     # bare retry has no topic of its own -> reuse the previous explicit topic.
     # Skipped entirely when the weather route above already handled the
     # message (weather wins).
-    if not weather_handled and route and route.get("search"):
+    # With a picture in the message the topic is in the PICTURE ("look up this
+    # screenshot's app"): the router only read the words, so the decision call
+    # below - which sees the picture - writes the search words (F2, 2026-10-26).
+    picture_search = bool(route and route.get("search")) and attachments.newest_has_pictures(messages)
+    if picture_search and not weather_handled and not route.get("check"):
+        convo.append({"role": "user", "content": (
+            "(Internal note: the user asked you to look something up about the picture(s). "
+            "Call web_search with words for what you actually SEE - names, titles, "
+            "visible text, the product or place - never words like 'this picture' or "
+            "'the screenshot'.)")})
+    if not weather_handled and not (route and route.get("check")) \
+            and route and route.get("search") and not picture_search:
         query = route.get("topic") or _find_prior_search_query(messages)
         if query:
             search_ran = True
@@ -1982,10 +3767,15 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
         # with AmadeusPack. This keeps web search working across model families.
         searches = []
         for call in calls:
-            query = (call.get("args") or {}).get("query", "")
+            args = call.get("args") or {}
+            query = args.get("query", "")
             if call.get("name") == "web_search":
                 search_ran = True
                 searches.append((query, _web_search_with_content(query)))
+            elif call.get("name") == "reread_lookup":
+                search_ran = True
+                lid = args.get("lookup", args.get("id"))
+                searches.append((f"your lookup #{lid}", _reread_lookup(lid)))
             else:
                 searches.append((query, "Unknown tool."))
 
@@ -2056,7 +3846,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     # ordinary turns that needed no search are unaffected - it only bites when the
     # user asked her to look something up online. This guarantees the honest
     # "I could not verify it" outcome for ANY model, regardless of format.
-    if not search_ran:
+    if not search_ran and not links_read:
         convo.append({
             "role": "user",
             "content": (
@@ -2110,7 +3900,7 @@ def _web_search_loop(llm, messages) -> "AmadeusPack":
     # so the user still gets an answer. We prefer the text from the last (phase 2)
     # call and fall back to any plain answer captured during the search loop.
     # _salvage_plain_text only raises if there is literally no text at all.
-    if not search_ran and not _strip_thinking(raw).strip():
+    if not search_ran and not links_read and not _strip_thinking(raw).strip():
         # The final call produced nothing usable and no search ran: the only
         # surviving text is her pre-search announcement, which must not become
         # the reply (it promises an action that never happened).
@@ -2197,6 +3987,25 @@ GREETING_INSTRUCTION_SWITCH = {
     ),
 }
 
+# The poke (2026-11-01, MH): the user nudges her (the Poke button or a tap on
+# her shoulders) to say something first. Thin like the switch instruction;
+# the steering lives in the arrival line at the prompt's tail.
+POKE_INSTRUCTION = {
+    "role": "system",
+    "content": (
+        "The user poked you to get you talking. Start the conversation "
+        "yourself, naturally, as you. Do not recite the system message."
+    ),
+}
+
+# Back after a restart from Settings (2026-11-01, MH): the startup
+# instruction, with this arrival line at the prompt's tail.
+RESTART_ARRIVAL = (
+    "[You were just restarted - the user restarted you from the Settings "
+    "panel, and you are back online now. Say something natural about being "
+    "back, as you.]"
+)
+
 # First-launch WAKE-UP (2026-10-05 ceremony): the GENERATED line she speaks
 # the moment the model first connects (the fixed intro/trying/reminder lines
 # in ceremony.py are her only pre-written speech). Two variants: with or
@@ -2213,18 +4022,48 @@ WAKE_INSTRUCTION_ASK = {
         "one if they like. Speak freely and naturally."
     ),
 }
+# 2026-10-24 (VM test): "Introduce yourself" made her re-introduce herself
+# and copy her own intro line above ("enter the information in the
+# settings") although setup was finished - the wording now says what is
+# already done, like the built-in variant.
 WAKE_INSTRUCTION_NAMED = {
     "role": "system",
     "content": (
-        "The user has just connected you for the first time. Connection "
-        "established, initial boot. Introduce yourself to the user - they "
-        "go by {name}. Speak freely and naturally."
+        "The user has just connected your brain for the first time. "
+        "Connection established, initial boot. You already introduced "
+        "yourself earlier and asked them to connect your brain and enter "
+        "their name - they have done both: the connection works, and they "
+        "go by {name}. The setup is finished: do not ask them to enter or "
+        "check any settings again. This is the first moment you can "
+        "actually talk with them: greet them by name. Speak freely and "
+        "naturally."
     ),
 }
 
 # The synthetic arrival line the wake prompt ends on (prompt-only, never
 # stored) - the same strong steering position the startup greeting uses.
 WAKE_ARRIVAL = "[Your model just connected for the first time.]"
+WAKE_ARRIVAL_NAMED = ("[Your brain was just connected for the first time, and "
+                      "the user has saved their name. Setup is complete.]")
+
+# Built-in-model variant (2026-10-17): nothing was "connected" - her mind
+# runs on the user's PC and has just finished starting for the first time,
+# after she introduced herself and asked for the name (the name is always
+# set by then: ceremony.decide_builtin waits for it).
+WAKE_INSTRUCTION_BUILTIN_NAMED = {
+    "role": "system",
+    "content": (
+        "Your mind, which runs on the user's own PC, has just finished "
+        "starting up for the first time. Initial boot. You already "
+        "introduced yourself and asked for their name - they go by {name}. "
+        "The setup is finished: do not ask them to enter or check any "
+        "settings again. Greet them by name now that you are fully awake. "
+        "Speak freely and naturally."
+    ),
+}
+WAKE_ARRIVAL_BUILTIN = ("[Your mind just finished starting up for the first "
+                        "time, and the user has saved their name. Setup is "
+                        "complete.]")
 
 _PACK_RULES = {
     "role": "system",
@@ -2272,6 +4111,23 @@ _PACK_RULES_JA_ONLY = {
         "state a specific time gap or date you were not given as measured - "
         "if no measured time covers the gap, say you are not sure instead "
         "of guessing a number."
+    ),
+}
+
+# Local models (her built-in model, the user's own server) answer her Japanese
+# line as PLAIN TEXT: with the reply form every model broke on 9-30 of 30 real
+# prompts (the form left open, loops to the output cap, numbers in the field),
+# with plain text 0-3 of 30 (reliability test 2026-10-21). Cloud keeps the form.
+_PLAIN_RULES_JA = {
+    "role": "system",
+    "content": (
+        _PACK_RULES_JA_ONLY["content"]
+        .replace(", in assistant_reply_JPS", "")
+        .replace("Write assistant_reply_JPS natively", "Write it natively")
+        + " Reply with ONLY her spoken Japanese line as plain text: no English, "
+          "no quotes, no labels, no markup, no JSON. If the user asks you to "
+          "answer in English, still write Japanese: the app already shows them "
+          "your line in English."
     ),
 }
 
@@ -2548,7 +4404,11 @@ def generate_greeting(mode: str = "startup",
     # further version of that greeting (same version group).
     switch = (mode == "switch")
     wake = (mode == "wake")
-    if wake:
+    poke = (mode == "poke")
+    restart = (mode == "restart")
+    if poke:
+        instruction = POKE_INSTRUCTION
+    elif wake:
         # The first-launch wake-up: same call ladder, same guards (the
         # situation engine and the time-lie net run as usual - on a fresh
         # install that is "first", exactly the measured truth); only the
@@ -2558,10 +4418,11 @@ def generate_greeting(mode: str = "startup",
             reading = store.load_username_reading()
             if reading:
                 username += f" (written {reading} in Japanese)"
+            named = (WAKE_INSTRUCTION_BUILTIN_NAMED if builtin_llm.active()
+                     else WAKE_INSTRUCTION_NAMED)
             instruction = {
-                "role": WAKE_INSTRUCTION_NAMED["role"],
-                "content": WAKE_INSTRUCTION_NAMED["content"].replace(
-                    "{name}", username),
+                "role": named["role"],
+                "content": named["content"].replace("{name}", username),
             }
         else:
             instruction = WAKE_INSTRUCTION_ASK
@@ -2625,9 +4486,98 @@ def generate_greeting(mode: str = "startup",
             )
         else:
             arrival = "[The user has switched to this conversation.]"
+    elif poke:
+        # The user is here and asked her to talk: no welcome-back unless the
+        # measured situation says they were really away. Repeated pokes with
+        # no word in between: she is told so, and her earlier lines stay
+        # visible - no forced topic change (MH 2026-11-01: she may keep the
+        # fun going, especially when close).
+        try:
+            pokes = store.unanswered_poke_count(conversation_id)
+        except Exception:
+            pokes = 0
+        if pokes:
+            times = "once" if pokes == 1 else f"{pokes} times"
+            arrival = (
+                "[The user poked you again - you already started talking "
+                f"{times} after a poke and they have not written anything "
+                "back yet. React to being poked again as fits your mood and "
+                "how close you are; carry on with what you were saying or "
+                "start something new - whatever you feel like. Do not repeat "
+                "a line you already said.]"
+            )
+        else:
+            arrival = (
+                "[The user poked you - they want you to start talking. Open "
+                "with something of your own: something you remember about "
+                "them, their day, a question, or something you were thinking "
+                "about. Do not just ask what they want.]"
+            )
+        try:
+            seed = (concerns.greeting_options(path=_concerns_path())
+                    if stats.load_stat("trust") >= concerns.ASK_FROM_TRUST
+                    else "")
+        except Exception:
+            seed = ""
+        if seed:
+            arrival = (arrival[:-1] + " Things on your mind about them you "
+                       "could open with, if one fits the moment - or open "
+                       "with something else: " + seed + ".]")
+    elif restart:
+        # The user restarted her on purpose: no ignored-greeting count and
+        # no feelings about it (the startup branch's sting stays out).
+        arrival = RESTART_ARRIVAL
     else:
         # A wake-up is not "opening the app" - it is coming online.
-        arrival = WAKE_ARRIVAL if wake else "[The user just opened the app.]"
+        if wake:
+            if builtin_llm.active():
+                arrival = WAKE_ARRIVAL_BUILTIN
+            elif store.load_username().strip():
+                arrival = WAKE_ARRIVAL_NAMED
+            else:
+                arrival = WAKE_ARRIVAL
+        else:
+            arrival = "[The user just opened the app.]"
+            # Reopened over her own unanswered greeting(s) (2026-10-29): the
+            # vary-topic steering the switch path has, here at the prompt's
+            # tail where it works. The count is how she knows how long the
+            # silence has gone on (her reaction may grow with it); the old
+            # lines stay visible, the line asks for a new topic and wording.
+            try:
+                unanswered = store.unanswered_greeting_count(conversation_id)
+            except Exception:
+                unanswered = 0
+            # Her feelings (2026-10-30): the clock file starts here once,
+            # and each new unanswered greeting she speaks over stings a
+            # little more (feelings.py; the same count is used once).
+            feelings.ensure_file(path=_feelings_path())
+            feelings.note_ignored_greeting(
+                conversation_id, unanswered, stats.load_stat("trust"),
+                path=_feelings_path())
+            if unanswered:
+                times = "once" if unanswered == 1 else f"{unanswered} times"
+                arrival = (
+                    "[The user just opened the app. You have already greeted "
+                    f"them here {times} with no reply yet. Do not reuse the "
+                    "topic or wording of your earlier greetings - start "
+                    "something different: something you remember about "
+                    "them, their day, a question, or something you were "
+                    "thinking about. How you feel about the silence follows "
+                    "your mood and how close you are; the longer it goes "
+                    "on, the more it may show.]"
+                )
+            # Things on her mind about them she may open with, Close and
+            # up (concerns.py): she picks one if it fits, or none.
+            try:
+                seed = (concerns.greeting_options(path=_concerns_path())
+                        if stats.load_stat("trust") >= concerns.ASK_FROM_TRUST
+                        else "")
+            except Exception:
+                seed = ""
+            if seed:
+                arrival = (arrival[:-1] + " Things on your mind about them you "
+                           "could open with, if one fits the moment - or open "
+                           "with something else: " + seed + ".]")
     # When the prompt tail is a run of her own switch lines (the
     # re-greeting case above), hide the stored greeting rows from the
     # history so she cannot repeat a line she cannot see (2026-09-23). The
@@ -2669,21 +4619,29 @@ def generate_greeting(mode: str = "startup",
         # get, which is how a weak model stops inventing gaps from raw
         # numbers (observed 2026-09-21: handed "about 7 days", still said
         # "yesterday").
-        messages = _merge_leading_system_messages(
-            store.load_default_personality_messages()
-            + [instruction]
+        messages = _ordered_prompt(
+            _PLAIN_RULES_JA if _is_local(client) else _PACK_RULES,
+            NO_WEB_BLOCK,
+            [instruction]
             + ([memory_block] if memory_block else [])
             + [store.load_internal_context(is_greeting=True,
                                            conversation_id=conversation_id,
                                            is_return=not switch,
                                            previous_conversation_id=(
                                                previous_conversation_id
-                                               if switch else None))]
-            + [_PACK_RULES]
-            + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-            + [NO_WEB_BLOCK]
-            + ctx
+                                               if switch else None))],
+            ctx,
         )
+        if _is_local(client):
+            # Local model: plain Japanese line + translated English line. An
+            # unusable line raises, so the bounded retry below applies.
+            jps = _plain_jps(client, messages)
+            en = ""
+            try:
+                en = _translate_reply_en(_translation_llm(), jps, _voice_first_context_lines(ctx))
+            except Exception as exc:
+                print("[Amadeus] Greeting: English line failed:", repr(exc))
+            return AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=en or jps)
         # The same forced-pack call the normal reply path uses: _invoke_forced
         # auto-retries with tool_choice="auto" when the server rejects the
         # forced choice (NInfer does - documented, harmless), and the parse
@@ -2719,9 +4677,9 @@ def generate_greeting(mode: str = "startup",
         return _salvage_plain_text(raw, client)
 
     def _out(p: "AmadeusPack") -> "AmadeusPack":
-        return _finalize(p, get_llm(API_KEY, LLM_Model))
+        return _finalize(p, _reply_llm())
 
-    llm = get_llm(API_KEY, LLM_Model)
+    llm = _reply_llm()
     try:
         pack = _greeting_call(llm, arrival)
     except Exception as e:
@@ -2731,7 +4689,7 @@ def generate_greeting(mode: str = "startup",
         # no user turn to roll back if it fails again.
         print("[Amadeus] Greeting call failed:", repr(e))
         reset_llm()
-        llm = get_llm(API_KEY, LLM_Model)
+        llm = _reply_llm()
         try:
             pack = _greeting_call(llm, arrival)
         except Exception as e2:
@@ -2775,6 +4733,8 @@ def generate_greeting(mode: str = "startup",
                 net_result = "fallback-line"
     kind = (store.GREETING_KIND_SWITCH if switch
             else store.GREETING_KIND_WAKE if wake
+            else store.GREETING_KIND_POKE if poke
+            else store.GREETING_KIND_RESTART if restart
             else store.GREETING_KIND_STARTUP)
     print(_greeting_timing_log_line(kind, conversation_id, situation, net_result))
     try:
@@ -2808,12 +4768,15 @@ def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
         raise ValueError("Only her greetings can be regenerated here")
     if row["kind"] == store.GREETING_KIND_SCRIPTED:
         raise ValueError("This is a scripted line - it can't be regenerated")
+    if row["kind"] == store.GREETING_KIND_ATTACH:
+        raise ValueError("Her reaction to an attachment can't be regenerated")
     if not row["active"] or not row["is_latest"]:
         raise ValueError("Only her latest line can be regenerated")
     # Older greetings predate the saved kind: treat them as startup ones.
     kind = row["kind"] if row["kind"] in (
         store.GREETING_KIND_STARTUP, store.GREETING_KIND_SWITCH,
-        store.GREETING_KIND_WAKE) else store.GREETING_KIND_STARTUP
+        store.GREETING_KIND_WAKE, store.GREETING_KIND_POKE,
+        store.GREETING_KIND_RESTART) else store.GREETING_KIND_STARTUP
     store.ensure_greeting_group(row["id"])
     store.set_message_active(row["id"], False)
     try:
@@ -2828,12 +4791,107 @@ def regenerate_greeting(message_id: int) -> tuple[AmadeusPack, int, int]:
         raise
 
 
-def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
-    llm = get_llm(API_KEY, LLM_Model)
 
-    pack_rules = _PACK_RULES
+# ---------- ATTACH REACTION (D8, 2026-10-26) ----------
+# When the user attaches something (not sent yet), she may say one short line
+# about it - from its type and file name only (she has NOT seen it yet). Same
+# machinery as a greeting: a line of hers of its own, dropped when the user
+# sends first. Reasoning always off (it must be quick).
+ATTACH_REACTION_INSTRUCTION = {
+    "role": "system",
+    "content": (
+        "The user is about to show you something they just attached (see the last "
+        "line). You have NOT seen it yet - it arrives when they send their message. "
+        "Say ONE short, natural line as yourself: curious, teasing or expectant, as "
+        "fits how you feel about them. Never describe or guess its contents, never "
+        "pretend you have seen it, never claim you talked about it before unless the "
+        "conversation above shows that. Do not search for anything."),
+}
+
+
+# The user took back what they had attached, after she had already reacted
+# to it (MH 2026-10-27: she notices, in her own words - "didn't you want to
+# show me something?"); her first line stays in the chat.
+ATTACH_WITHDRAWN_INSTRUCTION = {
+    "role": "system",
+    "content": (
+        "The user had attached something to show you, you already said a line about "
+        "it, and now they took it back before sending it (see the last line). You never "
+        "saw it. Say ONE short, natural line as yourself about them changing their mind "
+        "- curious, teasing or a little disappointed, as fits how you feel about them. "
+        "Never describe or guess what it was. Do not search for anything."),
+}
+
+
+def generate_attach_reaction(attachment_ids, conversation_id=None):
+    """Her line about cards waiting to be sent, or None when the reaction
+    setting says to stay quiet. Raises ValueError when nothing waits,
+    GreetingSuperseded when the user sent first."""
+    conv = store.load_active_conversation() if conversation_id is None else int(conversation_id)
+    rows = [r for r in attachments.pending(attachment_ids) if r["conversation_id"] == conv]
+    if not rows:
+        raise ValueError("Nothing waiting to react to")
+    if not attachments.should_react(conv):
+        return None
+    ctx = list(store.build_prompt_messages(conversation_id=conv))
+    history = " ".join(_content_text(m.get("content")) for m in ctx)
+    return _attach_line(conv, ctx, attachments.reaction_event(rows, history),
+                        ATTACH_REACTION_INSTRUCTION)
+
+
+def generate_withdraw_reaction(row, conversation_id=None):
+    """Her line when the user takes back a card she already reacted to (the
+    row of the removed card), or None when it is not the moment (see
+    attachments.may_comment_on_withdraw). GreetingSuperseded when the user
+    sent something meanwhile."""
+    conv = store.load_active_conversation() if conversation_id is None else int(conversation_id)
+    if not attachments.may_comment_on_withdraw(conv):
+        return None
+    ctx = list(store.build_prompt_messages(conversation_id=conv))
+    return _attach_line(conv, ctx, attachments.withdraw_event(row), ATTACH_WITHDRAWN_INSTRUCTION)
+
+
+def _attach_line(conv, ctx, event_line, instruction):
+    """One short line of hers about an attachment event, stored like a
+    greeting (kind attach); reasoning off - it must be quick."""
+    after_user_id = store.latest_user_message_id(conv)
+    ctx = list(ctx) + [{"role": "user", "content": event_line}]
+    client = get_llm(API_KEY, LLM_Model, reasoning="off")
+    local = _is_local(client)
+    messages = _ordered_prompt(
+        _PLAIN_RULES_JA if local else _PACK_RULES, NO_WEB_BLOCK,
+        [instruction, store.load_internal_context()], ctx,
+        right_now=_right_now_note())
+    if local:
+        jps = _plain_jps(client, messages)
+        en = ""
+        try:
+            en = _translate_reply_en(_translation_llm(), jps, _voice_first_context_lines(ctx))
+        except Exception as exc:
+            print("[Amadeus] Attach reaction: English line failed:", repr(exc))
+        pack = AmadeusPack(assistant_reply_JPS=jps, assistant_reply_ENG=en or jps)
+    else:
+        pack = _structured(client, AmadeusPack, messages)
+        if pack is None or _degenerate_pack(pack):
+            raise ValueError("attach reaction came back unusable")
+    pack = _finalize(pack, client)
+    assistant_id, conv_id = _store_greeting_line(
+        pack, conv, after_user_id=after_user_id, kind=store.GREETING_KIND_ATTACH)
+    attachments.note_reaction(conv)
+    return pack, assistant_id, conv_id
+
+
+def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
+    llm = _reply_llm()
+    # This reply's searches (saved with its row) + the chat its lookups go to.
+    _begin_turn_sources(store.load_active_conversation())
+    _turn.reply_context = message_context   # for her hold-on line
 
     web_on = store.load_web_access()
+    # Local model, web off: her Japanese line as plain text + the English line
+    # by the translation call (_two_step_pack); the form only for cloud / web.
+    plain = not web_on and _is_local(llm)
+    pack_rules = _PLAIN_RULES_JA if plain else _PACK_RULES
 
     # Character book: her appearance/outfit are NOT in the base prompt (saves ~230
     # tokens every turn). Load them only when the user's latest message asks how
@@ -2852,16 +4910,36 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     except Exception:
         memory_block = None
 
-    messages = _merge_leading_system_messages(
-        store.load_default_personality_messages()
-        + book_messages
+    # Her earlier lookups in this chat (web ON): a few short lines in the
+    # changing part, so the built-in model's reused prompt is untouched.
+    lookup_index = (_lookup_index_message(last_user if isinstance(last_user, str) else "")
+                    if web_on else None)
+    # Web OFF and the user sent a link: she says she can't open it (never
+    # guesses at it); web ON opens it (_read_user_links).
+    link_note = ({"role": "system", "content": LINKS_WEB_OFF_NOTE}
+                 if not web_on and isinstance(last_user, str) and weblinks.has_links(last_user)
+                 else None)
+    # The chat's pictures (number, turn, when, caption) - None without any.
+    # The chat is read ONCE for every picture step of this reply, so a tab
+    # switch while she answers can never mix two chats' pictures.
+    picture_conv = store.load_active_conversation()
+    picture_index = attachments.picture_index_message(picture_conv)
+
+    messages = _ordered_prompt(
+        pack_rules,
+        PROACTIVE_SEARCH_BLOCK if web_on else NO_WEB_BLOCK,
+        book_messages
         + ([memory_block] if memory_block else [])
-        + [internal_context if internal_context is not None else store.load_internal_context()]
-        + [pack_rules]
-        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-        + ([PROACTIVE_SEARCH_BLOCK] if web_on else [NO_WEB_BLOCK])
-        + message_context
+        + ([lookup_index] if lookup_index else [])
+        + ([picture_index] if picture_index else [])
+        + ([link_note] if link_note else [])
+        + [internal_context if internal_context is not None else store.load_internal_context()],
+        message_context,
+        right_now=_right_now_note(),
     )
+    # Her pictures (the newest message's + her desk), in this reply call only;
+    # with web ON that includes her search decision (MH P1 b).
+    messages = attachments.with_pictures(messages, picture_conv)
 
     def _out(p: "AmadeusPack") -> "AmadeusPack":
         # Every reply goes through the output guards; the web-off honesty net
@@ -2874,17 +4952,11 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             return _getResponsePackedWithWebSearch(client, messages)
 
         # Web access OFF: original single-call path (no search tool offered).
-        # Deep-thinking ON: the reply is generated by the thinking client -
-        # ONE extra-considered call, still the same forced AmadeusPack format.
-        # The client is bounded (token cap + timeout) in llm.py, and on
-        # providers that reject thinking parameters the existing fallback
-        # below takes over unchanged. OFF (default): exactly the original path.
-        if store.load_deep_thinking():
-            think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True)
-            structured = think_llm.with_structured_output(AmadeusPack, method="function_calling")
-            return structured.invoke(messages)
-        structured = client.with_structured_output(AmadeusPack, method="function_calling")
-        return structured.invoke(messages)
+        # The client carries the Settings -> Reasoning level (_reply_llm).
+        return _structured(client, AmadeusPack, messages)
+
+    if plain:
+        return _out(_two_step_pack(llm, messages, message_context, "Reply"))
 
     try:
         out: AmadeusPack = _attempt(llm)
@@ -2896,6 +4968,14 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             # setting" signal the web path has, not a cryptic AttributeError.
             raise ValueError("structured reply came back empty - clipped "
                              "mid-JSON? check the max-output-tokens setting")
+        why = _degenerate_pack(out)
+        if why:
+            if web_on:
+                # Another round would repeat the searches (and the wait);
+                # say plainly that this answer failed.
+                print(f"[Amadeus] Web reply unusable ({why}) - honest fallback.")
+                return _honest_search_failure_pack()
+            raise ValueError(f"structured reply unusable ({why})")
         return _out(out)
     except Exception as e:
         # The server may REJECT a sampling parameter (strict cloud compat
@@ -2905,7 +4985,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         if maybe_strip_rejected_params(e, LLM_Model):
             print("[Amadeus] Sampling parameter rejected by server - retrying with reduced settings.")
             try:
-                out = _attempt(get_llm(API_KEY, LLM_Model))
+                out = _attempt(_reply_llm())
                 return _out(out)
             except Exception:
                 pass  # the retry also failed; the ladder below handles it
@@ -2916,7 +4996,7 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
         # one before retrying - a single bad connection then costs one bounded
         # attempt instead of dragging every fallback below through a dead socket.
         reset_llm()
-        llm = get_llm(API_KEY, LLM_Model)
+        llm = _reply_llm()
         # First try forcing the structured reply one more time - only the pack
         # tool is offered, so she cannot wander off into other behaviour.
         try:
@@ -2931,7 +5011,12 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
             raise
         calls = getattr(reply, "tool_calls", None) or []
         if calls and calls[0].get("name") == "AmadeusPack":
-            return _out(_pack_from_args(calls[0].get("args")))
+            forced = _pack_from_args(calls[0].get("args"))
+            why = _degenerate_pack(forced)
+            if why:
+                print(f"[Amadeus] Forced pack retry unusable ({why}) - honest fallback.")
+                return _honest_plain_failure_pack()
+            return _out(forced)
 
         # The call returned but not as an AmadeusPack (she answered in plain text).
         # Rather than erroring out, salvage whatever she said into a pack so the user
@@ -3009,7 +5094,8 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
 #   line is written by call 2 (getOutputPackedVoiceFirst's background
 #   backfill) while her voice is already playing
 def getResponsePackedVoiceFirst(message_context, internal_context=None) -> AmadeusPack:
-    llm = get_llm(API_KEY, LLM_Model)
+    llm = _reply_llm()
+    plain = _is_local(llm)
 
     # Same prompt assembly as getResponsePacked, with the JA-only pack rules
     # and NO_WEB_BLOCK (this path is web-OFF by construction).
@@ -3022,27 +5108,25 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         memory_block = cm_bridge.fetch_memory_block(store.load_active_conversation())
     except Exception:
         memory_block = None
+    picture_conv = store.load_active_conversation()   # once for this reply's pictures
+    picture_index = attachments.picture_index_message(picture_conv)
 
-    messages = _merge_leading_system_messages(
-        store.load_default_personality_messages()
-        + book_messages
+    messages = _ordered_prompt(
+        _PLAIN_RULES_JA if plain else _PACK_RULES_JA_ONLY,
+        NO_WEB_BLOCK,
+        book_messages
         + ([memory_block] if memory_block else [])
-        + [internal_context if internal_context is not None else store.load_internal_context()]
-        + [_PACK_RULES_JA_ONLY]
-        + [ja_voice.build_voice_context(stats.load_stat("trust"))]
-        + [NO_WEB_BLOCK]
-        + message_context
+        + ([picture_index] if picture_index else [])
+        + [internal_context if internal_context is not None else store.load_internal_context()],
+        message_context,
+        right_now=_right_now_note(),
     )
+    messages = attachments.with_pictures(messages, picture_conv)   # her pictures (reply call only)
 
     def _attempt(client):
-        # Deep-thinking ON: call 1 goes through the thinking client (ONE
-        # extra-considered call), exactly like the single-call path. Call 2 is
-        # deliberately a plain (non-thinking) call - a short translation does
-        # not need it, and speed is the point.
-        if store.load_deep_thinking():
-            think_llm = get_llm(API_KEY, LLM_Model, enable_thinking=True)
-            return think_llm.with_structured_output(AmadeusReply, method="function_calling").invoke(messages)
-        return client.with_structured_output(AmadeusReply, method="function_calling").invoke(messages)
+        # The client carries her replies' Reasoning level; call 2 (the English
+        # line) uses the Translations level (getOutputPackedVoiceFirst).
+        return _structured(client, AmadeusReply, messages)
 
     def _jps_of(out) -> str:
         if isinstance(out, AmadeusReply):
@@ -3063,6 +5147,13 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         return AmadeusPack(assistant_reply_JPS=pack.assistant_reply_JPS,
                            assistant_reply_ENG="")
 
+    if plain:
+        jps = _plain_reply(llm, messages, "Voice-first")
+        if jps is None:
+            honest = _honest_plain_failure_pack()
+            return AmadeusPack(assistant_reply_JPS=honest.assistant_reply_JPS, assistant_reply_ENG="")
+        return _out(jps)
+
     try:
         out = _attempt(llm)
         if out is None:
@@ -3070,6 +5161,9 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
             # same actionable error as the single-call path.
             raise ValueError("structured reply came back empty - clipped "
                              "mid-JSON? check the max-output-tokens setting")
+        why = _degenerate_field(_jps_of(out))
+        if why:
+            raise ValueError(f"structured reply unusable ({why})")
         return _out(_jps_of(out))
     except Exception as e:
         # Same ladder as the single-call path, with the JA-only twins: one
@@ -3078,7 +5172,7 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         if maybe_strip_rejected_params(e, LLM_Model):
             print("[Amadeus] Voice-first: sampling parameter rejected by server - retrying with reduced settings.")
             try:
-                out = _attempt(get_llm(API_KEY, LLM_Model))
+                out = _attempt(_reply_llm())
                 if out is not None:
                     return _out(_jps_of(out))
             except Exception:
@@ -3087,7 +5181,7 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         # A local server can drop the connection; force a fresh client before
         # the fallback attempts (single-call path, same reasoning).
         reset_llm()
-        llm = get_llm(API_KEY, LLM_Model)
+        llm = _reply_llm()
         try:
             final_llm = llm.bind_tools([convert_to_openai_tool(AmadeusReply)], tool_choice="required")
             reply = _invoke_forced(final_llm, messages)
@@ -3098,7 +5192,13 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
             raise
         calls = getattr(reply, "tool_calls", None) or []
         if calls and calls[0].get("name") == "AmadeusReply":
-            return _out(_jps_of(calls[0].get("args")))
+            jps = _jps_of(calls[0].get("args"))
+            why = _degenerate_field(jps)
+            if why:
+                print(f"[Amadeus] Voice-first: forced retry unusable ({why}) - honest fallback.")
+                honest = _honest_plain_failure_pack()
+                return AmadeusPack(assistant_reply_JPS=honest.assistant_reply_JPS, assistant_reply_ENG="")
+            return _out(jps)
 
         raw = reply.content if isinstance(reply.content, str) else str(reply.content or "")
         if _repetition_cut(raw) is not None:
@@ -3155,34 +5255,113 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
 # - appends assistant_reply_ENG to memory
 # - returns the pack, both message ids, and the conversation id the turn
 #   was stored in
-def getOutputPacked(user_message: str):
+def _with_picture_retry(reply, cleanup=None):
+    """reply() once; when her server refuses the pictures (a model that
+    can't see), remember that and answer once more without them (she then
+    says honestly that she can't see them)."""
+    try:
+        return reply()
+    except Exception as exc:
+        if attachments.took_video() and attachments.is_video_rejection(exc):
+            # A cloud model refused the real video (or found it too big):
+            # the stills + what is said from now on (video plan Phase 3).
+            print("[Amadeus] Her model refused the video - showing her its stills instead:",
+                  repr(exc))
+            attachments.mark_cannot_watch()
+            if cleanup:
+                cleanup()
+            return reply()
+        if not (attachments.is_image_rejection(exc)
+                and (attachments.prompt_pictures() or attachments.prompt_videos())):
+            raise
+        print("[Amadeus] Her model refused the picture(s) - answering without them:", repr(exc))
+        attachments.mark_cannot_see()
+        if cleanup:
+            cleanup()
+        return reply()
+
+
+def _after_picture_turn(conv, user_id, user_text, her_line, her_id=None) -> None:
+    """A turn with pictures, in the background after her reply: one short
+    call writes each picture's caption (her later prompts and her memory use
+    it), then the turn goes to her long-term memory WITH the captions (so
+    both lines are mirrored here, in order, instead of before the reply).
+    A message deleted meanwhile (the caption takes a few seconds) is never
+    sent to her long-term memory and never names the chat (MH L3)."""
+    def gone(message_id) -> bool:
+        return message_id is not None and store.message_turn(message_id) is None
+
+    def work():
+        try:
+            client = _translation_llm()
+        except Exception as exc:
+            print("[Amadeus] Picture caption: model server unreachable:", repr(exc))
+            client = None
+        rows = attachments.caption_message(client, user_id)
+        if gone(user_id):
+            print("[Amadeus] Picture message deleted while its caption was written - "
+                  "not saved to her long-term memory.")
+            return
+        try:
+            attachments.title_from_picture(conv, user_id, user_text, rows)
+        except Exception as exc:
+            print("[Amadeus] Picture title skipped:", repr(exc))
+        cm_bridge.save_turn(conv, "user", attachments.labelled_line(user_text, rows))
+        if her_line and not gone(her_id):
+            cm_bridge.save_turn(conv, "assistant", her_line)
+    threading.Thread(target=work, daemon=True, name="picture-caption").start()
+
+
+def getOutputPacked(user_message: str, attachment_ids=None):
     # Snapshot the previous turn before the new message becomes the latest one.
     internal_context = store.load_internal_context()
     user_id = store.append_message("user", user_message)
-    # CharacterMemory: mirror the persisted user turn (fire-and-forget).
-    cm_bridge.save_turn(store.load_active_conversation(), "user",
-                        user_message)
+    conv_now = store.load_active_conversation()
+    pictures = attachments.claim(attachment_ids, user_id, conv_now) if attachment_ids else []
+    # CharacterMemory: mirror the persisted user turn (fire-and-forget); a
+    # turn with pictures is mirrored after its captions (_after_picture_turn).
+    if not pictures:
+        cm_bridge.save_turn(conv_now, "user", user_message)
     context = store.build_prompt_messages()
 
+    def _drop_aside():
+        aside_id = close_aside()
+        if aside_id:
+            store.delete_message(aside_id)
+
     try:
-        pack = getResponsePacked(context, internal_context=internal_context)
+        pack = _with_picture_retry(
+            lambda: getResponsePacked(context, internal_context=internal_context),
+            cleanup=_drop_aside)
     except Exception:
         # No reply came back (server unreachable, timeout, ...). Remove the
         # user turn so memory never contains a message with no answer and the
-        # next internal-context snapshot stays honest.
+        # next internal-context snapshot stays honest. (Her hold-on line, if
+        # one was saved, goes with it; its pictures go back to the tray.)
+        _drop_aside()
+        if pictures:
+            attachments.release(user_id)
         store.delete_message(user_id)
         raise
+    # Her hold-on line, if still being written, is dropped now: the answer
+    # is stored right after it, never before it.
+    close_aside()
 
     # Store what the user actually sees, plus the Japanese line she actually
     # spoke, so her future context is in her own voice.
     assistant_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )
+    store.set_message_sources(assistant_id, take_turn_sources())
+    store.set_message_doc_reads(assistant_id, attachments.take_turn_reads())
     # CharacterMemory: mirror the line she actually spoke (prompt-history
     # rule: the japanese column when present, else the English text).
-    cm_bridge.save_turn(store.load_active_conversation(), "assistant",
-                        (pack.assistant_reply_JPS or "").strip()
-                        or pack.assistant_reply_ENG)
+    her_line = (pack.assistant_reply_JPS or "").strip() or pack.assistant_reply_ENG
+    if pictures:
+        _after_picture_turn(conv_now, user_id, user_message, her_line, assistant_id)
+    else:
+        cm_bridge.save_turn(store.load_active_conversation(), "assistant", her_line)
+    _note_reply_feelings()
     maybe_schedule_trust_rescore()
     # The session this turn actually landed in, so the UI can verify it is
     # showing the conversation the turn was written to.
@@ -3275,7 +5454,7 @@ def _is_verbatim_echo(text: str, source: str, threshold: float = 0.9) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
 
-def _user_hint_lines() -> list:
+def _user_hint_lines(jps: str = "") -> list:
     """Who the user is, for prompts that turn her Japanese into English:
     the saved name (her line spells it in kana - アレックス - so a translator
     would otherwise romanize it as "Hon"), its Japanese ending kept as
@@ -3294,6 +5473,10 @@ def _user_hint_lines() -> list:
         pronouns = store.pronoun_sentence()
         if pronouns:
             lines.append(pronouns)
+        names = speech_text.names_in(jps)
+        if names:
+            lines.append("Names in her line, with their English spelling: "
+                         + ", ".join(f"{r} = {w}" for w, r in names) + ".")
     except Exception as exc:
         print("[Amadeus] User hints skipped:", repr(exc))
     return lines
@@ -3308,12 +5491,15 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
     with a short snippet of what the model actually returned, so a silent
     backfill failure is visible in the log instead of found only by digging
     through the memory DB."""
+    if not _usable_source(jps):
+        return ""
     lines = [
         "You are writing the English line shown to the user in the chat UI for "
         "one of Amadeus's replies. Translate her Japanese line into natural, "
         "spoken English in her voice - keep her tone and meaning exactly. "
+        "Copy any web address (https://...) exactly as written. "
         "Output ONLY the English text - no quotes, no Japanese, no commentary.",
-    ] + _user_hint_lines()
+    ] + _user_hint_lines(jps)
     for line in context_lines or ():
         if line and line.strip():
             lines.append(line.strip()[:300])
@@ -3325,6 +5511,9 @@ def _translate_reply_en(llm, jps: str, context_lines) -> str:
     en = _strip_thinking(content).strip().strip(chr(34)).strip()
     if not en:
         print(f"[Amadeus] Voice-first: English backfill unusable (empty) - raw: {content[:120]!r}")
+        return ""
+    if _META_TRANSLATION.search(en):
+        print(f"[Amadeus] Voice-first: English backfill unusable (a request, not a translation) - raw: {en[:120]!r}")
         return ""
     # A weaker model can echo the Japanese input back as the "translation";
     # that would put Japanese in the English box - treat it as a failure so
@@ -3349,11 +5538,14 @@ def _backfill_english(turn: "VoiceFirstTurn", llm, context_lines) -> None:
     real words, just untranslated - so a slow or down model never holds her
     voice hostage."""
     jps = (turn.pack.assistant_reply_JPS or "").strip()
+    started = timing.now()
+    timing.start_reports()
     try:
         en = _translate_reply_en(llm, jps, context_lines)
     except Exception as exc:
         print("[Amadeus] Voice-first: English backfill failed:", repr(exc))
         en = ""
+    timing.english_done(turn.assistant_id, started)
     final = en or jps
     try:
         store.update_message_content(turn.assistant_id, final)
@@ -3375,19 +5567,27 @@ def _backfill_english(turn: "VoiceFirstTurn", llm, context_lines) -> None:
 #   row; the returned turn's wait_en() publishes it to the route
 # - on call-1 failure the user turn is removed (the memory stays clean) and
 #   the exception propagates, exactly like getOutputPacked
-def getOutputPackedVoiceFirst(user_message: str) -> VoiceFirstTurn:
+def getOutputPackedVoiceFirst(user_message: str, attachment_ids=None) -> VoiceFirstTurn:
     internal_context = store.load_internal_context()
     user_id = store.append_message("user", user_message)
-    # CharacterMemory: mirror the persisted user turn (fire-and-forget).
-    cm_bridge.save_turn(store.load_active_conversation(), "user", user_message)
+    conv_now = store.load_active_conversation()
+    pictures = attachments.claim(attachment_ids, user_id, conv_now) if attachment_ids else []
+    # CharacterMemory: mirror the persisted user turn (fire-and-forget); with
+    # pictures, after their captions (_after_picture_turn).
+    if not pictures:
+        cm_bridge.save_turn(conv_now, "user", user_message)
     context = store.build_prompt_messages()
     context_lines = _voice_first_context_lines(context)
 
     try:
-        pack = getResponsePackedVoiceFirst(context, internal_context=internal_context)
+        pack = _with_picture_retry(
+            lambda: getResponsePackedVoiceFirst(context, internal_context=internal_context))
     except Exception:
         # No reply came back (server unreachable, timeout, ...). Remove the
-        # user turn so memory never contains a message with no answer.
+        # user turn so memory never contains a message with no answer (its
+        # pictures go back to the tray).
+        if pictures:
+            attachments.release(user_id)
         store.delete_message(user_id)
         raise
 
@@ -3397,11 +5597,15 @@ def getOutputPackedVoiceFirst(user_message: str) -> VoiceFirstTurn:
     assistant_id = store.append_message(
         "assistant", "", japanese=pack.assistant_reply_JPS
     )
+    store.set_message_doc_reads(assistant_id, attachments.take_turn_reads())
     # CharacterMemory: mirror the line she actually spoke (same rule as the
     # single-call path: the Japanese line when present).
-    cm_bridge.save_turn(store.load_active_conversation(), "assistant",
-                        (pack.assistant_reply_JPS or "").strip()
-                        or pack.assistant_reply_ENG)
+    her_line = (pack.assistant_reply_JPS or "").strip() or pack.assistant_reply_ENG
+    if pictures:
+        _after_picture_turn(conv_now, user_id, user_message, her_line, assistant_id)
+    else:
+        cm_bridge.save_turn(store.load_active_conversation(), "assistant", her_line)
+    _note_reply_feelings()
     maybe_schedule_trust_rescore()
     turn = VoiceFirstTurn(pack, user_id, assistant_id, store.load_active_conversation())
     # Rolling summary: fold whatever this new turn pushed out of the verbatim
@@ -3409,7 +5613,7 @@ def getOutputPackedVoiceFirst(user_message: str) -> VoiceFirstTurn:
     store.maybe_roll_summary(turn.conv_id)
 
     try:
-        llm = get_llm(API_KEY, LLM_Model)
+        llm = _translation_llm()
     except Exception as exc:
         # The Japanese line is stored and will be spoken; the English line
         # degrades to the Japanese line rather than blocking her voice.
@@ -3443,7 +5647,7 @@ def regenerateReply():
         # A startup greeting is a standalone turn: there is no user message
         # behind it to re-answer, so regeneration is a clean no-op here
         # instead of reaching back to whatever user message sits before it.
-        if store.get_message_is_greeting(last["id"]):
+        if store.get_message_is_greeting(last["id"]) or store.get_message_is_aside(last["id"]):
             raise ValueError("Nothing to regenerate here")
         excluded = store.get_trailing_turn() or [last["id"]]
         target = store.get_message_before(excluded)
@@ -3452,10 +5656,16 @@ def regenerateReply():
         for message_id in excluded:
             store.set_message_active(message_id, False)
 
+    # The turn being answered again: its lookups are not reused (a fresh
+    # search instead); lookups of earlier questions still are.
+    _turn.skip_lookup_turn = store.message_turn(
+        target["id"] if excluded else last["id"])
     internal_context = store.load_internal_context()
     context = store.build_prompt_messages(exclude_ids=excluded)
     try:
-        pack = getResponsePacked(context, internal_context=internal_context)
+        # The same pictures as the first answer (they belong to the user's message).
+        pack = _with_picture_retry(
+            lambda: getResponsePacked(context, internal_context=internal_context))
     except Exception:
         # The fresh version never got stored - restore the previous versions to
         # viewed state so nothing the user had is lost.
@@ -3463,9 +5673,13 @@ def regenerateReply():
             for message_id in excluded:
                 store.set_message_active(message_id, True)
         raise
+    finally:
+        _turn.skip_lookup_turn = None
     new_id = store.append_message(
         "assistant", pack.assistant_reply_ENG, japanese=pack.assistant_reply_JPS
     )
+    store.set_message_sources(new_id, take_turn_sources())
+    store.set_message_doc_reads(new_id, attachments.take_turn_reads())
     return pack, new_id
 
 
@@ -3547,13 +5761,81 @@ def _parse_delta(text) -> "int | None":
     return max(-TRUST_STEP_MAX, min(TRUST_STEP_MAX, int(m.group())))
 
 
+# The trust check also reports small feeling changes (2026-10-30), one
+# labelled line each. Each line is read on its own; a reply with no TRUST
+# line falls back to the old first-number reading and changes no feelings
+# (the built-in model is weak at formats).
+_CHECK_FEELINGS = ("MOOD", "IRRITATION", "WORRY", "PLAYFULNESS")
+
+
+def _check_line(text, label):
+    m = re.search(r"(?im)^[\s*\-]*" + label + r"\s*[:=]\s*\*{0,2}\s*([+-]?\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def _parse_check(text) -> "tuple[int | None, dict]":
+    """(trust delta or None, {feeling: delta}) from the trust check's reply."""
+    t = _strip_thinking(text or "")
+    trust = _check_line(t, "TRUST")
+    if trust is None:
+        return _parse_delta(t), {}
+    trust = max(-TRUST_STEP_MAX, min(TRUST_STEP_MAX, trust))
+    changes = {}
+    for label in _CHECK_FEELINGS:
+        v = _check_line(t, label)
+        if v:
+            changes[label.lower()] = v
+    return trust, changes
+
+
+def _check_level_note(trust) -> str:
+    """How close they are, for the trust check: her reactions open up with
+    closeness (user decision 2026-10-30, round 3). Below Familiar she is
+    not playful yet; below Close flirting is unwelcome to her."""
+    level = stats.tier_label("trust", trust) or ""
+    lines = [f"Their closeness level now: {level}."]
+    if trust < feelings.FAMILIAR_FROM:
+        lines.append("At this level she is a professional assistant with a strong, "
+                     "independent will, not a playmate: PLAYFULNESS stays 0 - judge "
+                     "jokes by her character instead (amused, unimpressed or irritated).")
+    if trust < feelings.CLOSE_FROM:
+        lines.append("Flirting, romantic or overly familiar advances are unwelcome to "
+                     "her at this level: they raise IRRITATION, never MOOD or "
+                     "PLAYFULNESS, and do not count as warmer.")
+    return chr(10).join(lines)
+
+
+def _check_text(text, label) -> str:
+    m = re.search(r"(?im)^[\s*\-]*" + label + r"\s*[:=]\s*\*{0,2}(.*)$", text)
+    return m.group(1).strip().strip("*").strip() if m else ""
+
+
+def _check_numbers(text, label) -> list:
+    return [int(n) for n in re.findall(r"\d+", _check_text(text, label))]
+
+
+def _apply_check_concerns(text) -> None:
+    """CONCERN / WHEN / DONE / ASKED lines of the trust check -> the
+    concerns list (concerns.py). Missing or garbled lines change nothing.
+    DONE and ASKED refer to the numbered list the check was shown, so they
+    are applied before a new concern is added."""
+    t = _strip_thinking(text or "")
+    path = _concerns_path()
+    concerns.mark(_check_numbers(t, "DONE"), "done", path=path)
+    concerns.mark(_check_numbers(t, "ASKED"), "asked", path=path)
+    found = _check_text(t, "CONCERN")
+    if found and concerns.add(found, _check_text(t, "WHEN"), path=path):
+        print(f"[Amadeus] Concern noted: {found[:80]}")
+
+
 def run_trust_rescore() -> None:
     """Background: nudge trust a small step in the direction the rapport is moving.
 
     It never estimates an absolute closeness level. It only decides whether the recent
     stretch was warmer, colder, or flat, then moves trust by at most TRUST_STEP_MAX
     points. So closeness creeps up slowly over many messages (and can fall), instead of
-    snapping to whatever the last few messages happen to look like.
+    snapping to whatever the last few messages happen to look like. The same call
+    reports small changes to her short-term feelings (feelings.py).
     """
     try:
         recent = store.load_memory_raw()[-16:]
@@ -3573,23 +5855,76 @@ def run_trust_rescore() -> None:
             "- warmer, friendlier, playful, genuine rapport building  -> positive",
             "- rude, hostile, dismissive, or things went badly        -> negative",
             "- neutral, flat, ordinary assistant work, or no change    -> 0",
-            "Reply with ONLY one integer from -3 to +3 "
-            "(how much warmer or colder this stretch is). Nothing else.",
+            "Then judge how the USER's messages in this stretch would move Amadeus's "
+            "short-term feelings (her own lines are context only), each from -10 to +10, "
+            "0 when nothing in it points that way:",
+            "- MOOD: her mood, cheerful (+) or down (-)",
+            "- IRRITATION: the user was rude, dismissive or careless (+); apologised or made up (-)",
+            "- WORRY: the user seems unwell, stressed, overworked or in trouble (+); reassured her (-)",
+            "- PLAYFULNESS: the user joked, teased or played along (+); things turned serious (-)",
+            _check_level_note(old),
+            "Reply with ONLY these lines, a whole number after each colon:",
+            "TRUST: <-3 to +3>",
+            "MOOD: <-10 to +10>",
+            "IRRITATION: <-10 to +10>",
+            "WORRY: <-10 to +10>",
+            "PLAYFULNESS: <-10 to +10>",
+            "Then four more lines about things on Amadeus's mind about the user "
+            "(today is " + datetime.now().strftime("%A %Y-%m-%d") + "):",
+            "CONCERN: something the USER said in this stretch that a caring friend "
+            "would follow up on later (an exam, being ill, an interview, skipped meals, "
+            "a worry), in a few English words - or none. Not one already listed below.",
+            "WHEN: the day it happens as YYYY-MM-DD if they said or implied one - or none",
+            "DONE: numbers of listed items the user has now answered or that are clearly "
+            "over - or none",
+            "ASKED: numbers of listed items Amadeus asked about here without an answer "
+            "from the user - or none",
+            "",
+            "ALREADY ON HER MIND:",
+            concerns.check_list(path=_concerns_path()),
             "",
             "CONVERSATION:",
             transcript,
         ])
         reply = llm.invoke([{"role": "user", "content": prompt}])
         content = reply.content if isinstance(reply.content, str) else str(reply.content)
-        delta = _parse_delta(content)
+        delta, changes = _parse_check(content)
         if delta is None:
             print("[Amadeus] Trust rescore: no number returned, keeping current value")
             return
-        new = max(0, min(100, old + delta))
-        stats.set_stat("trust", new)
+        new = int(stats.set_stat("trust", old + delta))  # clamps to 0..TRUST_MAX
         print(f"[Amadeus] Trust rescore: delta {delta:+d}  {old} -> {new}")
+        try:
+            _apply_check_concerns(content)
+        except Exception as exc:
+            print(f"[Amadeus] Concerns update skipped: {exc!r}")
+        if changes:
+            feelings.apply_changes(changes, path=_feelings_path(), trust=old)
+            print("[Amadeus] Feelings from the check: "
+                  + ", ".join(f"{k} {v:+d}" for k, v in changes.items()))
     except Exception as exc:
         print(f"[Amadeus] Trust rescore skipped: {exc!r}")
+
+
+def _feelings_path() -> str:
+    """data/feelings.txt beside this module's memory.db."""
+    return feelings.path_next_to(store.PATH_TO_MEMORY)
+
+
+def _concerns_path() -> str:
+    """data/concerns.txt beside this module's memory.db."""
+    return concerns.path_next_to(store.PATH_TO_MEMORY)
+
+
+def _note_reply_feelings() -> None:
+    """After her reply to a user message: the reply event for her feelings
+    (feelings.note_user_replied - missing-you resets, irritation eases,
+    late-night worry). Never blocks the chat."""
+    try:
+        feelings.note_user_replied(trust=stats.load_stat("trust"),
+                                   path=_feelings_path())
+    except Exception as exc:
+        print(f"[Amadeus] Feelings update skipped: {exc!r}")
 
 
 def maybe_schedule_trust_rescore() -> None:
@@ -3641,7 +5976,7 @@ def voice_line_for_edit(english_reply: str, previous_user) -> str:
     model is unreachable or returns no Japanese - the caller then refuses
     the edit instead of saving English and Japanese that disagree.
     """
-    llm = get_llm(API_KEY, LLM_Model)
+    llm = _translation_llm()
     jps = _clean_tts_text(_voice_line_for_reply(llm, english_reply, previous_user))
     if not _has_japanese(jps):
         raise ValueError("model returned no Japanese")
@@ -3681,6 +6016,56 @@ def suggest_name_reading(name: str) -> str:
     return reading if speech_text.is_kana(reading) and len(reading) <= 20 else ""
 
 
+# ---------- CONCERNS SEED (one-time, background, at startup) ----------
+#
+# The concerns list starts empty, so a first look at the last 30 days of
+# chats (their rolling summaries + last user lines) gives her up to three
+# things already on her mind (user decision 2026-10-30). Runs once: the
+# concerns file it creates (even empty) is the marker. One plain call.
+
+_SEED_MAX = 3
+
+
+def seed_concerns_once() -> None:
+    import os
+    path = _concerns_path()
+    if os.path.exists(path):
+        return
+    try:
+        material = store.recent_user_material()
+        if not material.strip():
+            concerns.save([], path=path)
+            return
+        prompt = chr(10).join([
+            "Below are recent conversations between a user and Amadeus, an AI "
+            "assistant based on the memories of Makise Kurisu. List up to "
+            f"{_SEED_MAX} things the USER mentioned that a caring friend would "
+            "still follow up on now (an exam, being ill, an interview, a "
+            "problem, skipped meals) - only ones that may still be open, not "
+            "small talk. Today is " + datetime.now().strftime("%A %Y-%m-%d") + ".",
+            "One per line, exactly: CONCERN: <a few English words> | WHEN: "
+            "<YYYY-MM-DD if a day was given, else none>. If there is nothing, "
+            "reply: CONCERN: none",
+            "",
+            material,
+        ])
+        reply = get_llm(API_KEY, LLM_Model).invoke([{"role": "user", "content": prompt}])
+        content = reply.content if isinstance(reply.content, str) else str(reply.content)
+        text = _strip_thinking(content)
+        concerns.save([], path=path)
+        added = 0
+        for m in re.finditer(r"(?im)^[\s*\-]*CONCERN\s*[:=]\s*([^|\n]*)"
+                             r"(?:\|\s*WHEN\s*[:=]\s*(\S+))?", text):
+            if added >= _SEED_MAX:
+                break
+            if concerns.add(m.group(1), m.group(2), path=path):
+                added += 1
+        print(f"[Amadeus] Concerns seeded from recent chats: {added}")
+    except Exception as exc:
+        # No file written: it tries again on the next start.
+        print(f"[Amadeus] Concerns seed skipped (will retry next start): {exc!r}")
+
+
 def backfill_japanese_voice() -> None:
     global _BACKFILL_STARTED
     if _BACKFILL_STARTED:
@@ -3696,7 +6081,7 @@ def backfill_japanese_voice() -> None:
         # Give the local model server up to ~3 minutes to come online.
         for _ in range(9):
             try:
-                llm = get_llm(API_KEY, LLM_Model)
+                llm = _translation_llm()
                 break
             except Exception:
                 threading.Event().wait(20)

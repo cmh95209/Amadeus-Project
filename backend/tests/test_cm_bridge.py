@@ -34,6 +34,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import attachments
 import cm_bridge
 import chat
 import memory as store
@@ -43,6 +44,7 @@ import ja_voice
 _PERSONALITY = {"role": "system", "content": "PERSONALITY"}
 _INTERNAL = {"role": "system", "content": "TIMING"}
 _VOICE = {"role": "system", "content": "VOICE"}
+_CLOSENESS = {"role": "system", "content": "CLOSENESS"}
 _HISTORY = [{"role": "user", "content": "where do I live?"}]
 
 
@@ -130,12 +132,13 @@ def _expected_messages(memory_block=None):
     service contributes nothing - the byte-identical reference."""
     return chat._merge_leading_system_messages(
         [_PERSONALITY]
+        + [_VOICE]
+        + [chat._PACK_RULES]
+        + [chat.NO_WEB_BLOCK]
+        + [_CLOSENESS]
         + []
         + ([memory_block] if memory_block else [])
         + [_INTERNAL]
-        + [chat._PACK_RULES]
-        + [_VOICE]
-        + [chat.NO_WEB_BLOCK]
         + _HISTORY
     )
 
@@ -166,7 +169,9 @@ class BridgeReplyPromptTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 store, "load_active_conversation", lambda: 1))
             stack.enter_context(mock.patch.object(
-                ja_voice, "build_voice_context", lambda _stat: dict(_VOICE)))
+                ja_voice, "build_voice_rules", lambda: dict(_VOICE)))
+            stack.enter_context(mock.patch.object(
+                ja_voice, "build_closeness_context", lambda _stat: dict(_CLOSENESS)))
             stack.enter_context(mock.patch.object(stats, "load_stat",
                                                  lambda _name: 3))
             stack.enter_context(mock.patch.object(chat, "_finalize",
@@ -176,6 +181,11 @@ class BridgeReplyPromptTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 cm_bridge, "fetch_memory_block",
                 lambda _cid: memory_block))
+            # A made-up chat: no pictures from whatever the data folder holds.
+            stack.enter_context(mock.patch.object(
+                attachments, "with_pictures", lambda msgs, *a, **k: msgs))
+            stack.enter_context(mock.patch.object(
+                attachments, "picture_index_message", lambda *a, **k: None))
             chat.getResponsePacked(list(_HISTORY), internal_context=dict(_INTERNAL))
         return sink["messages"]
 

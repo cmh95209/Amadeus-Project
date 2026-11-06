@@ -76,6 +76,15 @@ class FakeLLM:
         return self.handler(messages)
 
 
+def reply_calls(log):
+    """The reply's own model calls - the triage router calls left out (a
+    message right after a refusal, or one that mentions web access, is a
+    triage candidate since 2026-10-25)."""
+    return [c for c in log
+            if not (c and isinstance(c[-1].get("content"), str)
+                    and c[-1]["content"].startswith("Classify the user's latest"))]
+
+
 def pack_call(eng="ok", jps="\u3057\u3083\u3088"):
     return [{"name": "AmadeusPack",
              "args": {"assistant_reply_JPS": jps, "assistant_reply_ENG": eng}}]
@@ -267,6 +276,7 @@ class WebLoopFlowTests(unittest.TestCase):
 
         self.assertEqual(
             pack.assistant_reply_ENG, "Alyosha is a character from Genshin Impact.")
+        log = reply_calls(log)
         self.assertEqual(len(log), 2)  # phase 1 + phase 2
         ms.assert_called_once_with("Alyosha character")
         self.assertIn("Web search results for 'Alyosha character'",
@@ -425,7 +435,7 @@ class RefusalOverrideTests(unittest.TestCase):
         ms.assert_called_once()  # the app ran the search itself
         self.assertIn("Pavlina", ms.call_args[0][0])
         # the results were fed back into the context before the final call
-        self.assertIn("Web search results for", log[1][-1]["content"])
+        self.assertIn("Web search results for", reply_calls(log)[1][-1]["content"])
 
     def test_no_override_without_retry_phrasing(self):
         messages = [
@@ -455,6 +465,7 @@ class NudgeNoteTests(unittest.TestCase):
         with patch.object(chat.store, "load_deep_thinking", return_value=False), \
              patch.object(chat, "_run_web_search"):
             chat._getResponsePackedWithWebSearch(FakeLLM(handler, log), messages)
+        log = reply_calls(log)
         self.assertTrue(log)
         return log[0]
 
@@ -555,6 +566,7 @@ class Phase2ContextSanitizeTests(unittest.TestCase):
                 eng="Good night! Sweet dreams."))
 
         pack, log, _ = self._run(handler)
+        log = reply_calls(log)
         self.assertIn("おやすみ。", [str(m.get("content")) for m in log[1]
                                      if m.get("role") == "assistant"])
 
@@ -647,6 +659,24 @@ class EmptyResultsHonestyTests(unittest.TestCase):
     failed one (2026-10-08: she claimed 'I could search this time' after a
     zero-result search; only the FAILED path carried the honesty instruction).
     The clean zero-result path must now carry the same instruction."""
+
+    # Firecrawl, Exa and Keenable (tried first) are "down" here, so the ddgs
+    # path these tests cover is the one that answers.
+    def setUp(self):
+        self._fc = patch.object(chat.websearch, "firecrawl_search",
+                                side_effect=chat.websearch.FirecrawlUnavailable("test"))
+        self._ex = patch.object(chat.websearch, "exa_search",
+                                side_effect=chat.websearch.EngineUnavailable("test"))
+        self._kn = patch.object(chat.websearch, "keenable_search",
+                                side_effect=chat.websearch.KeenableUnavailable("test"))
+        self._fc.start()
+        self._ex.start()
+        self._kn.start()
+
+    def tearDown(self):
+        self._kn.stop()
+        self._ex.stop()
+        self._fc.stop()
 
     def test_zero_results_carry_the_honesty_instruction(self):
         with patch.object(chat, "_get_search_client",

@@ -572,7 +572,8 @@ class SwitchGreetingGenerationTests(unittest.TestCase):
         # clean pack to focus on the steering they assert on.
         fake = _FakeLLM(eng=eng or "Welcome back.",
                         jps=jps or "おかえり。")
-        fake_ja = SimpleNamespace(build_voice_context=lambda trust: {
+        fake_ja = SimpleNamespace(build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {
             "role": "system", "content": VOICELINE_MARK + " (trust 62)"})
         fake_stats = SimpleNamespace(load_stat=lambda key: 62.0)
         # Faithful to the real flow: the switch run activates the target tab

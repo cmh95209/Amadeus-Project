@@ -26,10 +26,13 @@ You can change all of these at any time without reinstalling anything.
 
 ### Web Access, Deep Thinking, and Voice Retention
 
-- **Web access** — a toggleable local web search (DuckDuckGo, no API key)
-  lets her verify recent events; it reads the top result's page for real
+- **Web access** — a toggleable web search (Firecrawl's free keyless search,
+  with DuckDuckGo-style `ddgs` as an automatic backup; no API key, no account)
+  lets her verify recent events; results carry their dates so she does not
+  mistake old news for new, and she reads the top result's page for real
   content, with an optional "deep thinking" mode that enables model reasoning
-  for the search decision only. Disabled by default on fresh installs.
+  for the search decision only. A **sources** chip under her reply opens the
+  pages she used. Disabled by default on fresh installs.
 - **Live weather & air quality** — keyless, from public feeds.
 - **Voice retention** — keep the last N generated voice recordings, freeing
   disk space automatically.
@@ -58,16 +61,29 @@ the right order and waits for each service:
 10. Opens Amadeus automatically in the default browser.
 11. Shuts down launcher-owned processes when the launcher exits.
 
-Runtime logs are written locally to:
+The launcher window shows a few status lines; every detail is in the
+`logs` folder inside the project folder (a normal, visible folder - send it
+when asking for help):
 
 ```text
-.runtime/logs/
+logs/
 ```
 
-(voice: `gptsovits.log`, backend: `backend.log`, sidecar: `cm-sidecar.log`,
-frontend: `frontend.log`)
+(launcher: `launcher.log`, voice: `gptsovits.log`, backend: `backend.log`,
+sidecar: `cm-sidecar.log` and its one-time setup `memory-setup.log`,
+frontend: `frontend.log`, built-in model: `llm.log`)
 
-The `.runtime/` directory is ignored by Git.
+The `logs/` and `.runtime/` folders are ignored by Git.
+
+**Her built-in model and your graphics memory.** With the built-in model
+(installer option A), the launcher first checks that the graphics card has
+room for it (NVIDIA cards). If a game or another program is using the memory,
+it asks: close that program and press Enter, start anyway, or start without
+her model. `Start Amadeus without her model.bat` (macOS:
+`start_macos_no_model.command`) always starts without it. In Settings ->
+Connection -> Built-in you can unload her model (freeing its graphics memory),
+load it again, or pick another GGUF file: put your own model in the `models`
+folder next to the project folder and press "Refresh list".
 
 ### macOS
 

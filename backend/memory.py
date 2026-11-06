@@ -13,6 +13,8 @@ from pathlib import Path
 DATA_DIR = "data"
 
 PATH_TO_MEMORY = os.path.join(DATA_DIR, "memory.db")
+# Greeting-flagged rows that are NOT greetings: her attach reactions.
+_NOT_ATTACH_SQL = "COALESCE(greeting_kind, '') != 'attach'"
 
 class _TrackedConnection:
     """A thin safety net around a sqlite3 connection (2026-10-07 fresh-VM
@@ -119,6 +121,33 @@ def save_web_access(enabled: bool) -> None:
         f.write("1" if enabled else "0")
 
 
+# ---------- HOW SHE READS THE WEB ---------- (NO SQL)
+# "thorough" (default): reader mode - the top pages are read and noted by
+# short reader calls; "quick": the best paragraphs of the top page only.
+# (Settings -> Preferences; a one-task local server always reads quickly.)
+PATH_TO_WEB_READING = os.path.join(DATA_DIR, "web_reading.txt")
+WEB_READING_MODES = ("thorough", "quick")
+
+
+def load_web_reading() -> str:
+    try:
+        with open(PATH_TO_WEB_READING, "r", encoding="utf-8") as f:
+            mode = f.read().strip().lower()
+    except OSError:
+        return "thorough"
+    return mode if mode in WEB_READING_MODES else "thorough"
+
+
+def save_web_reading(mode: str) -> str:
+    mode = str(mode or "").strip().lower()
+    if mode not in WEB_READING_MODES:
+        raise ValueError("mode must be 'thorough' or 'quick'")
+    _ensure_file(PATH_TO_WEB_READING, default_text="thorough")
+    with open(PATH_TO_WEB_READING, "w", encoding="utf-8") as f:
+        f.write(mode)
+    return mode
+
+
 # ---------- DEEP THINKING TOGGLE ---------- (NO SQL)
 # Optional "think before you search" mode for her web-search judgement call.
 # OFF by default (faster + more reliable); can be switched on in Settings.
@@ -137,6 +166,57 @@ def save_deep_thinking(enabled: bool) -> None:
     _ensure_file(PATH_TO_DEEP_THINKING, default_text="0")
     with open(PATH_TO_DEEP_THINKING, "w", encoding="utf-8") as f:
         f.write("1" if enabled else "0")
+
+
+# ---------- REASONING LEVELS ---------- (NO SQL)
+# Settings -> Connection -> Reasoning (MH 2026-10-20; replaces the Deep
+# thinking switch). Three choices, each one of llm.REASONING_LEVELS:
+#   replies_builtin  her replies on her built-in model     (default "off")
+#   replies_custom   her replies on the user's own/cloud model
+#                    (default "low" on a cloud host, "off" on a local server)
+#   translations     the English line + repair passes, and the memory
+#                    helper's learning (default "off")
+# Built-in and custom are kept apart so switching brains never carries a
+# cloud level over to a small graphics card.
+PATH_TO_REASONING = os.path.join(DATA_DIR, "reasoning.json")
+REASONING_LEVELS = ("off", "low", "medium", "high")
+REASONING_KEYS = ("replies_builtin", "replies_custom", "translations")
+
+
+def load_reasoning() -> Dict[str, str]:
+    """The saved levels; a key that is missing/invalid is absent (the caller
+    applies the default). An old Deep thinking ON becomes "medium" for her
+    replies (both brains) the first time this is read."""
+    data = {}
+    try:
+        with open(PATH_TO_REASONING, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            data = {k: v for k, v in raw.items() if k in REASONING_KEYS and v in REASONING_LEVELS}
+    except (OSError, ValueError):
+        if os.path.exists(PATH_TO_DEEP_THINKING) and load_deep_thinking():
+            data = {"replies_builtin": "medium", "replies_custom": "medium"}
+            save_reasoning(data)
+    return data
+
+
+def save_reasoning(levels: Dict[str, str]) -> Dict[str, str]:
+    """Merge the given (valid) levels into the saved ones; returns all saved."""
+    current = {}
+    try:
+        with open(PATH_TO_REASONING, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            current = {k: v for k, v in raw.items() if k in REASONING_KEYS and v in REASONING_LEVELS}
+    except (OSError, ValueError):
+        pass
+    for key, value in (levels or {}).items():
+        if key in REASONING_KEYS and value in REASONING_LEVELS:
+            current[key] = value
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PATH_TO_REASONING, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=1)
+    return current
 
 
 # ---------- VOICE RETENTION (NO SQL) ----------
@@ -710,7 +790,7 @@ def load_last_assistant_line(conversation_id: int,
         c = conn.cursor()
         _ensure_messages_table(c)
         row = c.execute(
-            "SELECT content, created_at, greeting FROM messages "
+            "SELECT content, created_at, greeting AND " + _NOT_ATTACH_SQL + " FROM messages "
             "WHERE conversation_id = ? AND role = 'assistant' "
             "AND COALESCE(active, 1) = 1 "
             "ORDER BY id DESC LIMIT 1",
@@ -763,9 +843,61 @@ def recent_greeting_count(conversation_id: int, now: datetime | None = None,
         _ensure_messages_table(c)
         (n,) = c.execute(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ? "
-            "AND role = 'assistant' AND greeting = 1 AND created_at > ? "
+            "AND role = 'assistant' AND greeting = 1 AND " + _NOT_ATTACH_SQL + " AND created_at > ? "
             "AND COALESCE(active, 1) = 1",
             (int(conversation_id), cutoff),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(n or 0)
+
+
+def unanswered_greeting_count(conversation_id: int) -> int:
+    """How many of her greetings in a conversation came after the user's
+    newest message there (2026-10-29: the startup greeting tells her this
+    instead of letting her copy the unanswered lines). Only the shown
+    version of each greeting counts (a regenerate hides the one it
+    replaces), and the fixed first-launch lines (scripted) do not count -
+    the user could not have answered those. Poke and restart lines do not
+    count either: the user asked for them. pre: the messages table exists.
+    post: 0 when the user spoke after her last greeting or there are none.
+    Never modifies memory."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        (n,) = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ? "
+            "AND role = 'assistant' AND greeting = 1 "
+            "AND COALESCE(active, 1) = 1 "
+            "AND COALESCE(greeting_kind, '') NOT IN ('scripted', 'poke', 'restart') AND id > ("
+            "  SELECT COALESCE(MAX(id), 0) FROM messages "
+            "  WHERE conversation_id = ? AND role = 'user')",
+            (int(conversation_id), int(conversation_id)),
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(n or 0)
+
+
+def unanswered_poke_count(conversation_id: int) -> int:
+    """How many lines she has started on a poke in a conversation since the
+    user's newest message there (2026-11-01: the next poke tells her she is
+    being poked again without a word). Only the shown version of each line
+    counts. pre: the messages table exists. post: 0 when the user spoke
+    after her last poke line or there are none. Never modifies memory."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        (n,) = c.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ? "
+            "AND role = 'assistant' AND greeting = 1 "
+            "AND COALESCE(active, 1) = 1 "
+            "AND greeting_kind = 'poke' AND id > ("
+            "  SELECT COALESCE(MAX(id), 0) FROM messages "
+            "  WHERE conversation_id = ? AND role = 'user')",
+            (int(conversation_id), int(conversation_id)),
         ).fetchone()
     finally:
         conn.close()
@@ -788,12 +920,69 @@ def greeting_row_ids(conversation_id: int) -> List[int]:
         _ensure_messages_table(c)
         rows = c.execute(
             "SELECT id FROM messages WHERE conversation_id = ? "
-            "AND role = 'assistant' AND greeting = 1 ORDER BY id ASC",
+            "AND role = 'assistant' AND greeting = 1 AND " + _NOT_ATTACH_SQL + " ORDER BY id ASC",
             (int(conversation_id),),
         ).fetchall()
     finally:
         conn.close()
     return [int(r[0]) for r in rows]
+
+
+def newest_user_message_time() -> datetime | None:
+    """When the user last wrote anything, in any conversation (local naive
+    time), or None. Feelings start their missing-you clock from it.
+    Never modifies memory."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute(
+            "SELECT created_at FROM messages WHERE role = 'user' "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        return datetime.fromisoformat(row[0]).astimezone().replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def recent_user_material(days: int = 30, max_chars: int = 6000,
+                         user_lines: int = 8) -> str:
+    """Her recent chats in brief, for a one-time look at what is on her
+    mind about the user (concerns seeding): per conversation updated in the
+    last `days`, its title, rolling summary and last few user lines,
+    newest first, cut at max_chars. '' when there is nothing.
+    Never modifies memory."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        _ensure_conversations(c)
+        convs = c.execute(
+            "SELECT id, title, COALESCE(rolling_summary, ''), updated_at "
+            "FROM conversations WHERE updated_at >= ? ORDER BY updated_at DESC",
+            (cutoff,)).fetchall()
+        blocks = []
+        for conv_id, title, summary, updated in convs:
+            rows = c.execute(
+                "SELECT content, created_at FROM messages WHERE conversation_id = ? "
+                "AND role = 'user' ORDER BY id DESC LIMIT ?",
+                (int(conv_id), int(user_lines))).fetchall()
+            if not rows and not summary.strip():
+                continue
+            lines = [f"Conversation \"{title}\" (last active {updated}):"]
+            if summary.strip():
+                lines.append("Summary: " + " ".join(summary.split())[:1500])
+            for content, created in reversed(rows):
+                lines.append(f"USER ({created}): " + " ".join((content or "").split())[:300])
+            blocks.append("\n".join(lines))
+    finally:
+        conn.close()
+    return "\n\n".join(blocks)[:max_chars]
 
 
 def previous_contact_timing(now: datetime | None = None) -> Dict[str, object] | None:
@@ -1215,23 +1404,23 @@ def compute_greeting_situation(conversation_id: int,
                 f"\"{anchor['title']}\". They are not away from you; "
                 f"they have simply not replied to your greeting yet. "
                 f"This is not a welcome-back moment.")
+        # Neutral wording (2026-10-29): the facts only. "They read your
+        # greeting and left without saying anything" handed her one theme -
+        # being ignored - and every reopen became "were you busy?". How she
+        # feels about the silence is left to her mood and closeness.
         elif out["unanswered_fresh"]:
             out["truth_line"] = (
                 f"SITUATION: the last line in this conversation is your "
-                f"own greeting from {her_last['phrase']}. The user has "
-                f"not replied to it. They were in the app moments ago - "
-                f"they read your greeting and left without saying "
-                f"anything (or are still here). This is not a "
-                f"welcome-back moment: do not say they have been away "
-                f"or gone.")
+                f"own greeting from {her_last['phrase']}, and there is no "
+                f"reply to it yet. The user was in the app moments ago "
+                f"(and may still be here). This is not a welcome-back "
+                f"moment: do not say they have been away or gone.")
         else:
             out["truth_line"] = (
                 f"SITUATION: the last line in this conversation is your "
-                f"own greeting from {her_last['phrase']}, and the user "
-                f"never answered it. This is not a welcome-back moment: "
-                f"they did not come back after being away, they left "
-                f"your greeting unanswered. Do not say they have been "
-                f"gone or away for a while.")
+                f"own greeting from {her_last['phrase']}, and there is no "
+                f"reply to it yet. This is not a welcome-back moment: do "
+                f"not say they have been gone or away for a while.")
         if anchor is not None and not spoke_elsewhere:
             if anchor.get("conversation_id") == conversation_id:
                 out["details"].append(
@@ -1650,7 +1839,7 @@ def load_internal_context(now: datetime | None = None, is_greeting=False,
         "content": (
             "Private timing context for this %s only:\n"
             % ("greeting" if new_greeting else "reply")
-            + f"- Current server-local time: {now_local:%Y-%m-%d %H:%M %Z}.\n"
+            + f"- Current server-local time: {now_local:%A %Y-%m-%d %H:%M %Z}.\n"
             + f"- {timing}\n"
             + f"{cross_block}"
             + tail
@@ -1707,6 +1896,57 @@ def _ensure_conversations(c: sqlite3.Cursor) -> None:
     # window overflows for the first time.
     _add_column(c, "conversations", "rolling_summary", "TEXT NOT NULL DEFAULT ''")
     _add_column(c, "conversations", "summary_covers", "INTEGER NOT NULL DEFAULT 0")
+
+
+def _backfill_turns(c: sqlite3.Cursor) -> None:
+    """Number the existing messages of every chat (see `turn` above)."""
+    counters = {}
+    updates = []
+    for mid, conv, role in c.execute(
+            "SELECT id, conversation_id, role FROM messages ORDER BY id ASC").fetchall():
+        n = counters.get(conv, 0) + (1 if role == "user" else 0)
+        counters[conv] = n
+        updates.append((n, mid))
+    c.executemany("UPDATE messages SET turn = ? WHERE id = ?", updates)
+
+
+# Rows that are a reply turn of their own for the version grouping: greetings
+# and her "hold on" asides (never folded into a reply's versions).
+_OWN_TURN_SQL = "(COALESCE(greeting, 0) OR COALESCE(aside, 0))"
+
+
+# The turn a new row gets: the chat's newest turn (+1 for a user message).
+_NEXT_TURN_SQL = ("(SELECT COALESCE(MAX(turn), 0) + ? FROM messages "
+                  "WHERE conversation_id = ?)")
+
+
+# post: the chat's newest turn number (0 when it has no user message yet)
+def current_turn(conversation_id=None) -> int:
+    conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        (n,) = c.execute("SELECT COALESCE(MAX(turn), 0) FROM messages "
+                         "WHERE conversation_id = ?", (conv,)).fetchone()
+        return int(n)
+    finally:
+        conn.close()
+
+
+# post: the message's turn number, or None when it does not exist
+def message_turn(message_id: int):
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        row = c.execute("SELECT turn FROM messages WHERE id = ?",
+                        (int(message_id),)).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+    finally:
+        conn.close()
 
 
 def _ensure_messages_table(c: sqlite3.Cursor) -> None:
@@ -1770,6 +2010,16 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
     _add_column(c, "messages", "greeting_kind", "TEXT")
     _add_column(c, "messages", "greeting_from", "INTEGER")
     _add_column(c, "messages", "greeting_group", "INTEGER")
+    # The web sources a reply was written from (2026-10-25): a JSON list of
+    # searches (query, result titles + links, the page read) and live-weather
+    # fetches; NULL = none. Saved now so a later version can show her links.
+    _add_column(c, "messages", "sources", "TEXT")
+    # What she read of a long document for this reply ("Document 1: notes +
+    # pages 54-55"), shown under the reply (attachments Phase 4b, 2026-10-29).
+    _add_column(c, "messages", "doc_reads", "TEXT")
+    # Her "hold on, let me check" line before a web answer (2026-10-25): a
+    # line of hers of its own, never a version of the answer after it.
+    _add_column(c, "messages", "aside", "INTEGER DEFAULT 0")
 
     # Migrate pre-session databases: fold everything into one conversation.
     _ensure_conversations(c)
@@ -1782,6 +2032,14 @@ def _ensure_messages_table(c: sqlite3.Cursor) -> None:
         "SELECT 'General' WHERE NOT EXISTS (SELECT 1 FROM conversations)"
     )
     c.execute("UPDATE messages SET conversation_id = 1 WHERE conversation_id IS NULL")
+    # Turn numbers (2026-10-25): per chat, the user's Nth message is turn N;
+    # her reply (all its versions) and any line of hers before the next user
+    # message share it; lines before the first user message are turn 0.
+    # Never renumbered: deleting an older message leaves a gap; deleting the
+    # newest one frees its number (undo + send again = the same turn). Saved
+    # references (lookups) go with their message. Existing chats are numbered once.
+    if _add_column(c, "messages", "turn", "INTEGER"):
+        _backfill_turns(c)
     # Commit the migration work explicitly. Before this, whether the upgrade
     # stuck depended on WHICH caller happened to run it: paths that commit
     # (load_active_conversation) kept it, paths that close without committing
@@ -1822,6 +2080,26 @@ def load_context_budget() -> int:
     except ValueError:
         return DEFAULT_CONTEXT_BUDGET
     return max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, value))
+
+
+def effective_context_budget() -> int:
+    """The history budget a prompt actually uses: the custom model's setting
+    (data/context_budget.txt), or on the built-in model its own number,
+    which never exceeds what its context window can hold."""
+    try:
+        import builtin_llm   # late import: builtin_llm imports this module
+        own = builtin_llm.history_budget()
+    except Exception:
+        own = None
+    return own if own else load_context_budget()
+
+
+def _builtin_active() -> bool:
+    try:
+        import builtin_llm   # late import: builtin_llm imports this module
+        return bool(builtin_llm.active())
+    except Exception:
+        return False
 
 
 def save_context_budget(budget: int) -> int:
@@ -1963,6 +2241,12 @@ def estimate_tokens(text: str) -> int:
 # summary lands (still exactly-once, just briefly larger).
 
 SUMMARY_WINDOW_TURNS = 12      # reply turns kept verbatim (a turn = user line + its reply run; a greeting is its own turn)
+# Prompt order B (2026-10-22, built-in model only): fold in batches - the
+# window grows to WINDOW + BATCH turns, then BATCH turns fold in ONE merge
+# call. Her model reuses the prompt only up to the first changed byte, and a
+# fold changes the summary at the top of the chat; one fold per BATCH replies
+# keeps the chat's start stable in between.
+SUMMARY_BATCH_TURNS = 6
 SUMMARY_MAX_CHARS = 2200       # hard cap on the stored summary text
 
 _SUMMARY_HEADER = (
@@ -2171,7 +2455,13 @@ def _fold_one_turn(conv: int, turn: Dict[str, object]) -> None:
     # queue replayed after a restart): never move covers backwards.
     if int(turn["last_id"]) <= covers:
         return
-    merged = _merge_summary_text(summary, str(turn["text"]))
+    text = str(turn.get("text") or "")
+    if turn.get("parts"):
+        # A batch (built-in model): merge only the turns the summary does not
+        # cover yet, so a batch queued twice never adds a turn twice.
+        text = "\n".join(str(p["text"]) for p in turn["parts"]
+                         if int(p["last_id"]) > covers)
+    merged = _merge_summary_text(summary, text)
     _set_rolling_summary(conv, merged, int(turn["last_id"]))
 
 
@@ -2195,6 +2485,19 @@ def maybe_roll_summary(conversation_id=None) -> None:
     overflow = len(verbatim) - SUMMARY_WINDOW_TURNS
     if overflow <= 0:
         return
+    if _builtin_active():
+        if overflow < SUMMARY_BATCH_TURNS:
+            return
+        batch = {"last_id": verbatim[overflow - 1]["last_id"], "parts": verbatim[:overflow]}
+        with _roll_lock:
+            q = _roll_queue.setdefault(conv, collections.deque())
+            known = _roll_queued_ids.setdefault(conv, set())
+            if q or batch["last_id"] in known:
+                return  # a batch is already waiting; it folds these turns
+            q.append({**batch, "db": PATH_TO_MEMORY})
+            known.add(batch["last_id"])
+        _start_roll_worker()
+        return
     with _roll_lock:
         q = _roll_queue.setdefault(conv, collections.deque())
         known = _roll_queued_ids.setdefault(conv, set())
@@ -2215,7 +2518,8 @@ def maybe_roll_summary(conversation_id=None) -> None:
 def build_prompt_messages(token_budget: int | None = None, exclude_ids=None,
                           conversation_id=None) -> List[Dict[str, str]]:
     if token_budget is None:
-        token_budget = load_context_budget()
+        # Pictures she will see take room too (none -> the usual budget).
+        token_budget = text_context_budget(conversation_id)
     messages = load_memory_for_prompt(conversation_id=conversation_id,
                                       exclude_ids=exclude_ids)
     # Rolling summary: drop the rows the stored summary already covers and
@@ -2321,21 +2625,100 @@ def _group_reply_turns(rows) -> List[List[int]]:
 #      Assistant rows always carry "japanese" (her spoken line, "" when
 #      none) so the UI can show it under the English when the user turns
 #      that on.
+_SOURCE_TEXT_MAX = 300      # a title / query shown in the sources panel
+
+
+def _safe_link(url) -> str:
+    """The link when it is a plain web address (http/https), else "" - a saved
+    source is shown as a clickable link, so nothing else may get through."""
+    u = str(url or "").strip()
+    return u if re.match(r"(?i)^https?://[^\s/]+", u) and len(u) <= 2000 else ""
+
+
+# pre: sources is a reply's saved sources list (set_message_sources)
+# post: the part the chat screen shows under her reply - searches (query, the
+#       result links + titles + dates, the page she read) and live-weather
+#       fetches; anything malformed or not a web link is left out
+def sources_for_ui(sources) -> list:
+    out = []
+    for entry in sources if isinstance(sources, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        if kind == "search":
+            results = []
+            for r in entry.get("results") or []:
+                if not isinstance(r, dict) or not _safe_link(r.get("url")):
+                    continue
+                item = {"title": str(r.get("title") or "")[:_SOURCE_TEXT_MAX],
+                        "url": _safe_link(r.get("url"))}
+                if r.get("date"):
+                    item["date"] = str(r["date"])[:10]
+                results.append(item)
+            item = {"kind": "search",
+                    "query": str(entry.get("query") or "")[:_SOURCE_TEXT_MAX],
+                    "results": results,
+                    "read": _safe_link(entry.get("read")) or None}
+            # Reader mode: the pages that gave notes; a lookup's saved notes
+            # used again (2026-10-25).
+            used = [u for u in (_safe_link(x) for x in entry.get("used") or []) if u]
+            if used:
+                item["used"] = used
+            if entry.get("reused"):
+                item["reused"] = True
+            out.append(item)
+        elif kind == "weather":
+            out.append({"kind": "weather",
+                        "place": str(entry.get("place") or "")[:_SOURCE_TEXT_MAX],
+                        "url": _safe_link(entry.get("url")) or None})
+        elif kind == "link":
+            # A link the user sent (2026-10-26): opened or not, and why not.
+            url = _safe_link(entry.get("url"))
+            if not url:
+                continue
+            item = {"kind": "link", "url": url,
+                    "final": _safe_link(entry.get("final")) or url,
+                    "title": str(entry.get("title") or "")[:_SOURCE_TEXT_MAX],
+                    "opened": entry.get("status") == "ok"}
+            if entry.get("date"):
+                item["date"] = str(entry["date"])[:10]
+            if entry.get("reason"):
+                item["reason"] = str(entry["reason"])[:_SOURCE_TEXT_MAX]
+            if entry.get("reused"):
+                item["reused"] = True
+            out.append(item)
+    return out
+
+
 def _message_item(row) -> Dict[str, str]:
     mid, role, content, created_at, audio, japanese, active, conv_id, greeting = row[:9]
     kind = row[10] if len(row) > 10 else None
+    saved_sources = row[11] if len(row) > 11 else None
+    is_aside = bool(row[12]) if len(row) > 12 else False
+    doc_reads = row[13] if len(row) > 13 else None
     item = {"id": mid, "role": role, "content": content, "created_at": created_at,
             "active": bool((active if active is not None else 1)),
             "conversation_id": conv_id}
     if greeting:
         item["is_greeting"] = True
-        item["greeting_regenerable"] = kind != GREETING_KIND_SCRIPTED
+        item["greeting_regenerable"] = kind not in (GREETING_KIND_SCRIPTED, GREETING_KIND_ATTACH)
     if audio:
         item["audio_url"] = "/message_audio/" + audio
     if role == "assistant":
         item["japanese"] = (japanese or "").strip()
         if item["japanese"]:
             item["has_japanese"] = True
+        if is_aside:
+            item["is_aside"] = True
+        if saved_sources:
+            try:
+                shown = sources_for_ui(json.loads(saved_sources))
+            except (TypeError, ValueError):
+                shown = []
+            if shown:
+                item["sources"] = shown
+        if doc_reads:
+            item["doc_reads"] = str(doc_reads)
     return item
 
 
@@ -2357,22 +2740,26 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 
     c.execute(
         "SELECT id, role, content, created_at, audio, japanese, active, conversation_id, "
-        "greeting, greeting_group, greeting_kind "
+        "greeting, greeting_group, greeting_kind, sources, aside, doc_reads "
         "FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         (conv,),
     )
     rows = c.fetchall()
+    shown = _attachments_by_message(c, [r[0] for r in rows if r[1] == "user"])
+    conn.commit()
     conn.close()
 
     by_id = {r[0]: r for r in rows}
     out = []
     for turn in _group_reply_turns(
-            [(r[0], r[1], r[8] if r[8] else 0, r[9]) for r in rows]):
+            [(r[0], r[1], 1 if (r[8] or r[12]) else 0, r[9]) for r in rows]):
         for pos, mid in enumerate(turn):
             row = by_id[mid]
             if len(turn) > 1 and (row[6] if row[6] is not None else 1) != 1:
                 continue  # hidden version; only the viewed one is listed
             item = _message_item(row)
+            if shown.get(mid):
+                item["attachments"] = attachments_for_ui(shown[mid])
             if len(turn) > 1:
                 item["version"] = pos + 1
                 item["total_versions"] = len(turn)
@@ -2389,16 +2776,17 @@ def load_memory_raw(conversation_id=None) -> List[Dict[str, str]]:
 # post: a new row is inserted into messages with a correct auto-incremented id
 #       every other info e.g., created_at also must be correctly placed
 def append_message(_role: str, _content: str, conversation_id=None, japanese=None,
-                   is_greeting=False) -> int:
+                   is_greeting=False, aside=False) -> int:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
     conn = _connect_db()
     c = conn.cursor()
     _ensure_messages_table(c)
 
     c.execute(
-        "INSERT INTO messages (role, content, conversation_id, japanese, greeting) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (_role, _content, conv, japanese, 1 if is_greeting else 0)
+        "INSERT INTO messages (role, content, conversation_id, japanese, greeting, aside, turn) "
+        "VALUES (?, ?, ?, ?, ?, ?, " + _NEXT_TURN_SQL + ")",
+        (_role, _content, conv, japanese, 1 if is_greeting else 0, 1 if aside else 0,
+         1 if _role == "user" else 0, conv)
     )
     new_id = c.lastrowid
 
@@ -2448,6 +2836,17 @@ GREETING_KIND_STARTUP = "startup"
 GREETING_KIND_SWITCH = "switch"
 GREETING_KIND_WAKE = "wake"
 GREETING_KIND_SCRIPTED = "scripted"
+# Her reaction when the user attaches a picture (D8, 2026-10-26): stored like a
+# greeting (a line of hers of its own) but never counted as one - it is not
+# regenerated, never an "unanswered greeting", never a repeat-greeting.
+GREETING_KIND_ATTACH = "attach"
+# A line she starts because the user poked her (the Poke button or a tap on
+# her shoulders, 2026-11-01). The user ASKED for it, so an unanswered poke
+# line never counts as an ignored greeting (MH decision: no hurt feelings).
+GREETING_KIND_POKE = "poke"
+# Her line when she is back after the user restarted her from Settings
+# (2026-11-01). Also asked for by the user: never an ignored greeting.
+GREETING_KIND_RESTART = "restart"
 
 
 # pre: after_user_id, when given, = latest_user_message_id(conversation_id)
@@ -2481,11 +2880,11 @@ def append_greeting_if_quiet(conversation_id: int, content: str,
                 return None
         c.execute(
             "INSERT INTO messages (role, content, conversation_id, japanese, greeting, "
-            "greeting_kind, greeting_from, greeting_group) "
-            "VALUES ('assistant', ?, ?, ?, 1, ?, ?, ?)",
+            "greeting_kind, greeting_from, greeting_group, turn) "
+            "VALUES ('assistant', ?, ?, ?, 1, ?, ?, ?, " + _NEXT_TURN_SQL + ")",
             (content, conv, japanese, kind,
              None if from_conversation_id is None else int(from_conversation_id),
-             None if group is None else int(group)))
+             None if group is None else int(group), 0, conv))
         new_id = c.lastrowid
         c.execute(
             "UPDATE conversations SET updated_at = strftime('%Y-%m-%d %H:%M','now','localtime') "
@@ -2558,6 +2957,33 @@ def ensure_greeting_group(message_id: int) -> None:
 #       is_greeting flag) - such a row is a standalone turn with no user
 #       message behind it, so regenerate/undo/version logic keeps its own
 #       lane and never folds it into a neighboring reply's version stack
+# post: her latest "hold on" lines in the chat (Japanese, newest first)
+def recent_aside_lines(conversation_id: int, limit: int = 4) -> list:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        conn.commit()
+        rows = c.execute(
+            "SELECT COALESCE(NULLIF(japanese, ''), content) FROM messages "
+            "WHERE conversation_id = ? AND COALESCE(aside, 0) = 1 ORDER BY id DESC LIMIT ?",
+            (int(conversation_id), int(limit))).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows if r[0]]
+
+
+def get_message_is_aside(message_id) -> bool:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute("SELECT aside FROM messages WHERE id = ?", (int(message_id),)).fetchone()
+        return bool(row and row[0])
+    finally:
+        conn.close()
+
+
 def get_message_is_greeting(message_id) -> bool:
     conn = _connect_db()
     c = conn.cursor()
@@ -2579,9 +3005,12 @@ def reset_memory(conversation_id=None) -> None:
     _ensure_messages_table(c)
 
     c.execute("DELETE FROM messages WHERE conversation_id = ?", (conv,))
+    _delete_lookups(c, "conversation_id = ?", (conv,))
+    files = _delete_attachments(c, "conversation_id = ?", (conv,))
 
     conn.commit()
     conn.close()
+    remove_attachment_files(files)
 
 
 # pre: message_id exists; audio_path is a backend-relative file path (e.g. "generated/voice_12.wav")
@@ -2593,6 +3022,465 @@ def set_message_audio(message_id: int, audio_path: str) -> None:
     c.execute("UPDATE messages SET audio = ? WHERE id = ?", (audio_path, message_id))
     conn.commit()
     conn.close()
+
+
+# ---------- WEB LOOKUPS (her lookup memory, 2026-10-25) ----------
+# Every web search she makes is kept per chat: the query, the results (titles,
+# links, dates), the pages read and the notes taken from them. A follow-up
+# question later in the chat can then use the saved notes (instant, no
+# network) or re-read the saved pages, instead of searching from scratch or
+# answering from memory. Deleted with their chat / message / a memory reset.
+def _ensure_lookups_table(c: sqlite3.Cursor) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS web_lookups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            message_id INTEGER,
+            turn INTEGER,
+            created_at TEXT NOT NULL,
+            query TEXT NOT NULL,
+            engine TEXT,
+            mode TEXT,
+            results TEXT,
+            pages TEXT,
+            excerpt TEXT
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS web_lookups_conv ON web_lookups (conversation_id, id)")
+
+
+def _delete_lookups(c: sqlite3.Cursor, where: str, params) -> None:
+    _ensure_lookups_table(c)
+    c.execute("DELETE FROM web_lookups WHERE " + where, params)
+
+
+# ---------- ATTACHMENTS (pictures the user shows her, 2026-10-26) ----------
+# One row per picture or document (kind). Uploaded on attach (message_id NULL =
+# a card not sent yet), linked to the user's message on send. on_desk = she
+# keeps seeing it on every reply until the user takes it off her desk. On send
+# a picture also gets its chat number (chat_no: "picture 3" of this chat) and
+# the message's turn - her prompt names it that way and the user can refer
+# back to it ("picture 3", "yesterday's photo"). The files live in
+# data/attachments/<chat>/ (user data, next to memory.db): the copy she is
+# shown (path), a thumbnail, and the full-size original when the picture was
+# shrunk (metadata always removed). They go with their row: message / chat
+# deleted, memory reset. attachments.py does the picture work.
+# A document (Phase 4, 2026-10-28) keeps its original file (original) and the
+# text read out of it (path, a .txt); tokens = the whole text, read_tokens /
+# read_chars = the part she reads (fixed when it is sent: what fits).
+def attachments_dir() -> str:
+    """Next to memory.db (follows a test's temporary database)."""
+    return os.path.join(os.path.dirname(os.path.abspath(PATH_TO_MEMORY)), "attachments")
+
+
+def _ensure_attachments_table(c: sqlite3.Cursor) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER,
+            message_id INTEGER,
+            kind TEXT NOT NULL,
+            name TEXT,
+            mime TEXT,
+            bytes INTEGER,
+            width INTEGER,
+            height INTEGER,
+            path TEXT,
+            thumb TEXT,
+            caption TEXT,
+            on_desk INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            chat_no INTEGER,
+            turn INTEGER,
+            original TEXT,
+            tokens INTEGER,
+            read_chars INTEGER,
+            read_tokens INTEGER,
+            notes INTEGER
+        )
+    """)
+    for column in ("chat_no INTEGER", "turn INTEGER", "original TEXT",   # tables made before them
+                   "tokens INTEGER", "read_chars INTEGER", "read_tokens INTEGER", "notes INTEGER"):
+        _add_column(c, "attachments", *column.split(" ", 1))
+    c.execute("CREATE INDEX IF NOT EXISTS attachments_msg ON attachments (message_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS attachments_conv ON attachments (conversation_id, id)")
+
+
+def _delete_attachments(c: sqlite3.Cursor, where: str, params) -> list:
+    """Delete the matching rows; returns their files (removed after commit)."""
+    _ensure_attachments_table(c)
+    files = []
+    for row in c.execute("SELECT path, thumb, original, kind, id FROM attachments WHERE " + where,
+                         params).fetchall():
+        files += [p for p in row[:3] if p]
+        if row[3] == "document" and row[0]:
+            files.append(document_notes_file(row[0]))
+        if row[3] == "video":
+            files += video_files(next((p for p in row[:3] if p), ""), row[4])
+    c.execute("DELETE FROM attachments WHERE " + where, params)
+    return files
+
+
+def video_files(rel: str, attachment_id) -> list:
+    """Every stored file of a video (its watch copy, frames, card, notes...):
+    all of them are "<id>_..." in the folder of `rel`."""
+    folder = (rel or "").split("/", 1)[0]
+    if not folder or "/" not in (rel or ""):
+        return []
+    prefix = f"{int(attachment_id)}_"
+    try:
+        names = os.listdir(os.path.join(attachments_dir(), folder))
+    except OSError:
+        return []
+    return [f"{folder}/{n}" for n in names if n.startswith(prefix)]
+
+
+def remove_attachment_files(files) -> None:
+    """Remove stored attachment files (names relative to attachments_dir();
+    anything that points outside it is ignored)."""
+    root = os.path.realpath(attachments_dir())
+    for rel in files or []:
+        full = os.path.realpath(os.path.join(root, rel))
+        if not full.startswith(root + os.sep):
+            continue
+        try:
+            os.remove(full)
+        except OSError:
+            pass
+
+
+ATTACHMENT_COLUMNS = ("id, conversation_id, message_id, kind, name, mime, bytes, width, "
+                      "height, path, thumb, caption, on_desk, created_at, chat_no, turn, original, "
+                      "tokens, read_chars, read_tokens, notes")
+
+
+def attachment_row(row) -> dict:
+    keys = [k.strip() for k in ATTACHMENT_COLUMNS.split(",")]
+    item = dict(zip(keys, row))
+    item["on_desk"] = bool(item.get("on_desk"))
+    return item
+
+
+def attachments_where(where: str, params) -> list:
+    """Attachment rows matching a WHERE clause, oldest first."""
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_attachments_table(c)
+        rows = c.execute("SELECT " + ATTACHMENT_COLUMNS + " FROM attachments WHERE "
+                         + where + " ORDER BY id ASC", params).fetchall()
+        conn.commit()
+    finally:
+        conn.close()
+    return [attachment_row(r) for r in rows]
+
+
+# Pictures cost her model about this many pieces each (Phase 0: ~250-520 on
+# Gemma 4 with -ub 512; cloud models are similar or less).
+PICTURE_TOKENS = 500
+
+
+def prompt_attachments(conversation_id=None) -> list:
+    """The pictures that are in her next reply for sure: the ones on her desk
+    plus the ones sent with the chat's newest user message (oldest first).
+    (attachments.prompt_pictures adds the ones the user asks about again.)"""
+    conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
+    newest = latest_user_message_id(conv)
+    return attachments_where(
+        "conversation_id = ? AND message_id IS NOT NULL AND kind = 'picture' "
+        "AND (on_desk = 1 OR message_id = ?)", (conv, newest))
+
+
+def picture_reserve_tokens(conversation_id=None) -> int:
+    """Room the real pictures and documents take in her next prompt (0 when
+    none)."""
+    try:
+        import attachments   # late import: attachments imports this module
+        return (PICTURE_TOKENS * len(attachments.prompt_pictures(conversation_id))
+                + sum(int(d.get("read_tokens") or 0)
+                      for d in attachments.prompt_documents(conversation_id))
+                + sum(int(v.get("tokens") or 0)
+                      for v in attachments.prompt_videos(conversation_id))
+                + attachments.prompt_close_tokens(conversation_id))
+    except Exception:
+        return 0
+
+
+def text_context_budget(conversation_id=None) -> int:
+    """The history budget minus the room her pictures take (never below the
+    minimum budget)."""
+    budget = effective_context_budget()
+    reserve = picture_reserve_tokens(conversation_id)
+    return max(MIN_CONTEXT_BUDGET, budget - reserve) if reserve else budget
+
+
+_LABEL_CAPTION_MAX = 200
+
+
+def picture_label(row, note: str = "") -> str:
+    """How a picture appears in her prompt text: [Picture 3 (turn 5) from the
+    user: <caption>] - its number in this chat and the turn it was sent in
+    (a card not numbered yet uses its id). Every picture text in her prompt
+    starts with "[Picture" (chat._content_text strips them where only the
+    user's own words matter)."""
+    text = re.sub(r"[\[\]\s]+", " ", str(row.get("caption") or "")).strip()[:_LABEL_CAPTION_MAX]
+    number = row.get("chat_no") or row.get("id")
+    turn = f" (turn {int(row['turn'])})" if row.get("turn") else ""
+    head = f"[Picture {int(number)}{turn} from the user{note}"
+    return head + (f": {text}]" if text else "]")
+
+
+DOCUMENT_PAGE_TOKENS = 500   # what the screen calls "1 page" of a document's text
+
+
+def document_pages(tokens) -> int:
+    return max(1, -(-int(tokens or 0) // DOCUMENT_PAGE_TOKENS))
+
+
+def document_label(row, note: str = "") -> str:
+    """How a document appears in her prompt text: [Document 2 (turn 5) from
+    the user: "report.pdf", 4 pages: <summary>]. A document she reads only
+    part of says so ("first 3 of 12 pages"). While it is on her desk the
+    label has no summary and her reply calls put its text in a message of
+    its own right before this one (attachments._place_documents)."""
+    number = row.get("chat_no") or row.get("id")
+    turn = f" (turn {int(row['turn'])})" if row.get("turn") else ""
+    name = re.sub(r"[\[\]\"\s]+", " ", str(row.get("name") or "document")).strip()[:120]
+    text = re.sub(r"[\[\]\s]+", " ", str(row.get("caption") or "")).strip()[:_LABEL_CAPTION_MAX]
+    head = f'[Document {int(number)}{turn} from the user{note}: "{name}", {document_size(row)}'
+    return head + (f": {text}]" if text else "]")
+
+
+def document_notes_file(path: str) -> str:
+    """A document's reading notes (Phase 4b) next to its text: <id>_notes.json."""
+    return re.sub(r"\.txt$", "", path) + "_notes.json"
+
+
+NOTES_WRITING, NOTES_DONE, NOTES_FAILED = 1, 2, 3   # attachments.notes
+
+
+def document_size(row) -> str:
+    """"4 pages", "first 3 of 12 pages" when she reads only part of it, or
+    "86 pages, notes on all of it" once her reading notes are done."""
+    total = document_pages(row.get("tokens"))
+    if row.get("notes") == NOTES_DONE:
+        return f"{total} pages, notes on all of it"
+    read = row.get("read_tokens")
+    if read is not None and int(read) < int(row.get("tokens") or 0):
+        return f"first {document_pages(read) if int(read) > 0 else 0} of {total} pages"
+    return f"{total} page" + ("" if total == 1 else "s")
+
+
+def video_label(row, note: str = "") -> str:
+    """How a video appears in her prompt text: [Video 1 (turn 5) from the
+    user: "boat.mp4", 0:42: <caption>]. While it is on her desk the label has
+    no caption and her reply calls put the video itself (stills + what is
+    said) in a message of its own right before this one (video plan Phase 3)."""
+    import video   # late import: video imports this module
+    number = row.get("chat_no") or row.get("id")
+    turn = f" (turn {int(row['turn'])})" if row.get("turn") else ""
+    name = re.sub(r"[\[\]\"\s]+", " ", str(row.get("name") or "video")).strip()[:120]
+    text = re.sub(r"[\[\]\s]+", " ", str(row.get("caption") or "")).strip()[:_LABEL_CAPTION_MAX]
+    length = video.length_text(video.load_meta(row).get("duration"))
+    head = f'[Video {int(number)}{turn} from the user{note}: "{name}", {length}'
+    return head + (f": {text}]" if text else "]")
+
+
+def attachment_label(row, note: str = "") -> str:
+    kind = row.get("kind")
+    return (document_label if kind == "document" else video_label if kind == "video"
+            else picture_label)(row, note)
+
+
+def _attachments_by_message(c: sqlite3.Cursor, message_ids) -> dict:
+    ids = [int(i) for i in message_ids or []]
+    if not ids:
+        return {}
+    _ensure_attachments_table(c)
+    out = {}
+    for chunk in range(0, len(ids), 500):
+        part = ids[chunk:chunk + 500]
+        rows = c.execute("SELECT " + ATTACHMENT_COLUMNS + " FROM attachments WHERE message_id IN ("
+                         + ",".join("?" * len(part)) + ") ORDER BY id ASC", part).fetchall()
+        for r in rows:
+            item = attachment_row(r)
+            out.setdefault(item["message_id"], []).append(item)
+    return out
+
+
+def attachments_for_ui(items) -> list:
+    """What the chat screen gets for a user message's attachments."""
+    out = []
+    for a in items or []:
+        item = {"id": a["id"], "kind": a["kind"], "name": a.get("name") or "",
+                "caption": a.get("caption") or "", "on_desk": bool(a.get("on_desk")),
+                "number": a.get("chat_no"), "turn": a.get("turn"),
+                "width": a.get("width"), "height": a.get("height"),
+                "thumb_url": f"/attachments/{a['id']}/thumb",
+                "url": f"/attachments/{a['id']}/file",
+                "original_url": f"/attachments/{a['id']}/original"}
+        if a.get("kind") == "document":
+            read = a.get("read_tokens")
+            item.update({"thumb_url": None, "text_url": f"/attachments/{a['id']}/text",
+                         "pages": document_pages(a.get("tokens")),
+                         "read_pages": (None if read is None else
+                                        document_pages(read) if int(read) > 0 else 0),
+                         "cut": read is not None and int(read) < int(a.get("tokens") or 0)})
+            if a.get("notes"):
+                item["notes"] = {"state": {NOTES_DONE: "done", NOTES_FAILED: "failed"}.get(
+                    a["notes"], "writing"), "done": 0, "total": 0}
+        if a.get("kind") == "video":
+            import video   # late import: video imports this module
+            meta = video.load_meta(a)
+            item.update({"length": video.length_text(meta.get("duration")),
+                         "duration": meta.get("duration"), "has_audio": bool(meta.get("has_audio")),
+                         "info_url": f"/attachments/{a['id']}/watch",
+                         "video_url": item["url"] if meta.get("watch") else None})
+        out.append(item)
+    return out
+
+
+# pre: pages = [{"url", "title", "date", "notes"}] (notes None = not useful)
+# post: a new lookup row for the chat; returns its id (her "#n")
+def save_lookup(conversation_id: int, turn: int, query: str, engine, mode,
+                results: list, pages: list, excerpt: str = "") -> int:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        c.execute(
+            "INSERT INTO web_lookups (conversation_id, turn, created_at, query, engine, "
+            "mode, results, pages, excerpt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(conversation_id), int(turn or 0),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(query or "")[:500],
+             engine, mode, json.dumps(results or [], ensure_ascii=False),
+             json.dumps(pages or [], ensure_ascii=False), (excerpt or "")[:6000]))
+        new_id = c.lastrowid
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def _lookup_row(row) -> dict:
+    lid, conv, mid, turn, created, query, engine, mode, results, pages, excerpt = row
+
+    def _list(raw):
+        try:
+            value = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            return []
+        return value if isinstance(value, list) else []
+    return {"id": lid, "conversation_id": conv, "message_id": mid, "turn": turn,
+            "created_at": created, "query": query, "engine": engine, "mode": mode,
+            "results": _list(results), "pages": _list(pages), "excerpt": excerpt or ""}
+
+
+_LOOKUP_COLUMNS = ("id, conversation_id, message_id, turn, created_at, query, engine, "
+                   "mode, results, pages, excerpt")
+
+
+# post: the lookup as a dict, or None when it does not exist
+def load_lookup(lookup_id: int):
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        row = c.execute("SELECT " + _LOOKUP_COLUMNS + " FROM web_lookups WHERE id = ?",
+                        (int(lookup_id),)).fetchone()
+    finally:
+        conn.close()
+    return _lookup_row(row) if row else None
+
+
+# post: the chat's newest lookups, newest first
+def recent_lookups(conversation_id: int, limit: int = 5) -> list:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        rows = c.execute("SELECT " + _LOOKUP_COLUMNS + " FROM web_lookups "
+                         "WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+                         (int(conversation_id), int(limit))).fetchall()
+    finally:
+        conn.close()
+    return [_lookup_row(r) for r in rows]
+
+
+# post: the lookups behind a reply point at it (deleted with it later)
+def link_lookups(lookup_ids, message_id: int) -> None:
+    ids = [int(i) for i in lookup_ids or [] if isinstance(i, int)]
+    if not ids:
+        return
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_lookups_table(c)
+        c.executemany("UPDATE web_lookups SET message_id = ? WHERE id = ? AND message_id IS NULL",
+                      [(int(message_id), i) for i in ids])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# pre: sources is the list chat.take_turn_sources() handed back for the reply
+#      stored as message_id (each entry a small JSON-safe dict)
+# post: saved in the row's sources column; an empty list stores nothing
+def set_message_sources(message_id: int, sources: list) -> None:
+    if not sources:
+        return
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        c.execute("UPDATE messages SET sources = ? WHERE id = ?",
+                  (json.dumps(sources, ensure_ascii=False), int(message_id)))
+        conn.commit()
+    finally:
+        conn.close()
+    link_lookups([e.get("lookup_id") for e in sources if isinstance(e, dict)], message_id)
+
+
+# post: the reply row remembers what she read of a long document ("" = nothing)
+def set_message_doc_reads(message_id: int, text: str) -> None:
+    if not text:
+        return
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        c.execute("UPDATE messages SET doc_reads = ? WHERE id = ?", (str(text)[:300], int(message_id)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_message_doc_reads(message_id) -> str:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute("SELECT doc_reads FROM messages WHERE id = ?", (int(message_id),)).fetchone()
+    finally:
+        conn.close()
+    return str(row[0]) if row and row[0] else ""
+
+
+# post: the reply's saved sources ([] when none or unreadable). Never modifies memory.
+def load_message_sources(message_id: int) -> list:
+    conn = _connect_db()
+    try:
+        c = conn.cursor()
+        _ensure_messages_table(c)
+        row = c.execute("SELECT sources FROM messages WHERE id = ?",
+                        (int(message_id),)).fetchone()
+    finally:
+        conn.close()
+    try:
+        value = json.loads(row[0]) if row and row[0] else []
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 # pre: message_id may or may not exist
@@ -2623,8 +3511,11 @@ def delete_message(message_id: int) -> bool:
     _ensure_messages_table(c)
     c.execute("DELETE FROM messages WHERE id = ?", (message_id,))
     ok = c.rowcount > 0
+    _delete_lookups(c, "message_id = ?", (message_id,))
+    files = _delete_attachments(c, "message_id = ?", (message_id,))
     conn.commit()
     conn.close()
+    remove_attachment_files(files)
     return ok
 
 
@@ -2671,11 +3562,11 @@ def activate_version(message_id: int):
         return None
     _, conv, role = row
     cids = c.execute(
-        "SELECT id, role, greeting, greeting_group FROM messages "
+        "SELECT id, role, " + _OWN_TURN_SQL + ", greeting_group FROM messages "
         "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     turn = next((g for g in _group_reply_turns(
-        [(i, r, (g if g else 0), gg) for i, r, g, gg in cids])
+        [(i, r, (1 if g else 0), gg) for i, r, g, gg in cids])
         if int(message_id) in g), None)
     if turn is None:
         conn.close()
@@ -2699,7 +3590,7 @@ def get_trailing_turn(conversation_id=None) -> List[int]:
     c = conn.cursor()
     _ensure_messages_table(c)
     cids = c.execute(
-        "SELECT id, role, greeting, greeting_group FROM messages "
+        "SELECT id, role, " + _OWN_TURN_SQL + ", greeting_group FROM messages "
         "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     conn.close()
@@ -2718,13 +3609,13 @@ def get_message_before(exclude_ids, conversation_id=None):
     if exclude_ids:
         row = c.execute(
             "SELECT id, role, content FROM messages WHERE conversation_id = ? AND id < ? "
-            "ORDER BY id DESC LIMIT 1",
+            "AND COALESCE(aside, 0) = 0 ORDER BY id DESC LIMIT 1",
             (conv, min(exclude_ids)),
         ).fetchone()
     else:
         row = c.execute(
             "SELECT id, role, content FROM messages WHERE conversation_id = ? "
-            "ORDER BY id DESC LIMIT 1",
+            "AND COALESCE(aside, 0) = 0 ORDER BY id DESC LIMIT 1",
             (conv,),
         ).fetchone()
     conn.close()
@@ -2753,7 +3644,7 @@ def undo_last_assistant(conversation_id=None):
         conn.close()
         return None
     cids = c.execute(
-        "SELECT id, role, greeting, greeting_group FROM messages "
+        "SELECT id, role, " + _OWN_TURN_SQL + ", greeting_group FROM messages "
         "WHERE conversation_id = ? ORDER BY id ASC", (conv,)
     ).fetchall()
     turns = _group_reply_turns([(i, r, g if g else 0, gg) for i, r, g, gg in cids])
@@ -2776,9 +3667,19 @@ def undo_last_assistant(conversation_id=None):
     # The first version is viewed (or it is the only one): remove the whole turn.
     for mid in turn:
         c.execute("DELETE FROM messages WHERE id = ?", (mid,))
+        _delete_lookups(c, "message_id = ?", (mid,))
+    # Her "hold on" line before that answer goes with it.
+    deleted = list(turn)
+    while True:
+        prev = c.execute("SELECT id, role, COALESCE(aside, 0) FROM messages "
+                         "WHERE conversation_id = ? ORDER BY id DESC LIMIT 1", (conv,)).fetchone()
+        if not prev or prev[1] != "assistant" or not prev[2]:
+            break
+        c.execute("DELETE FROM messages WHERE id = ?", (prev[0],))
+        deleted.insert(0, prev[0])
     conn.commit()
     conn.close()
-    return {"action": "deleted", "deleted_id": turn[-1], "deleted_ids": turn}
+    return {"action": "deleted", "deleted_id": turn[-1], "deleted_ids": deleted}
 
 
 # ---------- CONVERSATIONS (chat sessions) ----------
@@ -2959,6 +3860,8 @@ def delete_conversation(conversation_id: int) -> bool:
         raise ValueError("Cannot delete the last conversation")
     c.execute("DELETE FROM conversations WHERE id = ?", (conv,))
     c.execute("DELETE FROM messages WHERE conversation_id = ?", (conv,))
+    _delete_lookups(c, "conversation_id = ?", (conv,))
+    files = _delete_attachments(c, "conversation_id = ?", (conv,))
     active_saved: int | None = None
     try:
         active_saved = int((load_active_conversation_raw() or "").strip())
@@ -2966,6 +3869,7 @@ def delete_conversation(conversation_id: int) -> bool:
         active_saved = None
     conn.commit()
     conn.close()
+    remove_attachment_files(files)
 
     if active_saved == conv:
         next_conn = _connect_db()
@@ -2983,6 +3887,30 @@ def delete_conversation(conversation_id: int) -> bool:
 #       User lines stay in the language the user wrote them in. Older messages
 #       after a gap of 2+ hours carry a short bracketed time note (her prompt
 #       otherwise has no dates); the latest user message stays clean.
+def _merge_asides(rows):
+    """Her "hold on, let me check" line joins the answer after it, so her
+    prompt history still alternates user / her (chat templates expect that)
+    and she remembers saying it. An aside with no answer after it (the answer
+    failed, or is being written again) is left out."""
+    out = []
+    pending = None
+    for row in rows:
+        mid, role, content, japanese, created_at, aside = row
+        if role == "assistant" and aside:
+            pending = row
+            continue
+        if pending is not None and role == "assistant":
+            _, _, a_content, a_japanese, _, _ = pending
+            content = ((a_content or "").strip() + " " + (content or "")).strip()
+            if japanese or a_japanese:
+                japanese = ((a_japanese or a_content or "").strip()
+                            + (japanese or content or "")).strip()
+            row = (mid, role, content, japanese, created_at, aside)
+        pending = None
+        out.append(row)
+    return out
+
+
 def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[str, str]]:
     conv = _active_conv_id(None) if conversation_id is None else int(conversation_id)
     conn = _connect_db()
@@ -2993,18 +3921,20 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
     if exclude_ids:
         ph = ",".join("?" * len(exclude_ids))
         rows = c.execute(
-            "SELECT id, role, content, japanese, created_at FROM messages "
+            "SELECT id, role, content, japanese, created_at, aside FROM messages "
             "WHERE conversation_id = ? AND (role = 'user' OR active = 1) "
             "AND id NOT IN (" + ph + ") ORDER BY id ASC",
             [conv, *exclude_ids],
         ).fetchall()
     else:
         rows = c.execute(
-            "SELECT id, role, content, japanese, created_at FROM messages "
+            "SELECT id, role, content, japanese, created_at, aside FROM messages "
             "WHERE conversation_id = ? AND (role = 'user' OR active = 1) "
             "ORDER BY id ASC", (conv,)
         ).fetchall()
+    shown = _attachments_by_message(c, [r[0] for r in rows if r[1] == "user"])
     conn.close()
+    rows = _merge_asides(rows)
     out = []
     prev_created_at = None
     # The latest user message is the one being answered right now: its timing
@@ -3017,8 +3947,17 @@ def load_memory_for_prompt(conversation_id=None, exclude_ids=None) -> List[Dict[
         (i for i, row in enumerate(rows) if row[1] == "user"), default=-1
     )
     now_local = datetime.now().astimezone()  # one "now" for every note
-    for i, (mid, role, content, japanese, created_at) in enumerate(rows):
+    for i, (mid, role, content, japanese, created_at, _aside) in enumerate(rows):
         base = japanese if (role == "assistant" and japanese) else content
+        if shown.get(mid) and i != last_user_index:
+            # Her earlier pictures as text labels (the newest message's own
+            # pictures are added for real by attachments.with_pictures).
+            # On her desk she sees the picture itself: its label stays exactly
+            # as it was when it was sent (no caption), so this message never
+            # changes while it is there (her built-in model keeps reusing it).
+            labels = " ".join(attachment_label({**a, "caption": None} if a.get("on_desk") else a)
+                              for a in shown[mid])
+            base = ((base or "").strip() + " " + labels).strip()
         note = (None if i == last_user_index
                 else _time_note(created_at, prev_created_at, now_local))
         out.append({"id": mid, "role": role,

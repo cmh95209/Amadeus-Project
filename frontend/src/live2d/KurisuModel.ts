@@ -17,6 +17,19 @@ export class KurisuModel extends CubismUserModel {
   private speaking = false;
   private lipSyncValue = 0;
   private readonly mouthOpenId = CubismFramework.getIdManager().getId("ParamMouthOpenY");
+  // "Looking" at a picture you sent (D7, 2026-10-26): made from parameters
+  // the model already has (it has no head or body angle): eyes glance down,
+  // irises a little wider, the thinking arms + face. Eased in and out.
+  private looking = false;
+  private lookWeight = 0;
+  private static readonly LOOK_POSE: [string, number][] = [
+    ["ParamEyeBallY", -0.55],     // share of the way to the lowest value
+    ["Param3", 0.35],             // IrisScale R, toward its highest value
+    ["Param6", 0.8],              // Arms Thinking Movement
+    ["Param8", 0.8],              // Thinking FaceExpression
+  ];
+  private readonly lookIds = KurisuModel.LOOK_POSE.map(([name, share]) =>
+    [CubismFramework.getIdManager().getId(name), share] as const);
 
   constructor(private readonly gl: WebGLRenderingContext) {
     super();
@@ -83,6 +96,30 @@ export class KurisuModel extends CubismUserModel {
     this.lipSyncValue = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
   }
 
+  setLooking(looking: boolean): void {
+    this.looking = looking;
+  }
+
+  /** Blend the looking pose over the motion pose (not saved into it, like lip-sync). */
+  private applyLook(deltaSeconds: number): void {
+    const target = this.looking ? 1 : 0;
+    const step = deltaSeconds / 0.35;            // ~0.35 s to ease in / out
+    this.lookWeight = target > this.lookWeight
+      ? Math.min(target, this.lookWeight + step)
+      : Math.max(target, this.lookWeight - step);
+    if (this.lookWeight <= 0) return;
+    const model = this.getModel();
+    for (const [id, share] of this.lookIds) {
+      const index = model.getParameterIndex(id);
+      if (index < 0) continue;
+      const now = model.getParameterValueByIndex(index);
+      const goal = share < 0
+        ? now + (model.getParameterMinimumValue(index) - now) * -share
+        : now + (model.getParameterMaximumValue(index) - now) * share;
+      model.setParameterValueByIndex(index, now + (goal - now) * this.lookWeight);
+    }
+  }
+
   update(deltaSeconds: number): void {
     if (!this.ready) return;
     const model = this.getModel();
@@ -91,6 +128,7 @@ export class KurisuModel extends CubismUserModel {
     // Carry the blended motion pose into the next frame. Saving before
     // lip-sync keeps audio-driven mouth values out of the motion baseline.
     model.saveParameters();
+    this.applyLook(deltaSeconds);
     if (this.speaking) {
       model.setParameterValueById(this.mouthOpenId, this.lipSyncValue);
     }

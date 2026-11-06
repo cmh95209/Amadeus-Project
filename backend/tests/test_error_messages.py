@@ -61,6 +61,18 @@ class ModelNotFoundMessageTests(unittest.TestCase):
             msg = api._llm_error_message(exc)
         self.assertIn(":batch", msg)
 
+    def test_out_of_credit_is_explained(self):
+        # 2026-11-05: OpenRouter refused a phone video (402, balance
+        # under $1) and the chat only said "(APIStatusError)".
+        import openai
+        fake_response = type("FakeResponse", (),
+                             {"status_code": 402, "headers": {}, "request": object()})()
+        exc = openai.APIStatusError("requires at least $1.00 in balance for video",
+                                    response=fake_response, body=None)
+        msg = api._llm_error_message(exc)
+        self.assertIn("out of credit", msg)
+        self.assertNotIn("APIStatusError", msg)
+
     def test_other_failures_keep_the_generic_message(self):
         msg = api._llm_error_message(ValueError("boom"))
         self.assertIn("ValueError", msg)

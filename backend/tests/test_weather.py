@@ -391,6 +391,77 @@ class WeatherWiringTests(unittest.TestCase):
         self.assertIn(weather.SERVICE_DOWN_LINE, log[1][-1]["content"])
 
 
+class BothPlacesTests(unittest.TestCase):
+    """2026-11-06: "What's the weather like this morning?" -> she asked which
+    town -> "How about both?" never reached the router (no weather word) and
+    she made up the numbers for Lisbon and Porto."""
+
+    HISTORY = [
+        {"role": "system", "content": "persona"},
+        {"role": "user", "content": "What's the weather like this morning?"},
+        {"role": "assistant", "content": "どっちのお天気が知りたいの？リスボンか、ポルトかしら。"},
+        {"role": "user", "content": "How about both? Thanks in advance~"},
+    ]
+
+    def test_follow_up_reaches_the_router(self):
+        self.assertTrue(chat._web_triage_candidate(self.HISTORY[-1]["content"], self.HISTORY))
+        self.assertFalse(chat._web_triage_candidate("How about both?", [
+            {"role": "user", "content": "Which shirt should I wear?"},
+            {"role": "assistant", "content": "The blue one or the red one?"},
+            {"role": "user", "content": "How about both?"}]))
+
+    def test_both_places_are_fetched(self):
+        log = []
+        llm = FakeLLM(lambda convo: FakeReply(tool_calls=pack_call(eng="Both are warm.")),
+                      log, triage=triage_call(weather="yes", place="Lisbon ; Porto"))
+        chat._begin_turn_sources()
+        try:
+            with patch.object(chat.store, "load_deep_thinking", return_value=False), \
+                 patch.object(chat.weather, "fetch_weather_report",
+                              side_effect=lambda p: "BLOCK " + p) as fw:
+                chat._getResponsePackedWithWebSearch(llm, self.HISTORY)
+        finally:
+            sources = chat.take_turn_sources()
+        self.assertEqual([c.args[0] for c in fw.call_args_list], ["Lisbon", "Porto"])
+        fed = log[1][-1]["content"]
+        self.assertIn("BLOCK Lisbon", fed)
+        self.assertIn("BLOCK Porto", fed)
+        self.assertEqual([s["place"] for s in sources], ["Lisbon", "Porto"])
+
+    def test_places_split_and_capped(self):
+        self.assertEqual(chat._weather_places("A ; B;C ; D ; A"), ["A", "B", "C"])
+        self.assertEqual(chat._weather_places("Porto, Portugal"), ["Porto, Portugal"])
+
+    def test_made_up_figures_get_the_honest_line(self):
+        made_up = chat.AmadeusPack(assistant_reply_JPS="リスボンの気温は１９度くらいよ。",
+                                   assistant_reply_ENG="Lisbon is around 19 degrees.")
+        chat._begin_turn_sources()
+        try:
+            out = chat._made_up_weather_net(made_up, self.HISTORY)
+        finally:
+            chat.take_turn_sources()
+        self.assertIn("didn't actually look the weather up", out.assistant_reply_ENG)
+
+    def test_looked_up_or_user_said_figures_pass(self):
+        pack = chat.AmadeusPack(assistant_reply_JPS="気温は３０度ね。",
+                                assistant_reply_ENG="The temperature is 30 degrees.")
+        chat._begin_turn_sources()
+        try:
+            chat._record_source({"kind": "weather", "place": "X", "url": "u"})
+            self.assertIs(chat._made_up_weather_net(pack, self.HISTORY), pack)
+        finally:
+            chat.take_turn_sources()
+        chat._begin_turn_sources()
+        try:
+            said = [{"role": "user", "content": "It's 30 degrees here, so hot"}]
+            self.assertIs(chat._made_up_weather_net(pack, said), pack)
+            plain = chat.AmadeusPack(assistant_reply_JPS="１９時に出発ね。",
+                                     assistant_reply_ENG="You leave at 19:00.")
+            self.assertIs(chat._made_up_weather_net(plain, self.HISTORY), plain)
+        finally:
+            chat.take_turn_sources()
+
+
 class WebOffWeatherTests(unittest.TestCase):
     """Web OFF: the weather fast path must not run at all (user's decision)."""
 

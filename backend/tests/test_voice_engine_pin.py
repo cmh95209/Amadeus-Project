@@ -111,7 +111,8 @@ class _FakeUpstream(unittest.TestCase):
 _EXTRACT = r"""
 param($Installer, $Out)
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Installer, [ref]$null, [ref]$null)
-$names = @('Log', 'Set-GptSovitsVersion')
+$names = @('Write-LogLines', 'Log', 'Write-LogOnly', 'Join-ProcessArgs', 'Invoke-Tool',
+           'Get-ToolTail', 'Resolve-Exe', 'Set-GptSovitsVersion')
 $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $names -contains $n.Name }, $true)
 if (@($defs).Count -ne $names.Count) { throw ('expected ' + $names.Count + ' functions, found ' + @($defs).Count) }
 Set-Content -Path $Out -Value ((@($defs) | ForEach-Object { $_.Extent.Text }) -join "`n`n") -Encoding utf8

@@ -22,3 +22,16 @@ export const interactions = {
 };
 
 export type InteractionName = keyof typeof interactions;
+
+/** A tap on her shoulders pokes her: she starts talking (the same as the
+ *  Poke button by the message box). Same 600 x 800 design space. */
+export const pokeSpots = {
+  leftShoulder: {
+    label: "Poke her shoulder",
+    position: { top: "33.5%", left: "39%", width: "11%", height: "6%" },
+  },
+  rightShoulder: {
+    label: "Poke her shoulder",
+    position: { top: "33.5%", left: "61%", width: "11%", height: "6%" },
+  },
+};

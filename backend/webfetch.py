@@ -42,6 +42,8 @@ PAGE_CONTEXT_SHARE = 0.35       # a page may claim at most ~35% of the window
 MIN_PAGE_CHARS = 2000           # below this a page is "too thin to answer from"
 MAX_DOWNLOAD_BYTES = 512 * 1024 # raw download cap
 DEFAULT_TIMEOUT = 15            # seconds; the caller usually passes a smaller one
+MAX_REDIRECTS = 5               # hops followed for one address
+MAX_URL_CHARS = 2000            # a longer pasted link is not opened
 
 _SSL_CTX = ssl.create_default_context()
 _USER_AGENTS = (
@@ -117,6 +119,38 @@ def is_safe_public_url(url):
     if _host_is_blocked(parts.hostname or ""):
         return False, "unsafe"
     return True, ""
+
+
+# --- links the user pastes (2026-10-26) ----------------------------------------
+# A link that carries a login (name:password@host) or a key / token / password
+# in its query is never opened: opening it would hand that secret to the site
+# (and to the log). Very long addresses are refused as well.
+_SECRET_PARAM_RE = re.compile(
+    r"^(?:access_?token|id_?token|refresh_?token|token|auth|authorization|api_?key|apikey|"
+    r"key|password|passwd|pwd|pass|secret|client_?secret|session|session_?id|sid|sig|"
+    r"signature|x-amz-signature|x-amz-credential|x-goog-signature|otp|code_verifier)$",
+    re.IGNORECASE)
+
+
+def risky_link(url) -> str:
+    """Why a pasted link must not be opened ("" when it may be): "is too long",
+    "has a password or key in it", or "is not a web address"."""
+    url = str(url or "").strip()
+    if len(url) > MAX_URL_CHARS:
+        return "is too long"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except Exception:
+        return "is not a web address"
+    if parts.scheme not in ("http", "https") or not host:
+        return "is not a web address"
+    if parts.username or parts.password:
+        return "has a password or key in it"
+    for name, _value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+        if _SECRET_PARAM_RE.match(name.strip()):
+            return "has a password or key in it"
+    return ""
 
 
 # --- HTML -> text -----------------------------------------------------------
@@ -270,8 +304,31 @@ def _decode(raw, charset):
     return raw.decode("utf-8", "replace")
 
 
-def _download(url, timeout):
-    """GET a URL. Returns (err, body_text, content_type); err is None on success."""
+class _UnsafeRedirect(Exception):
+    """A redirect pointed at a private / local address."""
+
+
+class _SafeRedirects(urllib.request.HTTPRedirectHandler):
+    """Every redirect hop is checked BEFORE it is followed (2026-10-26): a
+    public page that redirects to the local network is refused without the
+    local address ever being contacted. At most MAX_REDIRECTS hops."""
+    max_redirections = MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        ok, _why = is_safe_public_url(newurl)
+        if not ok:
+            raise _UnsafeRedirect(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(
+    _SafeRedirects, urllib.request.HTTPSHandler(context=_SSL_CTX))
+
+
+def _download(url, timeout, meta=None):
+    """GET a URL. Returns (err, body_text, content_type); err is None on success.
+    `meta` (a dict), when given, receives "final_url" - where the redirects
+    ended."""
     req = urllib.request.Request(url, headers={
         "User-Agent": random.choice(_USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -279,11 +336,13 @@ def _download(url, timeout):
         "Accept-Encoding": "gzip",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
-            # Re-check the FINAL url (guards against open-redirect SSRF).
+        with _OPENER.open(req, timeout=timeout) as resp:
+            # Re-check the FINAL url too (the hops were checked on the way).
             ok, _why = is_safe_public_url(resp.geturl())
             if not ok:
                 return "unsafe", "", ""
+            if meta is not None:
+                meta["final_url"] = resp.geturl()
             raw = resp.read(MAX_DOWNLOAD_BYTES + 1)
             ctype = (resp.headers.get("Content-Type") or "").lower()
             if len(raw) > MAX_DOWNLOAD_BYTES:
@@ -295,6 +354,8 @@ def _download(url, timeout):
                 except Exception:
                     pass
             return None, _decode(raw, _charset_from(ctype)), ctype
+    except _UnsafeRedirect:
+        return "unsafe", "", ""
     except urllib.error.HTTPError as e:
         try:
             body = e.read(MAX_DOWNLOAD_BYTES).decode("utf-8", "replace")
@@ -306,26 +367,210 @@ def _download(url, timeout):
 
 
 # --- public entry -----------------------------------------------------------
-def fetch_page_text(url, max_chars=None, timeout=DEFAULT_TIMEOUT):
-    """Fetch a URL and return (status, text). See module docstring for statuses."""
-    if max_chars is None:
-        max_chars = MAX_PAGE_CHARS
+# --- page details: title + dates (2026-10-25) ---------------------------------
+# Old news must not read as new: a page's own published / updated date (meta
+# tags, JSON-LD, <time>) is read here, plus a "Month YYYY" in its title
+# ("Banner Schedule (October 2026)"), which many live pages carry instead.
+_MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july",
+                "august", "september", "october", "november", "december")
+_META_DATE_KEYS = {
+    "article:published_time": "published", "datepublished": "published",
+    "publishdate": "published", "pubdate": "published", "date": "published",
+    "dc.date": "published", "dc.date.issued": "published",
+    "sailthru.date": "published", "parsely-pub-date": "published",
+    "article:modified_time": "updated", "og:updated_time": "updated",
+    "datemodified": "updated", "last-modified": "updated", "lastmod": "updated",
+}
+_ISO_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def _iso_day(value):
+    """'2026-10-24T09:00:00+09:00' -> '2026-10-24'; '' when it is no real date."""
+    m = _ISO_DATE_RE.search(str(value or ""))
+    if not m:
+        return ""
+    y, mo, d = (int(x) for x in m.groups())
+    if not (1990 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+class _MetaReader(HTMLParser):
+    """Collects <title>, date meta tags, JSON-LD blocks and <time datetime>."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.og_title = ""
+        self.dates = {"published": "", "updated": ""}
+        self.times = []
+        self.jsonld = []
+        self._in = None
+
+    def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "title" and not self.title:
+            self._in = "title"
+        elif tag == "meta":
+            key = (a.get("property") or a.get("name") or a.get("itemprop")
+                   or a.get("http-equiv") or "").lower()
+            if key == "og:title" and not self.og_title:
+                self.og_title = a.get("content", "").strip()
+            kind = _META_DATE_KEYS.get(key)
+            day = _iso_day(a.get("content"))
+            if kind and day and not self.dates[kind]:
+                self.dates[kind] = day
+        elif tag == "time":
+            day = _iso_day(a.get("datetime"))
+            if day:
+                self.times.append(day)
+        elif tag == "script" and "ld+json" in a.get("type", "").lower():
+            self._in = "jsonld"
+            self.jsonld.append("")
+
+    def handle_endtag(self, tag):
+        if tag in ("title", "script"):
+            self._in = None
+
+    def handle_data(self, data):
+        if self._in == "title":
+            self.title += data
+        elif self._in == "jsonld":
+            self.jsonld[-1] += data
+
+
+def _title_month(title):
+    """'Banner Schedule (October 2026)' / '2026年10月' -> '2026-10', else ''."""
+    t = (title or "").lower()
+    m = re.search(r"\b(" + "|".join(_MONTH_NAMES) + r")\s+(\d{4})\b", t)
+    if m:
+        return f"{int(m.group(2)):04d}-{_MONTH_NAMES.index(m.group(1)) + 1:02d}"
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", title or "")
+    if m and 1 <= int(m.group(2)) <= 12:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    return ""
+
+
+def page_details(html):
+    """{"title", "published", "updated", "title_month"} read from a page's HTML
+    (each "" when the page does not say). Never raises."""
+    out = {"title": "", "published": "", "updated": "", "title_month": ""}
+    if not html:
+        return out
+    r = _MetaReader()
+    try:
+        r.feed(html[:400000])
+        r.close()
+    except Exception:
+        pass
+    out["title"] = re.sub(r"\s+", " ", r.og_title or r.title or "").strip()[:300]
+    out["published"], out["updated"] = r.dates["published"], r.dates["updated"]
+    for block in r.jsonld:
+        for kind, key in (("published", "datePublished"), ("updated", "dateModified")):
+            if not out[kind]:
+                m = re.search(r'"' + key + r'"\s*:\s*"([^"]+)"', block)
+                if m:
+                    out[kind] = _iso_day(m.group(1))
+    if not out["published"] and r.times:
+        out["published"] = min(r.times)
+    out["title_month"] = _title_month(out["title"])
+    return out
+
+
+def page_date(details):
+    """The date a page is best known by: updated, else published, else the
+    title's month ("2026-10"); "" when unknown."""
+    d = details or {}
+    return d.get("updated") or d.get("published") or d.get("title_month") or ""
+
+
+# --- public entry -----------------------------------------------------------
+# Content types read as text; anything else (PDF, images, video, downloads)
+# is "unsupported" - never decoded into garbage text.
+_TEXT_TYPES = ("text/", "html", "xml", "json")
+
+# Why a page could not be read, in words she can say (fetch_page "reason").
+_HTTP_REASONS = {401: "needs a login", 402: "is behind a paywall",
+                 403: "blocked automated access", 404: "was not found",
+                 410: "was not found", 429: "is busy right now"}
+
+
+def _reason(err) -> str:
+    m = re.match(r"http_(\d+)$", str(err or ""))
+    if m:
+        code = int(m.group(1))
+        return _HTTP_REASONS.get(code, "had a server error" if code >= 500 else "could not be opened")
+    if re.search(r"(?i)timed? ?out", str(err or "")):
+        return "took too long"
+    return "could not be opened"
+
+
+def fetch_page(url, timeout=DEFAULT_TIMEOUT, min_chars=None):
+    """Fetch a URL -> {"status", "text", "title", "published", "updated",
+    "title_month", "reason", "final_url"}. status as in fetch_page_text, plus
+    "unsupported" (not a web page: PDF, image, video, a download); "text" is
+    the whole readable text (not cut to a budget - the caller picks what it
+    needs); "reason" says in words why a page could not be read; "final_url"
+    is where the redirects ended. `min_chars` (default MIN_PAGE_CHARS): below
+    it a page counts as "empty" - a link the user gave is read when shorter."""
+    out = {"status": "error", "text": "", "title": "", "published": "",
+           "updated": "", "title_month": "", "reason": "", "final_url": url}
+    min_chars = MIN_PAGE_CHARS if min_chars is None else min_chars
     allowed, _why = is_safe_public_url(url)
     if not allowed:
-        return "unsafe", "(this address is on the local network and was not fetched)"
-    err, body, ctype = _download(url, timeout)
+        out["status"] = "unsafe"
+        out["reason"] = "is a private or local address"
+        return out
+    meta = {}
+    err, body, ctype = _download(url, timeout, meta)
+    out["final_url"] = meta.get("final_url") or url
+    if err == "unsafe":
+        out["status"] = "unsafe"
+        out["reason"] = "redirects to a private or local address"
+        return out
     if body is None:
-        return "error", ""
+        out["reason"] = _reason(err)
+        return out
+    if err is None and ctype and not any(t in ctype for t in _TEXT_TYPES):
+        out["status"] = "unsupported"
+        out["reason"] = "is not a web page (" + ctype.split(";")[0].strip() + ")"
+        return out
     stripped = body.lstrip()[:200].lower()
     is_html = ("html" in ctype) or stripped.startswith("<!doctype html") \
         or stripped.startswith("<html")
     text = html_to_text(body) if is_html else re.sub(r"\s+", " ", body).strip()
+    if is_html:
+        out.update(page_details(body))
     if looks_bot_walled(text):
-        return "blocked", "(this page blocked automated access)"
+        out["status"] = "blocked"
+        out["reason"] = "blocked automated access"
+        return out
     if err is not None:
-        return "error", ""
-    if len(text) < MIN_PAGE_CHARS:
+        out["reason"] = _reason(err)
+        return out
+    if len(text) < min_chars:
+        out["status"] = "empty"
+        out["reason"] = "had no readable text (it may need scripts or a login)"
+        return out
+    out["status"] = "ok"
+    out["text"] = text
+    return out
+
+
+def fetch_page_text(url, max_chars=None, timeout=DEFAULT_TIMEOUT):
+    """Fetch a URL and return (status, text). See module docstring for statuses."""
+    if max_chars is None:
+        max_chars = MAX_PAGE_CHARS
+    page = fetch_page(url, timeout=timeout)
+    status, text = page["status"], page["text"]
+    if status == "unsafe":
+        return "unsafe", "(this address is on the local network and was not fetched)"
+    if status == "blocked":
+        return "blocked", "(this page blocked automated access)"
+    if status == "empty":
         return "empty", "(this page had no usable readable text)"
+    if status != "ok":
+        return "error", ""
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n\n... (truncated, {len(text)} chars total)"
     return "ok", text

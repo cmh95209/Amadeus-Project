@@ -1,27 +1,48 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.12.3  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
 #
-#  WHAT'S NEW IN v4.12.3 (November 2026, app v2.1.2):
-#   - A damaged Miniconda download cache ("CondaVerificationError ... appears
-#     to be corrupted") is repaired automatically: the damaged packages are
-#     deleted and downloaded again, then the step is retried once.
-#
-#  WHAT'S NEW IN v4.12.2 (November 2026, app v2.1.2):
-#   - A Python toolbox left broken by an earlier install that stopped
-#     ("'pip' is not recognized") is now rebuilt automatically instead of
-#     being trusted because its name exists.
-#   - An install folder that is not a full path (for example just "Yes")
-#     is refused with a clear message instead of landing in whatever
-#     folder the window happened to be in.
-#   - Graphics cards older than the RTX 20 / GTX 16 series (GTX 10 series
-#     and before) get the processor version of the voice engine - the
-#     graphics-card version cannot run on them. The log now names the card,
-#     its memory, driver and generation, and step 7 runs a real test
-#     calculation on the card.
+#  WHAT'S NEW IN v4.13 (October 2026):
+#   - (also in v4.12.3) A damaged Miniconda download cache ("... appears to
+#     be corrupted") is repaired automatically and the step retried once.
+#   - (also in v4.12.2) A Python toolbox left broken by an earlier install
+#     that stopped is rebuilt automatically, and an install folder that is
+#     not a full path (for example just "Yes") is refused with a clear message.
+#   - Her own built-in local model, no account needed. The very first
+#     question is how Amadeus should think: A) a local model set up
+#     automatically, or B) your own model / a cloud service (as before).
+#     For A the installer looks at your graphics card and memory, picks the
+#     Gemma 4 model that fits this PC, and downloads it (and llama.cpp, the
+#     program that runs it) in the background while everything else
+#     installs, resumable and checked against the official checksums.
+#     Models live in <install folder>\models.
+#   - Her voice downloads only the files it uses (~1.2 GB instead of ~6.5 GB,
+#     and no ~13 GB leftover in the temp folder), also in the background;
+#     her memory's search model (~1.2 GB) downloads during the install
+#     instead of at her first start.
+#   - "Install Amadeus.bat": download it and double-click it - it fetches
+#     this installer and runs it (no PowerShell line to paste).
+#   - No administrator needed: run it in a normal PowerShell window. Git,
+#     Miniconda and FFmpeg install for your user only; Node.js, when
+#     missing, goes into your own folder (%USERPROFILE%\.amadeus-tools\node).
+#   - Faster: the project downloads only its latest version (~24 MB
+#     instead of ~186 MB), and her model downloads alongside the rest.
+#   - A calm screen: one progress box per step (the current package and its
+#     download percentage) instead of hundreds of scrolling lines.
+#   - install_log.txt now records EVERYTHING the helper programs print (pip,
+#     conda, git, winget, npm), with their result codes - one file to send
+#     if something goes wrong. It is saved as UTF-8.
+#   - At the end it offers to start Amadeus right away.
+#   - Her memory (about 1.3 GB) is set up during the install, in step 5 -
+#     her first start no longer begins with that download.
+#   - The app's logs are in a normal, visible "logs" folder inside the
+#     project folder (they used to be in the hidden-looking .runtime\logs).
+#   - Option B on a PC with a graphics card also installs llama.cpp (no
+#     model): put a GGUF file in the models folder and choose Built-in in
+#     Settings -> Connection to run it on this PC.
 #
 #  WHAT'S NEW IN v4.12.1 (October 2026, app v2.1.1):
 #   - The voice engine (GPT-SoVITS) is pinned to the version Amadeus is
@@ -177,7 +198,9 @@
 #  HOW TO RUN (same every time - it picks up where it left off):
 #   1) Save this file somewhere you remember, e.g. your Downloads folder.
 #      (If you moved it elsewhere, put its real path in step 3.)
-#   2) Windows key -> type "PowerShell" -> right-click -> "Run as administrator".
+#   2) Windows key -> type "PowerShell" -> open it. (No administrator needed:
+#      everything installs for your own user account. "Run as administrator"
+#      still works too.)
 #   3) Paste this ONE line and press Enter:
 #        Set-ExecutionPolicy -Scope Process Bypass; & "$HOME\Downloads\install_windows.ps1"
 #      (Optional: add  -InstallDir "E:\Some\Place"  at the end to install
@@ -190,8 +213,37 @@ param(
     # Optional: where to install. Example:
     #   .\install_windows.ps1 -InstallDir "C:\Some\Place"
     # Without it, the default (your user profile's "Amadeus" folder) is used.
-    [string]$InstallDir = ""
+    [string]$InstallDir = "",
+    # ---- Test options (for the project's own test installs; testers never
+    #      need them). They change only WHERE the code comes from and the
+    #      NAMES of the Python environments - every step below runs the same.
+    # Clone from a git repo on this PC instead of GitHub (no push needed).
+    [string]$Source = "",
+    # Which branch to install (default: the released one).
+    [string]$Branch = "main",
+    # Give this install its own Python environments (e.g. "test" ->
+    # amadeus-test, amadeus-cm-test, GPTSoVits-test), so a test install never
+    # touches the environments of another install on the same PC. Remembered
+    # in the install folder: a re-run without it keeps the same suffix.
+    [string]$EnvSuffix = "",
+    # Pretend the graphics card has this much memory (GB), to walk through
+    # every local-model tier on one PC. -1 = use the real card.
+    [int]$SimulateVramGB = -1,
+    # Same for normal memory (RAM, GB). -1 = the real amount.
+    [int]$SimulateRamGB = -1,
+    # Only look at this PC (graphics card, memory, disk) and print which
+    # local model it would get - installs nothing, creates no folder.
+    # Add -Json for machine-readable output (used by the project's tests).
+    [switch]$HardwareCheckOnly,
+    [switch]$Json,
+    # Test: go through every built-in-model screen and write its settings
+    # file, but download no model (the app then sees the model as missing).
+    [switch]$SkipLlmDownload,
+    # Test: ONLY the built-in-model screens + settings file (implies
+    # -SkipLlmDownload): no programs, environments or project download.
+    [switch]$LlmScreensOnly
 )
+$InstallerVersion = "v4.13"
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faster
@@ -225,20 +277,173 @@ $LogPath    = Join-Path $InstallDir "install_log.txt"
 # older installers sit on the old feature branch; they are moved to main
 # (Step 3) when they hold nothing of the user's own.
 $ForkUrl       = "https://github.com/cmh95209/Amadeus-Project.git"
-$Branch        = "main"
 $LegacyBranch  = "feature/character-memory-spike"
 # The voice engine is PINNED to the version Amadeus is tested with (2026-08-18).
 # Its newest version (October 2026: "V5" + a CUDA-graph rework) made her voice
-# take minutes per line instead of seconds.
+# take minutes per line instead of seconds; an upgrade happens only after it
+# is tested here (see the V5 evaluation on the roadmap).
 $GptSovitsUrl    = "https://github.com/RVC-Boss/GPT-SoVITS.git"
 $GptSovitsCommit = "48b1a0169a28582a8984402f82cf438d3bfa6aca"
+# -Source: a local repo stands in for GitHub everywhere (first clone AND the
+# update check on a re-run), so a re-run picks up new local commits.
+if ($Source) { $ForkUrl = (Resolve-Path -LiteralPath $Source -ErrorAction SilentlyContinue).Path }
 
+# The install log is UTF-8 (Windows' old default encoding turned Japanese text
+# and pip's symbols into "?"). Log = screen + log; Write-LogOnly = log only
+# (the full output of every outside program lands there - see Invoke-Tool).
+$Utf8NoBom = New-Object Text.UTF8Encoding $false
+function Write-LogLines($lines, $file = $LogPath){
+    if (-not $lines -or -not $file) { return }
+    try { [IO.File]::AppendAllText($file, (($lines -join "`r`n") + "`r`n"), $Utf8NoBom) } catch {}
+}
 function Log($msg, $color="Gray"){
     Write-Host $msg -ForegroundColor $color
-    try { Add-Content -Path $LogPath -Value ("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg) } catch {}
+    Write-LogLines @(("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg))
 }
-function Step($n,$title){ Log ""; Log ("==== STEP $n : $title ====") "Cyan" }
+function Write-LogOnly($msg){ Write-LogLines @(("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg)) }
+
+# The whole install in one bar (progress box at the top of the window);
+# Invoke-Tool shows the current program's progress under it.
+$TotalSteps = 11
+function Step($n,$title){
+    Log ""; Log ("==== STEP $n of $TotalSteps : $title ====") "Cyan"
+    $ProgressPreference = "Continue"
+    Write-Progress -Id 1 -Activity "Installing Amadeus" -Status ("Step $n of $TotalSteps : $title") `
+        -PercentComplete ([int]([math]::Min(100, [math]::Max(0, $n) * 100 / $TotalSteps)))
+}
+
+# Windows command-line quoting for one argument list (the rules every
+# Microsoft C program uses to split its command line back into arguments).
+function Join-ProcessArgs([string[]]$list){
+    $parts = foreach ($a in $list) {
+        $a = [string]$a
+        if ($a -ne "" -and $a -notmatch '[\s"]') { $a; continue }
+        $sb = New-Object Text.StringBuilder
+        [void]$sb.Append('"'); $bs = 0
+        foreach ($ch in $a.ToCharArray()) {
+            if ($ch -eq [char]'\') { $bs++; continue }
+            if ($ch -eq [char]'"') { [void]$sb.Append(('\' * ($bs * 2 + 1)) + '"'); $bs = 0; continue }
+            if ($bs) { [void]$sb.Append('\' * $bs); $bs = 0 }
+            [void]$sb.Append($ch)
+        }
+        [void]$sb.Append(('\' * ($bs * 2)) + '"')
+        $sb.ToString()
+    }
+    return ($parts -join ' ')
+}
+
+# Run one outside program (pip, conda, git, winget, npm) the quiet way:
+#  * EVERY line it prints goes into install_log.txt (and $ExtraLog), under a
+#    ">>> label" heading, with its result code - so a tester's log always
+#    shows WHY something failed, not only that it did;
+#  * the screen gets one progress line instead of hundreds: pip's current
+#    package + download percentage (its "raw" progress mode), git's own
+#    percentages, else the label and the time so far;
+#  * $LASTEXITCODE is the program's result code, as with a direct call, and
+#    $script:LastToolTail holds its last 15 lines for error messages.
+# Lines are read as they come (a carriage return counts as a line end, so
+# git's in-place progress updates arrive live).
+$script:LastToolTail = @()
+$script:LastToolLines = @()
+$script:LastToolInstalled = 0
+function Invoke-Tool {
+    param([string]$Label, [string]$Exe, [string[]]$Arguments = @(), [string]$ExtraLog = "")
+    $ProgressPreference = "Continue"
+    $started = Get-Date
+    $tail = New-Object Collections.Generic.Queue[string]
+    $all = New-Object Collections.Generic.List[string]
+    $buffer = New-Object Collections.Generic.List[string]
+    $buffer.Add(("{0}  >>> {1}: {2} {3}" -f (Get-Date -Format 'HH:mm:ss'), $Label, $Exe, (Join-ProcessArgs $Arguments)))
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = Join-ProcessArgs $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
+    $psi.WorkingDirectory = (Get-Location).ProviderPath   # honours Push-Location
+    try { $proc = [Diagnostics.Process]::Start($psi) }
+    catch {
+        $buffer.Add("      | could not start: " + $_.Exception.Message)
+        Write-LogLines $buffer; Write-LogLines $buffer $ExtraLog
+        $script:LastToolTail = @("could not start " + $Exe + ": " + $_.Exception.Message); $script:LastToolLines = $script:LastToolTail
+        $global:LASTEXITCODE = 9009
+        return
+    }
+    $count = 0; $current = ""; $pct = -1; $installed = 0; $lastDraw = [datetime]::MinValue
+    $handle = {
+        param($line)
+        $t = $line.TrimEnd()
+        if ($t -eq "") { return }
+        if ($t -match '^Progress (\d+) of (\d+)$') {          # pip --progress-bar raw
+            if ([double]$Matches[2] -gt 0) { $pct = [int](100 * [double]$Matches[1] / [double]$Matches[2]) }
+            return                                            # not worth a log line
+        }
+        if ($t -match '^\s*(?<what>[A-Za-z][A-Za-z ]{2,30}):\s+(?<p>\d{1,3})%') {   # git / git-lfs
+            $pct = [int]$Matches.p; $current = $Matches.what.Trim()
+            if ($pct -lt 100) { return }                      # log each phase once, when done
+        }
+        elseif ($t -match '^Collecting (\S+)') { $count++; $current = $Matches[1]; $pct = -1 }
+        elseif ($t -match '^\s*Downloading (\S+) \((.+)\)') { $current = "downloading " + $Matches[1] + " (" + $Matches[2] + ")"; $pct = 0 }
+        elseif ($t -match '^Installing collected packages: (.+)$') { $current = "installing " + (($Matches[1] -split ',').Count) + " packages"; $pct = -1 }
+        elseif ($t -match '^Successfully installed (.+)$') { $installed = (($Matches[1].Trim()) -split '\s+').Count }
+        $buffer.Add("      | " + $t)
+        $all.Add($t); $tail.Enqueue($t); while ($tail.Count -gt 15) { [void]$tail.Dequeue() }
+    }
+    $outTask = $proc.StandardOutput.ReadLineAsync(); $outDone = $false
+    $errTask = $proc.StandardError.ReadLineAsync(); $errDone = $false
+    while (-not ($outDone -and $errDone)) {
+        $pending = @()
+        if (-not $outDone) { $pending += $outTask }
+        if (-not $errDone) { $pending += $errTask }
+        [void][Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]]$pending, 250)
+        if (-not $outDone -and $outTask.IsCompleted) {
+            $l = $outTask.Result
+            if ($null -eq $l) { $outDone = $true } else { . $handle $l; $outTask = $proc.StandardOutput.ReadLineAsync() }
+        }
+        if (-not $errDone -and $errTask.IsCompleted) {
+            $l = $errTask.Result
+            if ($null -eq $l) { $errDone = $true } else { . $handle $l; $errTask = $proc.StandardError.ReadLineAsync() }
+        }
+        $now = Get-Date
+        if (($now - $lastDraw).TotalMilliseconds -ge 250) {
+            $lastDraw = $now
+            $secs = [int]($now - $started).TotalSeconds
+            $elapsed = if ($secs -ge 60) { "{0} min {1} s" -f [int][math]::Floor($secs / 60), ($secs % 60) } else { "$secs s" }
+            if ($count -gt 0) { $status = "Package " + $count + ": " + $current }
+            elseif ($current) { $status = $current }
+            else { $status = "working..." }
+            $status = $status + "   (" + $elapsed + ")"
+            if ($pct -ge 0) { Write-Progress -Id 2 -ParentId 1 -Activity $Label -Status $status -PercentComplete ([math]::Min(100, $pct)) }
+            else { Write-Progress -Id 2 -ParentId 1 -Activity $Label -Status $status }
+        }
+        if ($buffer.Count -ge 50) { Write-LogLines $buffer; Write-LogLines $buffer $ExtraLog; $buffer.Clear() }
+    }
+    $proc.WaitForExit()
+    $code = $proc.ExitCode
+    Write-Progress -Id 2 -ParentId 1 -Activity $Label -Completed
+    $buffer.Add(("{0}  <<< {1}: exit {2} ({3} s)" -f (Get-Date -Format 'HH:mm:ss'), $Label, $code, [int]((Get-Date) - $started).TotalSeconds))
+    Write-LogLines $buffer; Write-LogLines $buffer $ExtraLog
+    $script:LastToolTail = $tail.ToArray()
+    $script:LastToolLines = $all.ToArray()
+    $script:LastToolInstalled = $installed
+    $global:LASTEXITCODE = $code
+}
+
+# The last lines a failed program printed, for an error message.
+function Get-ToolTail { return ($script:LastToolTail -join "`n") }
+
+# Full path of a program on PATH (Invoke-Tool starts programs directly).
+function Resolve-Exe($name){
+    $c = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Source }
+    return $name
+}
 function Die($msg){
+    Stop-BackgroundDownloads   # its ".part" files stay: the next run continues them
     Log "" "Red"; Log ("INSTALL STOPPED: " + $msg) "Red"
     Log ("Please open and send this file to your helper:  " + $LogPath) "Yellow"
     Read-Host "Press Enter to close this window" | Out-Null
@@ -248,6 +453,12 @@ function Refresh-Path {
     $m = [Environment]::GetEnvironmentVariable("Path","Machine")
     $u = [Environment]::GetEnvironmentVariable("Path","User")
     $env:Path = "$m;$u"
+    # Amadeus' own portable programs (v4.13) are on no saved PATH: add them.
+    $tools = Join-Path $env:USERPROFILE ".amadeus-tools"
+    foreach ($sub in @("node", "git\cmd", "git-lfs", "ffmpeg\bin")) {
+        $dir = Join-Path $tools $sub
+        if (Test-Path $dir) { $env:Path = $dir + ";" + $env:Path }
+    }
 }
 
 # Prove a folder is a COMPLETE clone by checking that these files exist inside it.
@@ -282,7 +493,10 @@ function Move-ToRewrittenHistory($target, $personalRx){
     return $ok
 }
 
-function Ensure-Clone($url, $dest, $branch, $markers){
+# $shallow (v4.13): only the latest version, not the whole history (the
+# project: ~24 MB instead of ~186 MB). Updates still work - a later fetch
+# brings just the new commits on top.
+function Ensure-Clone($url, $dest, $branch, $markers, $shallow = $false){
     $leaf = Split-Path $dest -Leaf
     if (Test-Complete $dest $markers) { Log ("  Already have " + $leaf + " - skipping download.") "Yellow"; return }
     if (Test-Path $dest) {
@@ -290,8 +504,11 @@ function Ensure-Clone($url, $dest, $branch, $markers){
         Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
         if (Test-Path $dest) { throw ("Could not remove the old " + $leaf + " folder. Close any program using it and run the installer again.") }
     }
-    if ($branch) { & git clone -b $branch $url $dest } else { & git clone $url $dest }
-    if ($LASTEXITCODE -ne 0) { throw ("Could not download " + $leaf + ". Check your internet connection, then run the installer again.") }
+    $gitArgs = @("clone", "--progress")
+    if ($branch) { $gitArgs += @("-b", $branch) }
+    if ($shallow -and -not (Test-Path -LiteralPath $url)) { $gitArgs += @("--depth", "1") }   # a local -Source copies anyway
+    Invoke-Tool ("Downloading " + $leaf) (Resolve-Exe "git") ($gitArgs + @($url, $dest))
+    if ($LASTEXITCODE -ne 0) { throw ("Could not download " + $leaf + ". Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
     if (-not (Test-Complete $dest $markers)) { throw ("Downloaded " + $leaf + " but it looks incomplete. Run the installer again to retry.") }
     Log ("  Downloaded " + $leaf + ".") "Green"
 }
@@ -304,17 +521,18 @@ function Ensure-Clone($url, $dest, $branch, $markers){
 # tested original (a newer engine adds entries the tested one does not
 # know). Downloaded model files are not tracked by git and stay untouched.
 function Set-GptSovitsVersion($dest, $commit){
-    $head = (& git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
+    $git = Resolve-Exe "git"
+    $head = (& $git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
     if ($head -eq $commit) { Log "  Voice engine is on the tested version." "Green"; return }
     Log ("  Switching the voice engine to the tested version (" + $commit.Substring(0, 7) + ")...") "Yellow"
-    & git -C $dest cat-file -e ($commit + "^{commit}") 2>$null
+    & $git -C $dest cat-file -e ($commit + "^{commit}") 2>$null
     if ($LASTEXITCODE -ne 0) {
-        & git -C $dest fetch origin $commit
-        if ($LASTEXITCODE -ne 0) { throw "Could not download the tested voice engine version. Check your internet connection, then run the installer again." }
+        Invoke-Tool "Fetching the tested voice engine version" $git @("-C", $dest, "fetch", "--progress", "origin", $commit)
+        if ($LASTEXITCODE -ne 0) { throw ("Could not download the tested voice engine version. Check your internet connection, then run the installer again.`n" + (Get-ToolTail)) }
     }
-    & git -C $dest checkout --force --quiet $commit
-    $now = (& git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
-    if ($now -ne $commit) { throw "Could not switch the voice engine to its tested version. Run the installer again, or send the log." }
+    Invoke-Tool "Switching the voice engine version" $git @("-C", $dest, "checkout", "--force", "--quiet", $commit)
+    $now = (& $git -C $dest rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $now -ne $commit) { throw ("Could not switch the voice engine to its tested version.`n" + (Get-ToolTail)) }
     Log ("  Voice engine switched to the tested version (was " + $(if ($head) { $head.Substring(0, [Math]::Min(7, $head.Length)) } else { "unknown" }) + ").") "Green"
 }
 
@@ -343,17 +561,16 @@ function Test-EnvWorks($path){
 # Remove an environment's folder (conda's own remove first; then the folder
 # itself, only when it carries the environment's name). $true when gone.
 function Remove-EnvFolder($name, $path){
-    & $conda env remove -n $name -y 2>&1 | Out-Null
+    Invoke-Tool ("Removing the Python environment '" + $name + "'") $conda @("env", "remove", "-n", $name, "-y")
     if ($path -and (Test-Path $path) -and (Split-Path $path -Leaf) -eq $name) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
     return (-not ($path -and (Test-Path $path)))
 }
 
-# conda's output as plain text lines (Windows PowerShell turns each line
-# conda writes to its error stream into an error object; an empty one
-# reads "System.Management.Automation.RemoteException").
+# conda's whole output (all lines - the damaged-package names can be more
+# than the last 15 lines Get-ToolTail keeps).
 function Invoke-CondaCreate($name, $py){
-    return @(& $conda create -n $name python=$py -y 2>&1 | ForEach-Object {
-        $l = [string]$_; if ($l -eq 'System.Management.Automation.RemoteException') { '' } else { $l } })
+    Invoke-Tool ("Creating the Python environment '" + $name + "'") $conda @("create", "-n", $name, ("python=" + $py), "-y")
+    return @($script:LastToolLines)
 }
 
 # Create a conda environment only if it does not already exist (safe to
@@ -377,13 +594,12 @@ function Ensure-Env($name, $py="3.10"){
         $ok = ($LASTEXITCODE -eq 0)
     }
     if (-not $ok) {
-        $out | Where-Object { $_ } | Select-Object -Last 40 | ForEach-Object { Log ("    " + $_) "DarkGray" }
         if (@(Find-CorruptPackageDirs $out).Count) {
-            throw ("Miniconda's download cache is still damaged after clearing it. Rename the folder " + (Join-Path $condaHome "pkgs") + " to pkgs_old, then run the installer again. If it happens again, add " + $condaHome + " to your antivirus exclusions.")
+            throw ("Miniconda's download cache is still damaged after clearing it. Rename the folder " + (Join-Path $condaHome "pkgs") + " to pkgs_old, then run the installer again. If it happens again, add " + $condaHome + " to your antivirus exclusions.`n" + (Get-ToolTail))
         }
-        throw ("Could not create the '" + $name + "' Python environment.")
+        throw ("Could not create the '" + $name + "' Python environment.`n" + (Get-ToolTail))
     }
-    if ($path) { Log ("  Python environment '" + $name + "' rebuilt.") "Green" }
+    Log ("  Python environment '" + $name + "' " + $(if ($path) { "rebuilt." } else { "created." })) "Green"
 }
 # Package folders in Miniconda's download cache that conda named as damaged
 # ("CondaVerificationError: The package for tzdata located at <folder>
@@ -433,6 +649,180 @@ function Env-Python($name){
     return $null
 }
 
+# Run pip inside one of the toolboxes. Prefers the toolbox's own Python
+# (no middleman); uses the helper route only as a fallback. $pipArgs is
+# everything pip should receive, e.g. @("install", "Flask") or
+# @("uninstall", "-y", "torch"). Runs through Invoke-Tool (full output in the
+# log + $extraLog, one progress line on screen). Install/download commands get
+# pip's "raw" progress mode (download percentages the progress line can
+# show); a pip too old to know it is simply asked again without it.
+function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
+    $pipArgs = @($pipArgs)
+    $withRaw = $pipArgs
+    if ($pipArgs.Count -gt 0 -and $pipArgs[0] -in @("install", "download")) {
+        $withRaw = @($pipArgs[0], "--progress-bar", "raw") + @($pipArgs | Select-Object -Skip 1)
+    }
+    $py = Env-Python $name
+    if ($py) { $exe = $py; $pre = @("-m", "pip") } else { $exe = $conda; $pre = @("run", "-n", $name, "pip") }
+    Invoke-Tool $label $exe ($pre + $withRaw) $extraLog
+    if ($LASTEXITCODE -ne 0 -and $withRaw.Count -ne $pipArgs.Count -and
+        (Get-ToolTail) -match "no such option|invalid choice|unrecognized arguments") {
+        Invoke-Tool ($label + " (again, plain progress)") $exe ($pre + $pipArgs) $extraLog
+    }
+}
+
+# ============================================================================
+#  Built-in local model: hardware check (read-only - it only LOOKS at the PC)
+# ============================================================================
+# Which Gemma 4 model and settings this PC gets. This is an exact copy of
+# scripts/local_llm_tiers.json (the installer runs before the project is
+# downloaded, so it carries its own); the project's tests keep them identical.
+# >>> TIER TABLE (copy of scripts/local_llm_tiers.json)
+$TierTableJson = @'
+{
+  "version": 5,
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it and loaded with the model so she can see pictures (2026-10-26: under 16 GB it runs on the processor; vram_need_gb includes the picture working space: +0.1 GB under 16 GB, +0.5 GB on 16 GB+).",
+  "dedicated_card_min_gb": 2,
+  "voice_on_cpu_min_ram_gb": 16,
+  "disk_headroom_gb": 2,
+  "models": {
+    "12B": {
+      "label": "Gemma 4 12B (QAT)",
+      "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
+      "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
+      "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "bytes": 6716356800,
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
+      "mmproj": {"file": "mmproj-F16.gguf", "save_as": "gemma-4-12B-it-qat-mmproj-F16.gguf", "bytes": 175115840, "sha256": "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3"}
+    },
+    "12B-Q3": {
+      "label": "Gemma 4 12B (3-bit, for 8 GB cards)",
+      "repo": "unsloth/gemma-4-12b-it-GGUF",
+      "revision": "fc034cfff751157913579611efad8462ac1be606",
+      "file": "gemma-4-12b-it-Q3_K_M.gguf",
+      "bytes": 5693872960,
+      "sha256": "dbf58f4c413b82b27106867eb42f7087e4172a172f6f201e2e11598a6582e504",
+      "mmproj": {"file": "mmproj-F16.gguf", "save_as": "gemma-4-12b-it-mmproj-F16.gguf", "bytes": 175115840, "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e"}
+    }
+  },
+  "llama_cpp": {
+    "release": "b11400",
+    "builds": {
+      "cuda-13.4": {
+        "min_nvidia_driver": 580,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-13.4-x64.zip", "bytes": 153112447, "sha256": "872175bf23819d3a72a2bfc54aa21d750f0e020a586d1a6eed79cae585d1d23a"},
+          {"name": "cudart-llama-bin-win-cuda-13.4-x64.zip", "bytes": 423535356, "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"}
+        ]
+      },
+      "cuda-12.4": {
+        "min_nvidia_driver": 525,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-12.4-x64.zip", "bytes": 264160281, "sha256": "b5c185b6b0a87c875a468ff920e20bfcdb82c0a9a7b219cd52c937d461f35d53"},
+          {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}
+        ]
+      },
+      "vulkan": {
+        "files": [
+          {"name": "llama-b11400-bin-win-vulkan-x64.zip", "bytes": 33307867, "sha256": "77a5b9ad8f3ab34c9f600e60a04136574e5510ac7f93912e6600d616bbaf8ac1"}
+        ]
+      }
+    }
+  },
+  "tiers": [
+    {"id": "6-7",      "min_vram_gb": 6,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 4.6,  "warning": true},
+    {"id": "8-11",     "min_vram_gb": 8,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 6.5,  "warning": false},
+    {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cuda", "history_default": 14000, "vram_need_gb": 9.6,  "warning": false},
+    {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 22000, "vram_need_gb": 11.0, "warning": false},
+    {"id": "24-plus",  "min_vram_gb": 24, "model": "12B",     "context": 49152, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 32000, "vram_need_gb": 11.5, "warning": false}
+  ]
+}
+'@
+# <<< TIER TABLE
+$TierTable = $TierTableJson | ConvertFrom-Json
+
+# Nearest whole GB, halves rounded up (PowerShell's own rounding would turn
+# 8.5 into 8). Cards report a little under their label - an RTX 5090 says
+# 32607 MiB = 31.8 GB - so a plain comparison would drop every card a tier.
+function Round-Gb([double]$gb){ return [int][math]::Floor($gb + 0.5) }
+
+# The biggest separate graphics card, or $null. NVIDIA: nvidia-smi (exact
+# memory + driver version). Others: Windows' own record of each display
+# adapter in the registry - its 64-bit memory value, because the usual
+# Windows figure (Win32_VideoController.AdapterRAM) stops at 4 GB. Built-in
+# graphics report little or no memory of their own (they borrow normal
+# memory) and so count as "no card".
+function Get-GraphicsCard {
+    $best = $null
+    if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+        try {
+            foreach ($line in (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null)) {
+                $p = $line -split ',\s*'
+                if ($p.Count -ge 3 -and $p[1].Trim() -match '^\d+$') {
+                    $gb = Round-Gb ([double]$p[1].Trim() / 1024)
+                    if (-not $best -or $gb -gt $best.vram_gb) {
+                        $best = [pscustomobject]@{ vendor = "nvidia"; name = $p[0].Trim(); vram_gb = $gb; driver = $p[2].Trim() }
+                    }
+                }
+            }
+        } catch {}
+    }
+    if ($best) { return $best }
+    # The registry also keeps records of cards that were REMOVED (a PC can
+    # still list a card it no longer has), so only adapters Windows reports as
+    # present right now count. If Windows won't list them, all records count.
+    $present = $null
+    try { $present = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { [string]$_.Name }) } catch {}
+    $classKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    foreach ($k in (Get-ChildItem $classKey -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' })) {
+        $props = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        $name = [string]$props.DriverDesc
+        if ($present -and ($present -notcontains $name)) { continue }
+        $bytes = [double]0
+        $q = $props.'HardwareInformation.qwMemorySize'
+        if ($q) { $bytes = [double]$q }
+        else {
+            $m = $props.'HardwareInformation.MemorySize'
+            if ($m -is [byte[]] -and $m.Length -ge 4) { $bytes = [double][BitConverter]::ToUInt32($m, 0) }
+            elseif ($m) { $bytes = [double]$m }
+        }
+        $who = ($name + " " + [string]$props.ProviderName)
+        # An NVIDIA card that nvidia-smi could not report has a missing or
+        # broken driver: neither llama.cpp's CUDA build nor the voice
+        # engine's CUDA PyTorch (installed only when nvidia-smi works) can
+        # use it, so it is treated like any other card (Vulkan build).
+        if     ($who -match 'NVIDIA')              { $vendor = "nvidia-unverified" }
+        elseif ($who -match 'AMD|ATI|Radeon')      { $vendor = "amd" }
+        elseif ($who -match 'Intel')               { $vendor = "intel" }
+        else { continue }
+        $gb = Round-Gb ($bytes / 1GB)
+        if (-not $best -or $gb -gt $best.vram_gb) {
+            $best = [pscustomobject]@{ vendor = $vendor; name = $name; vram_gb = $gb; driver = [string]$props.DriverVersion }
+        }
+    }
+    if ($best -and $best.vram_gb -lt $TierTable.dedicated_card_min_gb) { return $null }
+    return $best
+}
+
+# Normal memory (RAM) in whole GB, or -1 when Windows won't say.
+function Get-RamGb {
+    try {
+        $sum = (Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop | Measure-Object Capacity -Sum).Sum
+        if ($sum -gt 0) { return (Round-Gb ($sum / 1GB)) }
+    } catch {}
+    try { return (Round-Gb ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
+    return -1
+}
+
+# Free space (GB, one decimal) on the drive that holds $path.
+function Get-FreeDiskGb($path){
+    try {
+        $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($path))
+        return [math]::Floor((New-Object IO.DriveInfo $root).AvailableFreeSpace / 1GB * 10) / 10
+    } catch { return -1 }
+}
+
 # The voice engine's graphics-card PyTorch (CUDA 12.8 build) only runs on
 # cards of generation ("compute capability") 7.5 or newer = RTX 20 / GTX 16
 # series onwards (its arch list: sm_75 .. sm_120, checked 2026-10-31 on
@@ -472,25 +862,749 @@ function Select-VoiceTorchBuild($hasGpu, $computeCap){
     return "cuda"
 }
 
-# Run pip inside one of the toolboxes. Prefers the toolbox's own Python
-# (no middleman); uses the helper route only as a fallback. $pipArgs is
-# everything pip should receive, e.g. @("install", "Flask") or
-# @("uninstall", "-y", "torch").
-function Invoke-PipInEnv($name, $pipArgs){
-    $py = Env-Python $name
-    if ($py) { & $py -m pip $pipArgs } else { & $conda run -n $name pip $pipArgs }
+# The decision for this hardware - the same rules as scripts/llm_tiers.py
+# (choose); the project's tests run both on the same inputs.
+function Select-LlamaBuild($vendor, $driver){
+    # The newest CUDA build the NVIDIA driver can run; else Vulkan (AMD,
+    # Intel, an old or unreadable NVIDIA driver). Same as pick_build.
+    if ($vendor -eq "nvidia") {
+        $major = 0
+        $head = ([string]$driver).Trim().Split(".")[0]
+        if ($head -match '^\d+$') { $major = [int]$head }
+        $cuda = @()
+        foreach ($p in $TierTable.llama_cpp.builds.PSObject.Properties) {
+            if ($null -ne $p.Value.min_nvidia_driver) { $cuda += [pscustomobject]@{ name = $p.Name; need = [int]$p.Value.min_nvidia_driver } }
+        }
+        foreach ($b in ($cuda | Sort-Object need -Descending)) { if ($major -ge $b.need) { return $b.name } }
+    }
+    return "vulkan"
+}
+
+# Everything option A downloads: model + llama.cpp files (bytes).
+function Get-LlmDownloadBytes($modelKey, $build){
+    $m = $TierTable.models.$modelKey
+    $total = [double]$m.bytes
+    if ($m.mmproj) { $total += [double]$m.mmproj.bytes }
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) { $total += [double]$f.bytes }
+    return $total
+}
+
+function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = ""){
+    if (-not $vendor -or $vramGb -lt $TierTable.dedicated_card_min_gb) {
+        return [pscustomobject]@{ offered = $false; reason = "no_card" }
+    }
+    $tier = $null
+    foreach ($t in ($TierTable.tiers | Sort-Object min_vram_gb)) { if ($vramGb -ge $t.min_vram_gb) { $tier = $t } }
+    # A separate card, but smaller than the smallest tier (8 GB since tiers
+    # v5): the models that fit did not sound like her.
+    if (-not $tier) { return [pscustomobject]@{ offered = $false; reason = "small_card" } }
+    # Her voice engine can use only NVIDIA cards; on any other card it runs
+    # on the processor, which needs plenty of normal memory.
+    $voice = if ($vendor -eq "nvidia") { $tier.voice_device } else { "cpu" }
+    if ($voice -eq "cpu" -and $ramGb -ge 0 -and $ramGb -lt $TierTable.voice_on_cpu_min_ram_gb) {
+        return [pscustomobject]@{ offered = $false; reason = "low_ram" }
+    }
+    return [pscustomobject]@{
+        offered = $true; reason = ""; tier = $tier.id; model = $tier.model
+        context = [int]$tier.context; kv_cache = $tier.kv_cache; voice_device = $voice
+        history_default = [int]$tier.history_default
+        vram_need_gb = [double]$tier.vram_need_gb
+        warning = [bool]$tier.warning; build = (Select-LlamaBuild $vendor $driver)
+    }
+}
+
+# Look at the PC (honouring the -Simulate* test options) and decide.
+function Invoke-HardwareCheck($dir){
+    $card = Get-GraphicsCard
+    $ram  = Get-RamGb
+    $simulated = $false
+    if ($SimulateVramGB -ge 0) {
+        $simulated = $true
+        if ($SimulateVramGB -lt $TierTable.dedicated_card_min_gb) { $card = $null }
+        elseif ($card) { $card = [pscustomobject]@{ vendor = $card.vendor; name = $card.name + " (pretending " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = $card.driver } }
+        else { $card = [pscustomobject]@{ vendor = "nvidia"; name = "(pretend NVIDIA card, " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = "" } }
+    }
+    if ($SimulateRamGB -ge 0) { $simulated = $true; $ram = $SimulateRamGB }
+    $vendor = $null; $vram = 0; $driver = ""
+    if ($card) { $vendor = $card.vendor; $vram = [int]$card.vram_gb; $driver = $card.driver }
+    $choice = Select-LlmTier $vendor $vram $ram $driver
+    $model = $null; $dlGb = 0
+    if ($choice.offered) {
+        $model = $TierTable.models.($choice.model)
+        $dlGb = [math]::Ceiling((Get-LlmDownloadBytes $choice.model $choice.build) / 1GB * 10) / 10
+    }
+    return [pscustomobject]@{
+        card = $card; ram_gb = $ram; disk_free_gb = (Get-FreeDiskGb $dir)
+        simulated = $simulated; choice = $choice; model = $model; download_gb = $dlGb
+    }
+}
+
+# Plain-language summary lines of a hardware check (for the screen + log).
+function Format-HardwareCheck($hw){
+    $lines = @()
+    if ($hw.card) { $lines += ("  Graphics card : " + $hw.card.name + " - " + $hw.card.vram_gb + " GB graphics memory") }
+    else          { $lines += "  Graphics card : none found (only built-in graphics)" }
+    $lines += ("  Normal memory : " + $(if ($hw.ram_gb -ge 0) { [string]$hw.ram_gb + " GB" } else { "unknown" }))
+    $lines += ("  Free disk     : " + $hw.disk_free_gb + " GB")
+    if ($hw.choice.offered) {
+        $lines += ("  Local model   : " + $hw.model.label + " (" + $hw.download_gb + " GB download, with its helper program)")
+        $lines += ("  Settings      : " + $hw.choice.context + " context, " + $hw.choice.kv_cache + " memory, voice on the " + $(if ($hw.choice.voice_device -eq "cpu") { "processor" } else { "graphics card" }) + ", " + $hw.choice.build + " build")
+        if ($hw.choice.warning) { $lines += "  (Under 8 GB of graphics memory: part of her model runs on the processor - slow.)" }
+    } elseif ($hw.choice.reason -eq "no_card") {
+        $lines += "  Local model   : not offered - no separate graphics card (option B only)"
+    } elseif ($hw.choice.reason -eq "small_card") {
+        $lines += ("  Local model   : not offered - her built-in model needs a graphics card with at least " + (($TierTable.tiers | ForEach-Object { $_.min_vram_gb } | Measure-Object -Minimum).Minimum) + " GB (option B only)")
+    } else {
+        $lines += "  Local model   : not offered - her voice would run on the processor, which needs 16 GB of normal memory (option B only)"
+    }
+    if ($hw.simulated) { $lines += "  (TEST: pretend hardware values in use)" }
+    return $lines
+}
+
+# ============================================================================
+#  Built-in local model: the A/B question, the downloads, the settings file
+# ============================================================================
+# The model and its helper program live NEXT TO the project folder, not in
+# it: a broken project folder is deleted and re-downloaded (Ensure-Clone),
+# which must never take a 4-17 GB model with it.
+$ModelsDir     = Join-Path $InstallDir "models"
+$LlmChoiceFile = Join-Path $ModelsDir "local_llm_choice.json"
+$DownloadRetryDelaySeconds = 15
+
+# Ask until the answer is one of $valid (upper-cased). Gives up after many
+# empty/invalid answers so a closed input can never loop forever.
+function Read-Answer($prompt, $valid){
+    for ($i = 0; $i -lt 20; $i++) {
+        $a = Read-Host $prompt
+        if ($null -eq $a) { $a = "" }
+        $a = $a.Trim().ToUpper()
+        if ($valid -contains $a) { Log ("  (answer: " + $a + ")"); return $a }
+        Log ("  Please type one of: " + ($valid -join ", ")) "Yellow"
+    }
+    Die "No answer was given."
+}
+
+function Write-Utf8File($path, $text){
+    New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+    [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))
+}
+
+function New-CustomChoice { return [pscustomobject]@{ mode = "custom"; chosen = (Get-Date -Format s) } }
+
+# Option A on this PC: show what was found, then confirm (or fall back to B).
+function Confirm-LocalModel($hw){
+    Log ""
+    Format-HardwareCheck $hw | ForEach-Object { Log $_ }
+    Log ""
+    if (-not $hw.choice.offered) {
+        if ($hw.choice.reason -eq "no_card") {
+            Log "  A local model needs a separate graphics card. On this PC she would think far too slowly, so Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server)." "Yellow"
+        } elseif ($hw.choice.reason -eq "small_card") {
+            $minGb = ($TierTable.tiers | ForEach-Object { $_.min_vram_gb } | Measure-Object -Minimum).Minimum
+            Log ("  Her built-in model needs a graphics card with at least " + $minGb + " GB of its own memory (this one has " + $hw.card.vram_gb + " GB). The smaller models that would fit don't sound like her, so Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server).") "Yellow"
+        } else {
+            Log ("  On this PC her voice has to run on the processor, which needs at least " + $TierTable.voice_on_cpu_min_ram_gb + " GB of normal memory (this PC has " + $hw.ram_gb + " GB). So Amadeus will use option B: you connect a model yourself (a cloud service such as OpenRouter, or your own model server).") "Yellow"
+        }
+        Read-Host "Press Enter to continue with option B" | Out-Null
+        return (New-CustomChoice)
+    }
+    if ($hw.choice.warning) {
+        Log ("  " + "NOTICE: this graphics card has less than 8 GB of its own memory. Her built-in model does not fully fit, so part of it runs on the processor. Expect slow replies and a noticeably worse experience (slower still with games or other programs open). For the experience Amadeus is meant to have, choose option B and connect a cloud model (e.g. OpenRouter).") "Cyan"
+        if ((Read-Answer "Type A to install the local model anyway, or B for option B" @("A","B")) -eq "B") { return (New-CustomChoice) }
+    }
+    $need = $hw.download_gb + $TierTable.disk_headroom_gb
+    if ($hw.disk_free_gb -ge 0 -and $hw.disk_free_gb -lt $need) {
+        Log ("  Not enough free disk space for the local model: it needs about " + $need + " GB, this drive has " + $hw.disk_free_gb + " GB free.") "Yellow"
+        if ((Read-Answer "Type B to continue with option B, or Q to stop here (free up space, then run the installer again)" @("B","Q")) -eq "Q") {
+            Log "Stopped - nothing was changed. Free up some space, then run the installer again." "Yellow"
+            Read-Host "Press Enter to close this window" | Out-Null
+            exit 0
+        }
+        return (New-CustomChoice)
+    }
+    $q = "Download " + $hw.model.label + " (" + $hw.download_gb + " GB) while everything else installs? Type Y (yes) or B (do it myself instead)"
+    if ((Read-Answer $q @("Y","B")) -eq "B") { return (New-CustomChoice) }
+    $c = $hw.choice
+    return [pscustomobject]@{
+        mode = "builtin"; model = $c.model; tier = $c.tier; build = $c.build
+        context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        history_default = $c.history_default; vram_need_gb = $c.vram_need_gb
+        simulated = [bool]$hw.simulated; chosen = (Get-Date -Format s)
+    }
+}
+
+# A kept option-A choice takes this installer's settings for the same model
+# on this PC (context, memory, ...): a newer tier table can change them.
+function Update-KeptChoice($prev, $hw){
+    if ($prev.mode -ne "builtin" -or -not $hw.choice.offered -or $hw.choice.model -ne $prev.model) { return $prev }
+    $c = $hw.choice
+    return [pscustomobject]@{
+        mode = "builtin"; model = $c.model; tier = $c.tier; build = $c.build
+        context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        history_default = $c.history_default; vram_need_gb = $c.vram_need_gb
+        simulated = [bool]$hw.simulated; chosen = $prev.chosen
+    }
+}
+
+# STEP 0: the very first question, before anything is downloaded. The
+# answer is saved next to the project, so a re-run only asks "keep it?".
+function Invoke-LlmChoice($hw){
+    Step 0 "How should Amadeus think?"
+    if (Test-Path $LlmChoiceFile) {
+        $prev = $null
+        try { $prev = Get-Content $LlmChoiceFile -Raw | ConvertFrom-Json } catch {}
+        if ($prev -and ($prev.mode -eq "custom" -or ($prev.mode -eq "builtin" -and $TierTable.models.($prev.model)))) {
+            if ($prev.mode -eq "builtin") { $desc = "A) her built-in local model - " + $TierTable.models.($prev.model).label }
+            else { $desc = "B) you connect a model yourself" }
+            Log ("  Last time you chose: " + $desc)
+            if ((Read-Answer "Keep that choice? Type Y (yes) or N (choose again)" @("Y","N")) -eq "Y") {
+                $kept = Update-KeptChoice $prev $hw
+                Write-Utf8File $LlmChoiceFile ($kept | ConvertTo-Json -Depth 4)
+                return $kept
+            }
+        }
+    }
+    Log "  How should Amadeus think?" "Cyan"
+    Log "    A) Install and set up a local model automatically (private, runs on this PC, no account needed)"
+    Log "    B) I'll do it myself (choose this if using a cloud model or your own local model)"
+    if ((Read-Answer "Type A or B" @("A","B")) -eq "A") { $choice = Confirm-LocalModel $hw } else { $choice = New-CustomChoice }
+    Write-Utf8File $LlmChoiceFile ($choice | ConvertTo-Json -Depth 4)
+    if ($choice.mode -eq "builtin") { Log ("  Chosen: " + $TierTable.models.($choice.model).label + " - it downloads in the background while everything else installs.") "Green" }
+    else { Log "  Chosen: option B - you connect a model yourself in Settings after the install." "Green" }
+    return $choice
+}
+
+# SHA-256 via .NET directly (no PowerShell module needed - Get-FileHash lives
+# in a module that fails to load in some mixed PowerShell 5/7 setups).
+function Get-Sha256($path){
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower()
+    } finally { $stream.Dispose() }
+}
+
+# Download one file and prove it is the official one (size + SHA-256). Safe
+# to re-run: a finished, checked file is skipped (a small ".verified" note
+# next to it saves re-checking 17 GB every time); a half-finished ".part"
+# continues where it stopped; a damaged download is deleted. Uses Windows'
+# own curl.exe (progress bar + resume); without it, PowerShell's downloader
+# (no resume).
+function Get-VerifiedFile($url, $dest, [double]$bytes, $sha256, $label){
+    $marker = $dest + ".verified"
+    $stamp  = $sha256 + " " + [string][int64]$bytes
+    if ((Test-Path -LiteralPath $dest) -and (Test-Path -LiteralPath $marker) -and
+        ((Get-Content -LiteralPath $marker -Raw).Trim() -eq $stamp) -and ((Get-Item -LiteralPath $dest).Length -eq $bytes)) {
+        Log ("  Already have " + $label + " (checked) - skipping.") "Yellow"; return
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+    $part = $dest + ".part"
+    if (Test-Path -LiteralPath $dest) {
+        # Present but not yet checked (e.g. an interrupted check): check it now.
+        if ((Get-Item -LiteralPath $dest).Length -eq $bytes -and (Get-Sha256 $dest) -eq $sha256) {
+            Set-Content -LiteralPath $marker -Value $stamp -NoNewline -Encoding ascii
+            Log ("  Already have " + $label + " (checked) - skipping.") "Yellow"; return
+        }
+        Move-Item -LiteralPath $dest -Destination $part -Force
+    }
+    $gb = [math]::Round($bytes / 1GB, 2)
+    if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) {
+        Write-LogOnly ("  " + $label + ": already downloaded in the background, from " + $url)
+    } else {
+        Log ("  Downloading " + $label + " (" + $gb + " GB)...")
+        Log ("  from: " + $url)
+    }
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    for ($try = 1; $try -le 4; $try++) {
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -gt $bytes) { Remove-Item -LiteralPath $part -Force }
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) { break }
+        if (Test-Path $curl) {
+            & $curl -L --fail --retry 5 --retry-delay 10 --connect-timeout 30 -C - --progress-bar -o $part $url
+            $have = if (Test-Path -LiteralPath $part) { (Get-Item -LiteralPath $part).Length } else { 0 }
+            Write-LogOnly ("  download attempt " + $try + " (" + $label + "): curl exit " + $LASTEXITCODE + ", " + $have + " of " + [int64]$bytes + " bytes")
+        } else {
+            try { Invoke-WebRequest $url -OutFile $part -UseBasicParsing -TimeoutSec 86400 } catch { Log ("  " + $_.Exception.Message) "Yellow" }
+        }
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -eq $bytes) { break }
+        if ($try -lt 4) { Log "  The download was interrupted - trying again shortly (it continues where it stopped)..." "Yellow"; Start-Sleep -Seconds $DownloadRetryDelaySeconds }
+    }
+    if (-not (Test-Path -LiteralPath $part) -or (Get-Item -LiteralPath $part).Length -ne $bytes) {
+        throw ("Could not download " + $label + " right now. Check your internet connection, then run the installer again - it continues where it stopped.")
+    }
+    Log "  Checking the downloaded file (about a minute for the big ones)..."
+    $got = Get-Sha256 $part
+    Write-LogOnly ("  checksum " + $label + ": " + $got + $(if ($got -eq $sha256) { " (matches)" } else { " (EXPECTED " + $sha256 + ")" }))
+    if ($got -ne $sha256) {
+        Remove-Item -LiteralPath $part -Force
+        throw ($label + " was downloaded but is damaged (its checksum does not match the official one), so it was deleted. Run the installer again to download it fresh.")
+    }
+    Move-Item -LiteralPath $part -Destination $dest -Force
+    Set-Content -LiteralPath $marker -Value $stamp -NoNewline -Encoding ascii
+    Log ("  " + $label + " downloaded and checked.") "Green"
+}
+
+# Unpack a zip into $dir (overwriting), with .NET's zip reader: much faster
+# than Expand-Archive on Windows PowerShell, and needs no module. Entries
+# that would land outside $dir are refused.
+function Expand-ZipFile($zip, $dir){
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [IO.Path]::GetFullPath($dir).TrimEnd('\') + '\'
+    $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        foreach ($e in $archive.Entries) {
+            $target = [IO.Path]::GetFullPath((Join-Path $root $e.FullName))
+            if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw ("Unsafe path in " + $zip + ": " + $e.FullName) }
+            if ($e.FullName.EndsWith('/') -or $e.FullName.EndsWith('\')) { New-Item -ItemType Directory -Force -Path $target | Out-Null; continue }
+            New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $target, $true)
+        }
+    } finally { $archive.Dispose() }
+}
+
+# Download + unpack one llama.cpp build into models\llama.cpp\<release>-<build>\
+# and prove its server program starts. Returns the path to llama-server.exe.
+function Install-LlamaBuild($build){
+    $rel  = $TierTable.llama_cpp.release
+    $dir  = Join-Path $ModelsDir ("llama.cpp\" + $rel + "-" + $build)
+    $done = Join-Path $dir "install_complete.txt"
+    if (Test-Path -LiteralPath $done) {
+        $exe = (Get-Content -LiteralPath $done -Raw).Trim()
+        if ($exe -and (Test-Path -LiteralPath $exe)) { Log ("  Already have llama.cpp " + $rel + " (" + $build + ") - skipping.") "Yellow"; return $exe }
+    }
+    $dl = Join-Path $ModelsDir "downloads"
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
+        Get-VerifiedFile ("https://github.com/ggml-org/llama.cpp/releases/download/" + $rel + "/" + $f.name) (Join-Path $dl $f.name) $f.bytes $f.sha256 ("llama.cpp " + $f.name)
+    }
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Log ("  Unpacking llama.cpp (" + $build + ")...")
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) { Expand-ZipFile (Join-Path $dl $f.name) $dir }
+    $found = Get-ChildItem -LiteralPath $dir -Recurse -Filter "llama-server.exe" | Select-Object -First 1
+    if (-not $found) { throw ("The llama.cpp download (" + $build + ") has no llama-server.exe.") }
+    # Smoke test: the program must start (catches a missing runtime file or
+    # a driver that cannot load the CUDA build).
+    $ver = & $found.FullName --version 2>&1 | Out-String
+    Write-LogOnly ("  llama-server --version (exit " + $LASTEXITCODE + "): " + $ver.Trim())
+    if ($LASTEXITCODE -ne 0) { throw ("llama.cpp (" + $build + ") would not start on this PC: " + $ver.Trim()) }
+    Set-Content -LiteralPath $done -Value $found.FullName -NoNewline -Encoding utf8
+    foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
+        Remove-Item -LiteralPath (Join-Path $dl $f.name), (Join-Path $dl ($f.name + ".verified")) -Force -ErrorAction SilentlyContinue
+    }
+    Log ("  llama.cpp " + $rel + " (" + $build + ") ready.") "Green"
+    return $found.FullName
+}
+
+function Get-HfUrl($m, $file){ return ("https://huggingface.co/" + $m.repo + "/resolve/" + $m.revision + "/" + $file + "?download=true") }
+
+# The app's built-in-model settings: backend\data\local_llm.json. Written
+# even when a download failed (model_ok/server_ok false), so the app knows
+# the model is missing instead of silently falling back to something else.
+# Option B (v4.13): on a PC with a graphics card, the same file is written
+# with mode "custom" - llama.cpp is installed, so the user can switch to
+# Built-in later with a GGUF of their own. Option B without a card: an old
+# file is kept, but switched to "custom".
+# What the user changed in the app survives a re-run: the model file they
+# picked in Settings (selected_file, while it still exists) and their
+# conversation memory number for the built-in model (history_budget).
+function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $modelOk){
+    $cfg = Join-Path $proj "backend\data\local_llm.json"
+    $old = $null
+    if (Test-Path $cfg) { try { $old = Get-Content $cfg -Raw | ConvertFrom-Json } catch {} }
+    if ($choice.mode -ne "builtin" -and -not $choice.model) {
+        if ($old) { try { $old.mode = "custom"; Write-Utf8File $cfg ($old | ConvertTo-Json -Depth 4) } catch {} }
+        return
+    }
+    $m = $TierTable.models.($choice.model)
+    $data = [ordered]@{
+        mode = $(if ($choice.mode -eq "builtin") { "builtin" } else { "custom" })
+        model = $choice.model; model_label = $m.label
+        model_file = $modelPath; model_ok = [bool]$modelOk
+        server_exe = $exe; server_ok = [bool]$serverOk
+        llama_release = $TierTable.llama_cpp.release; build = $choice.build
+        tier = $choice.tier; context = [int]$choice.context; kv_cache = $choice.kv_cache
+        voice_device = $choice.voice_device; gpu_layers = 999; port = 8091
+        history_default = [int]$choice.history_default; vram_need_gb = [double]$choice.vram_need_gb
+        simulated = [bool]$choice.simulated; written = (Get-Date -Format s); installer = $InstallerVersion
+    }
+    if ($old -and $old.selected_file -and (Test-Path -LiteralPath ([string]$old.selected_file))) { $data.selected_file = [string]$old.selected_file }
+    if ($old -and $old.history_budget) { $data.history_budget = [int]$old.history_budget }
+    Write-Utf8File $cfg ($data | ConvertTo-Json -Depth 4)
+    Log ("  Built-in model settings saved: " + $cfg)
+}
+
+# llama.cpp for this PC's build, falling back to the general Vulkan build
+# when the CUDA one cannot be installed or started. Returns the path to
+# llama-server.exe, or "" (the reason is logged); $choice.build is updated.
+function Install-LlamaWithFallback($choice){
+    try { return (Install-LlamaBuild $choice.build) }
+    catch {
+        Log ("  " + $_.Exception.Message) "Yellow"
+        if ($choice.build -ne "vulkan") {
+            Log "  Trying the general (Vulkan) version of llama.cpp instead..." "Yellow"
+            try { $exe = Install-LlamaBuild "vulkan"; $choice.build = "vulkan"; return $exe } catch { Log ("  " + $_.Exception.Message) "Red" }
+        }
+    }
+    return ""
+}
+
+# The last install step for option A: helper program + model. A
+# failed download never stops the install - the summary says what to do.
+# Returns $true when everything she needs is in place.
+function Install-BuiltinLlm($proj, $choice){
+    $m = $TierTable.models.($choice.model)
+    $modelPath = Join-Path $ModelsDir $m.file
+    $exe = ""; $serverOk = $false; $modelOk = $false
+    if ($SkipLlmDownload) {
+        Log "  (TEST: -SkipLlmDownload - nothing is downloaded; the settings file is written as 'missing'.)" "Magenta"
+    } else {
+        $exe = Install-LlamaWithFallback $choice; $serverOk = [bool]$exe
+        try { Get-VerifiedFile (Get-HfUrl $m $m.file) $modelPath $m.bytes $m.sha256 $m.label; $modelOk = $true }
+        catch { Log ("  " + $_.Exception.Message) "Red" }
+        # Her vision file (for the coming picture support - not used yet).
+        # A failed download never stops the install.
+        if ($m.mmproj) {
+            try { Get-VerifiedFile (Get-HfUrl $m $m.mmproj.file) (Join-Path $ModelsDir $m.mmproj.save_as) $m.mmproj.bytes $m.mmproj.sha256 ($m.label + " - vision file") }
+            catch { Log ("  Vision file not downloaded (she works without it): " + $_.Exception.Message) "Yellow" }
+        }
+    }
+    Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk
+    return ($serverOk -and $modelOk)
+}
+
+# Option B on a PC with a graphics card (2026-10-18): install llama.cpp
+# too (no model), so the user can run a GGUF of their own later - Settings
+# -> Connection -> Built-in, with this PC's tier settings. Her intro tells
+# DIY users they can. A cloud-only user pays ~0.6 GB (NVIDIA) / 33 MB.
+function Install-LocalModelRunner($proj, $hw){
+    $c = $hw.choice
+    $run = [pscustomobject]@{
+        mode = "custom"; model = $c.model; tier = $c.tier; build = $c.build
+        context = $c.context; kv_cache = $c.kv_cache; voice_device = $c.voice_device
+        history_default = $c.history_default; vram_need_gb = $c.vram_need_gb
+        simulated = [bool]$hw.simulated
+    }
+    $m = $TierTable.models.($c.model)
+    $modelPath = Join-Path $ModelsDir $m.file
+    New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+    $exe = ""
+    if ($SkipLlmDownload) { Log "  (TEST: -SkipLlmDownload - llama.cpp is not downloaded.)" "Magenta" }
+    else { $exe = Install-LlamaWithFallback $run }
+    # Her own tier model, if an earlier option-A install left it (checked).
+    $modelOk = (Test-Path -LiteralPath $modelPath) -and (Test-Path -LiteralPath ($modelPath + ".verified"))
+    Write-LocalLlmConfig $proj $run $exe ([bool]$exe) $modelPath $modelOk
+    return [bool]$exe
+}
+
+# ---------- the big downloads start in the background (v4.13) ----------
+# Her voice files (~1.2 GB), her model (4-7 GB), its vision file and
+# llama.cpp used to download one after another, late in the install, after
+# ~10 minutes of installing that mostly keeps the processor busy, not the
+# internet. They now start right after the A/B question, in Windows' own
+# curl.exe without a window, into the same ".part" files Get-VerifiedFile
+# uses: when the install reaches the step that needs them, Get-VerifiedFile
+# finds them finished (or half-finished, and continues them) and checks
+# each one exactly as before. Two separate downloads ("voice" and "model"),
+# so the voice step never waits for the much bigger model. Safe if anything
+# goes wrong: a download that fails or is cut off is simply resumed then;
+# a re-run first stops a background download an earlier run left behind.
+# Her memory's search model (~1.2 GB) also downloads in the background,
+# right after her memory is set up (it used to come at her first start).
+function Get-BgPidFile($name){ return (Join-Path $ModelsDir ("downloads\background_" + $name + ".pid")) }
+
+# Every file the chosen option downloads at its local-model step:
+# [url, dest, bytes, sha256]. Option A: llama.cpp + model + vision file;
+# option B on a PC with a graphics card: llama.cpp only.
+function Get-LocalLlmFiles($choice, $hw){
+    $files = @()
+    $build = $null
+    if ($choice.mode -eq "builtin") { $build = $choice.build }
+    elseif ($hw.choice.offered) { $build = $hw.choice.build }
+    if (-not $build) { return $files }
+    $rel = $TierTable.llama_cpp.release
+    $done = Join-Path $ModelsDir ("llama.cpp\" + $rel + "-" + $build + "\install_complete.txt")
+    if (-not (Test-Path -LiteralPath $done)) {
+        foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
+            $files += ,@(("https://github.com/ggml-org/llama.cpp/releases/download/" + $rel + "/" + $f.name),
+                         (Join-Path $ModelsDir ("downloads\" + $f.name)), $f.bytes, $f.sha256)
+        }
+    }
+    if ($choice.mode -eq "builtin") {
+        $m = $TierTable.models.($choice.model)
+        $files += ,@((Get-HfUrl $m $m.file), (Join-Path $ModelsDir $m.file), $m.bytes, $m.sha256)
+        if ($m.mmproj) {
+            $files += ,@((Get-HfUrl $m $m.mmproj.file), (Join-Path $ModelsDir $m.mmproj.save_as), $m.mmproj.bytes, $m.mmproj.sha256)
+        }
+    }
+    # Already downloaded and checked: nothing to fetch.
+    return @($files | Where-Object {
+        $marker = $_[1] + ".verified"
+        -not ((Test-Path -LiteralPath $_[1]) -and (Test-Path -LiteralPath $marker) -and
+              ((Get-Content -LiteralPath $marker -Raw).Trim() -eq ($_[3] + " " + [string][int64]$_[2])))
+    })
+}
+
+# Her voice: ONLY the files the engine loads for her (its "v2" setup -
+# tested 2026-10-24: she speaks with exactly these). The engine's model page
+# holds every engine version (~6.5 GB, and the old full download left a
+# ~13 GB copy in the temp folder). Pinned to one version of that page, each
+# file checked against its published checksum.
+$VoiceRepoUrl = "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/"
+$VoiceFileTable = @(
+    @("chinese-roberta-wwm-ext-large/config.json", 963, "3d57de2fd7e80d0e5c8ff194f0bbb6baa10df7e43fc262a0cc71298a78b0a3e5"),
+    @("chinese-roberta-wwm-ext-large/tokenizer.json", 268962, "173796956820ea27bd14f76bf28162607ff4254807e2948253eb5b46f5bb643b"),
+    @("chinese-roberta-wwm-ext-large/pytorch_model.bin", 651225145, "e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8"),
+    @("chinese-hubert-base/config.json", 1449, "c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103"),
+    @("chinese-hubert-base/preprocessor_config.json", 212, "dcd684124d06722947939d41ea6ae58dbf10968c60a11a29f23ddc602c64a29b"),
+    @("chinese-hubert-base/pytorch_model.bin", 188811417, "24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c"),
+    @("gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt", 155315150, "732f94e63b148066e24c7f9d2637f3374083e637635f07fbdb695dee20ddbe1f"),
+    @("gsv-v2final-pretrained/s2G2333k.pth", 106035259, "924fdccaa3c574bf139c25c9759aa1ed3b3f99e19a7c529ee996c2bc17663695")
+)
+# Her voice's language detector (optional: the engine downloads it itself
+# the first time she speaks if it is missing).
+$VoiceLidFile = @("https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin", "fast_langdetect/lid.176.bin", 131266198, "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e")
+
+# [url, staging dest, bytes, sha256, final path] for each voice file not in
+# place yet. They download into <install folder>\downloads\voice (the voice
+# engine's folder may not exist yet, and an incomplete one is re-downloaded
+# whole) and move into pretrained_models at the voice step.
+function Get-VoiceFiles {
+    $pm = Join-Path $InstallDir "Amadeus-Project\GPT-SoVITS\GPT_SoVITS\pretrained_models"
+    $stage = Join-Path $InstallDir "downloads\voice"
+    $files = @()
+    foreach ($v in @($VoiceFileTable) + ,$VoiceLidFile) {
+        $rel = $v[0]; $url = $VoiceRepoUrl + $rel; $bytes = $v[1]; $sha = $v[2]
+        if ($v.Count -eq 4) { $url = $v[0]; $rel = $v[1]; $bytes = $v[2]; $sha = $v[3] }
+        $rel = $rel.Replace('/', '\')
+        $files += ,@($url, (Join-Path $stage $rel), $bytes, $sha, (Join-Path $pm $rel))
+    }
+    # Already in place (an earlier install): nothing to fetch.
+    return @($files | Where-Object { -not ((Test-Path -LiteralPath $_[4]) -and (Get-Item -LiteralPath $_[4]).Length -eq $_[2]) })
+}
+
+# A background download (or memory model fetch) an earlier, stopped run
+# left behind: stop it, so two downloads never write the same file. Its
+# ".part" files stay, to resume.
+function Stop-BackgroundDownloads {
+    $dir = Join-Path $ModelsDir "downloads"
+    foreach ($pf in @(Get-ChildItem -LiteralPath $dir -Filter "background_*.pid" -ErrorAction SilentlyContinue)) {
+        $id = 0
+        try { $id = [int](Get-Content -LiteralPath $pf.FullName -Raw).Trim() } catch {}
+        if ($id) {
+            $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -in @("curl", "python")) { try { $p.Kill(); $p.WaitForExit(5000) | Out-Null } catch {} }
+        }
+        Remove-Item -LiteralPath $pf.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Start one hidden background program; its process id goes to the pid file.
+function Start-Hidden($name, $exe, [string[]]$argv){
+    $pidFile = Get-BgPidFile $name
+    New-Item -ItemType Directory -Force -Path (Split-Path $pidFile -Parent) | Out-Null
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = Join-ProcessArgs $argv
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    # A neutral folder: the installer's own current folder can be the app's
+    # backend, whose files (memory.py, api.py, ...) Python would load first.
+    $psi.WorkingDirectory = Split-Path $pidFile -Parent
+    $p = [Diagnostics.Process]::Start($psi)
+    Set-Content -LiteralPath $pidFile -Value $p.Id -NoNewline -Encoding ascii
+    return $p
+}
+
+# One background curl for a list of [url, dest, bytes, ...] files.
+function Start-BgCurl($name, $files, $label){
+    $todo = @()
+    foreach ($f in @($files)) {
+        if (Test-Path -LiteralPath $f[1]) { continue }          # unchecked file: Get-VerifiedFile decides
+        $part = $f[1] + ".part"
+        if ((Test-Path -LiteralPath $part) -and (Get-Item -LiteralPath $part).Length -ge $f[2]) { continue }
+        New-Item -ItemType Directory -Force -Path (Split-Path $f[1] -Parent) | Out-Null
+        $todo += ,$f
+    }
+    if ($todo.Count -eq 0) { return }
+    $argv = @("-L", "--fail", "--retry", "5", "--retry-delay", "10", "--connect-timeout", "30", "-C", "-",
+              "-s", "-S", "--stderr", (Join-Path $ModelsDir ("downloads\background_" + $name + ".log")))
+    foreach ($f in $todo) { $argv += @("-o", ($f[1] + ".part"), $f[0]) }
+    try {
+        $p = Start-Hidden $name (Join-Path $env:SystemRoot "System32\curl.exe") $argv
+        $gb = [math]::Round((($todo | ForEach-Object { [double]$_[2] }) | Measure-Object -Sum).Sum / 1GB, 1)
+        Log ("  " + $label + " (" + $gb + " GB) start downloading in the background now, while everything else installs.") "Green"
+        Write-LogOnly ("  background download '" + $name + "' (curl pid " + $p.Id + "): " + (($todo | ForEach-Object { Split-Path $_[1] -Leaf }) -join ", "))
+    } catch {
+        Write-LogOnly ("  background download '" + $name + "' not started (" + $_.Exception.Message + ") - its step downloads the files.")
+    }
+}
+
+function Start-BackgroundDownloads($choice, $hw){
+    if (-not (Test-Path (Join-Path $env:SystemRoot "System32\curl.exe"))) { return }   # each step downloads its files as before
+    Stop-BackgroundDownloads
+    Start-BgCurl "voice" @(Get-VoiceFiles) "Her voice files"
+    if (-not $SkipLlmDownload) {
+        $label = if ($choice.mode -eq "builtin") { "Her model files" } else { "llama.cpp (to run a model of your own later)" }
+        Start-BgCurl "model" @(Get-LocalLlmFiles $choice $hw) $label
+    }
+}
+
+# When a step needs them: let a still-running background download finish
+# (showing its progress), then Get-VerifiedFile checks every file as before.
+# Without a file list (her memory's model) it shows the time waited.
+function Wait-Background($name, $files, $activity){
+    $pidFile = Get-BgPidFile $name
+    if (-not (Test-Path -LiteralPath $pidFile)) { return }
+    $id = 0
+    try { $id = [int](Get-Content -LiteralPath $pidFile -Raw).Trim() } catch {}
+    $p = if ($id) { Get-Process -Id $id -ErrorAction SilentlyContinue } else { $null }
+    if ($p -and $p.ProcessName -in @("curl", "python") -and -not $p.HasExited) {
+        $files = @($files)
+        $total = (($files | ForEach-Object { [double]$_[2] }) | Measure-Object -Sum).Sum
+        Log ("  " + $activity + " - still going in the background, waiting for it to finish...")
+        $ProgressPreference = "Continue"
+        $started = Get-Date
+        while (-not $p.HasExited) {
+            if ($total -gt 0) {
+                $have = 0.0
+                foreach ($f in $files) {
+                    foreach ($path in @($f[1], ($f[1] + ".part"))) {
+                        if (Test-Path -LiteralPath $path) { $have += (Get-Item -LiteralPath $path).Length; break }
+                    }
+                }
+                $pct = [int][math]::Min(100, 100 * $have / $total)
+                Write-Progress -Id 2 -ParentId 1 -Activity $activity -Status ("{0:N1} of {1:N1} GB" -f ($have / 1GB), ($total / 1GB)) -PercentComplete $pct
+            } else {
+                Write-Progress -Id 2 -ParentId 1 -Activity $activity -Status ("{0} s" -f [int]((Get-Date) - $started).TotalSeconds)
+            }
+            Start-Sleep -Seconds 2
+        }
+        Write-Progress -Id 2 -ParentId 1 -Activity $activity -Completed
+        Write-LogOnly ("  background '" + $name + "' finished")
+    }
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+}
+
+# Her memory's search model (Qwen3-Embedding-0.6B, ~1.2 GB): fetched into
+# the usual model cache by her memory's own Python, in the background, right
+# after her memory is set up. Not fatal: she fetches it at her first start
+# if this could not finish.
+$EmbedModel = "Qwen/Qwen3-Embedding-0.6B"
+function Get-HfHome { if ($env:HF_HOME) { return $env:HF_HOME } return (Join-Path $env:USERPROFILE ".cache\huggingface") }
+function Test-EmbedModelCached {
+    $snap = Join-Path (Get-HfHome) "hub\models--Qwen--Qwen3-Embedding-0.6B\snapshots"
+    return [bool](Get-ChildItem -LiteralPath $snap -Recurse -Filter "model.safetensors" -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+function Start-EmbedModelDownload($proj){
+    if (Test-EmbedModelCached) { return }
+    $py = Join-Path $proj "memory_sidecar\venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $py)) { return }
+    # A small script (isolated mode: no current folder on Python's path) that
+    # writes any error to a log, so a failure is never silent.
+    $dl = Join-Path $ModelsDir "downloads"
+    New-Item -ItemType Directory -Force -Path $dl | Out-Null
+    $script = Join-Path $dl "fetch_memory_model.py"
+    $errLog = Join-Path $dl "background_memory.log"
+    Remove-Item -LiteralPath $errLog -Force -ErrorAction SilentlyContinue
+    Write-Utf8File $script ("import sys, traceback`r`ntry:`r`n    from huggingface_hub import snapshot_download`r`n    snapshot_download('" + $EmbedModel + "')`r`nexcept Exception:`r`n    open(sys.argv[1], 'w', encoding='utf-8').write(traceback.format_exc())`r`n    sys.exit(1)`r`n")
+    try {
+        $p = Start-Hidden "memory" $py @("-I", $script, $errLog)
+        Log "  Her memory's search model (about 1.2 GB) starts downloading in the background now." "Green"
+        Write-LogOnly ("  background download 'memory' (python pid " + $p.Id + "): " + $EmbedModel)
+    } catch {
+        Write-LogOnly ("  memory model download not started (" + $_.Exception.Message + ") - she fetches it at her first start.")
+    }
+}
+function Wait-EmbedModelDownload {
+    $script = Join-Path $ModelsDir "downloads\fetch_memory_model.py"
+    if (-not (Test-Path -LiteralPath $script)) { return }   # never started (no memory, or already cached)
+    Wait-Background "memory" @() "Downloading her memory's search model"
+    $errLog = Join-Path $ModelsDir "downloads\background_memory.log"
+    if (Test-Path -LiteralPath $errLog) { Write-LogOnly ("  memory model download error: " + (Get-Content -LiteralPath $errLog -Raw)) }
+    if (Test-EmbedModelCached) { Log "  Her memory's search model is in place." "Green" }
+    else { Log "  Her memory's search model could not be downloaded right now - she fetches it at her first start." "Yellow" }
+    Remove-Item -LiteralPath $script -Force -ErrorAction SilentlyContinue
+}
+
+# The local-model step for whichever option was chosen. Returns $true
+# when option A's model is ready (option B: when llama.cpp is in place).
+function Install-LocalLlm($proj, $choice, $hw){
+    Wait-Background "model" @(Get-LocalLlmFiles $choice $hw) "Downloading her model"
+    if ($choice.mode -eq "builtin") { return (Install-BuiltinLlm $proj $choice) }
+    if ($hw.choice.offered) { return (Install-LocalModelRunner $proj $hw) }
+    Write-LocalLlmConfig $proj $choice "" $false "" $false   # switches an earlier option-A install off
+    return $false
+}
+
+# The last question: start Amadeus right away? The installer runs as
+# administrator, and a program it starts directly would run as administrator
+# too (and so would the browser she opens). Windows Explorer starts her
+# instead - as the normal user, exactly like a double-click on the file.
+function Offer-StartAmadeus($proj){
+    $ProgressPreference = "Continue"
+    Write-Progress -Id 1 -Activity "Installing Amadeus" -Completed
+    $bat = Join-Path $proj "start_windows.bat"
+    if (-not (Test-Path $bat)) { Read-Host "Press Enter to close this window" | Out-Null; return }
+    Log ""
+    if ((Read-Answer "Start Amadeus now? Type Y (yes) or N (no, I'll start it later)" @("Y","N")) -eq "Y") {
+        try {
+            Start-Process -FilePath (Join-Path $env:SystemRoot "explorer.exe") -ArgumentList ('"' + $bat + '"')
+            Log "  Amadeus is starting in her own window (the first start takes a little longer). You can close this one." "Green"
+        } catch {
+            Log ("  Could not start her from here (" + $_.Exception.Message + "). Double-click start_windows.bat instead.") "Yellow"
+        }
+    } else {
+        Log ("  To start her later, double-click: " + $bat)
+    }
+    Read-Host "Press Enter to close this window" | Out-Null
+}
+
+if ($HardwareCheckOnly) {
+    $hwDir = if ($InstallDir) { $InstallDir } else { Join-Path $env:USERPROFILE "Amadeus" }
+    $hw = Invoke-HardwareCheck $hwDir
+    if ($Json) { $hw | ConvertTo-Json -Depth 5 -Compress }
+    else { Write-Host "Amadeus hardware check (nothing is installed):" -ForegroundColor Cyan; Format-HardwareCheck $hw | ForEach-Object { Write-Host $_ } }
+    exit 0
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Set-Content -Path $LogPath -Value ("Amadeus install (installer v4.12.3) started " + (Get-Date))
+# UTF-8 with a byte-order mark, so even old Notepad shows Japanese text right.
+[IO.File]::WriteAllText($LogPath, ("Amadeus install (installer " + $InstallerVersion + ") started " + (Get-Date) + "`r`n"), (New-Object Text.UTF8Encoding $true))
+if ($LlmScreensOnly) { $SkipLlmDownload = $true }
 
 try {
 
     Log "============================================================" "Green"
-    Log "  AMADEUS INSTALLER v4.12.3  (safe to re-run - it resumes where it stopped)" "Green"
+    Log ("  AMADEUS INSTALLER " + $InstallerVersion + "  (safe to re-run - it resumes where it stopped)") "Green"
     Log "============================================================" "Green"
     Log "It downloads several gigabytes, so give it time. Keep this window open." "Yellow"
+    if ($Source -or $Branch -ne "main" -or $EnvSuffix -or $SimulateVramGB -ge 0 -or $SimulateRamGB -ge 0 -or $SkipLlmDownload) {
+        Log "TEST OPTIONS in use:" "Magenta"
+        if ($Source)              { Log ("  code from this PC : " + $Source) "Magenta" }
+        if ($Branch -ne "main")   { Log ("  branch            : " + $Branch) "Magenta" }
+        if ($EnvSuffix)           { Log ("  environment suffix: " + $EnvSuffix) "Magenta" }
+        if ($SimulateVramGB -ge 0){ Log ("  pretend graphics memory: " + $SimulateVramGB + " GB") "Magenta" }
+        if ($SimulateRamGB -ge 0) { Log ("  pretend normal memory: " + $SimulateRamGB + " GB") "Magenta" }
+        if ($SkipLlmDownload)     { Log "  no local-model downloads (screens + settings file only)" "Magenta" }
+    }
+    if ($Source -and -not ($ForkUrl -and (Test-Path (Join-Path $ForkUrl ".git")))) {
+        Die ("-Source must be a git project folder on this PC (with a .git folder inside): " + $Source)
+    }
+    if ($EnvSuffix -and $EnvSuffix -notmatch '^-?[A-Za-z0-9_]+$') {
+        Die ("-EnvSuffix may contain only letters, digits and _ (got: " + $EnvSuffix + ")")
+    }
+    # The very first question, before anything is downloaded.
+    $hw = Invoke-HardwareCheck $InstallDir
+    $llmChoice = Invoke-LlmChoice $hw
+    if ($LlmScreensOnly) {
+        $proj = Join-Path $InstallDir "Amadeus-Project"
+        Install-LocalLlm $proj $llmChoice $hw | Out-Null
+        Log "TEST: -LlmScreensOnly - stopping here (nothing else was installed)." "Magenta"
+        exit 0
+    }
+    Log ""
+    Log "Everything else installs now. It downloads several gigabytes, so give it time." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
+    Start-BackgroundDownloads $llmChoice $hw
 
     # ---------- STEP 1: winget ----------
     Step 1 "Checking the Windows installer tool (winget)"
@@ -502,15 +1616,52 @@ try {
     # ---------- STEP 2: prerequisites ----------
     Step 2 "Installing required programs (only the ones you don't already have)"
 
+    # v4.13: no administrator needed - nothing in this step ever asks.
+    # winget installs for this user only (--scope user); a program winget has
+    # no per-user installer for (Git, Node.js on a fresh PC - the 2026-10-24
+    # VM test) comes as its official portable zip, checked against its
+    # published checksum, into this user's own folder %USERPROFILE%\.amadeus-tools
+    # (the same place the Mac installer uses). The launcher finds them there.
     function Install-Pkg($name, $id){
-        Log ("  Installing " + $name + " ... (can take a few minutes)")
-        winget install -e --id $id --silent --accept-source-agreements --accept-package-agreements | Out-Null
+        Log ("  Installing " + $name + " for this user ... (can take a few minutes)")
+        Invoke-Tool ("Installing " + $name + " (for this user)") (Resolve-Exe "winget") @("install", "-e", "--id", $id, "--silent", "--scope", "user", "--accept-source-agreements", "--accept-package-agreements")
         if ($LASTEXITCODE -eq 0) { Log ("  Installed " + $name + ".") "Green" }
-        else { Log ("  WARNING: " + $name + " install returned code " + $LASTEXITCODE + ". We will double-check below.") "Yellow" }
+        else { Log ("  " + $name + ": winget has no per-user install here (code " + $LASTEXITCODE + ").") "Yellow" }
     }
 
+    # One official portable zip -> $dest (replacing an older copy). $inner =
+    # the folder inside the zip that holds the program ("" = the zip's root).
+    function Install-PortableZip($label, $url, [double]$bytes, $sha256, $inner, $dest){
+        $zip = Join-Path $env:TEMP ("amadeus-" + (Split-Path $url -Leaf))
+        Get-VerifiedFile $url $zip $bytes $sha256 $label
+        $unpack = $dest + "-unpack"
+        if (Test-Path -LiteralPath $unpack) { Remove-Item -LiteralPath $unpack -Recurse -Force }
+        Log ("  Unpacking " + $label + "...")
+        Expand-ZipFile $zip $unpack
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+        $src = if ($inner) { Join-Path $unpack $inner } else { $unpack }
+        Move-Item -LiteralPath $src -Destination $dest
+        Remove-Item -LiteralPath $unpack -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $zip, ($zip + ".verified") -Force -ErrorAction SilentlyContinue
+    }
+    $ToolsDir  = Join-Path $env:USERPROFILE ".amadeus-tools"
+    $NodeDir   = Join-Path $ToolsDir "node"
+    $GitDir    = Join-Path $ToolsDir "git"
+    $LfsDir    = Join-Path $ToolsDir "git-lfs"
+    $FfmpegDir = Join-Path $ToolsDir "ffmpeg"
+
+    # Git (downloads the project): MinGit, Git for Windows' own portable
+    # build for programs like this one. It has no Git LFS (some project
+    # files need it) - that comes next, the same way.
     if (Get-Command git -ErrorAction SilentlyContinue) { Log "  Git already present." "Green" }
-    else { Install-Pkg "Git" "Git.Git"; Refresh-Path }
+    else {
+        if (-not (Test-Path (Join-Path $GitDir "cmd\git.exe"))) {
+            Install-PortableZip "Git 2.56.0.2 (MinGit)" "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/MinGit-2.56.0.2-64-bit.zip" 39806486 "da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be" "" $GitDir
+        } else { Log "  Git already present (Amadeus' own copy)." "Green" }
+        Refresh-Path
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "Could not set up Git. Look at this window and the log." }
+        Log ("  Git ready: " + $GitDir) "Green"
+    }
 
     $condaHome = Join-Path $env:USERPROFILE "miniconda3"
     function Find-CondaHome {
@@ -564,14 +1715,65 @@ try {
     # simply ignores the unknown setting.
     & $conda config --set notify_outdated_conda false 2>$null | Out-Null
 
+    # Node.js (her web page): winget only offers it for the whole PC.
     if (Get-Command node -ErrorAction SilentlyContinue) { Log "  Node.js already present." "Green" }
-    else { Install-Pkg "Node.js" "OpenJS.NodeJS.LTS"; Refresh-Path }
+    else {
+        if (-not (Test-Path (Join-Path $NodeDir "node.exe"))) {
+            Install-PortableZip "Node.js v24.22.1" "https://nodejs.org/dist/v24.22.1/node-v24.22.1-win-x64.zip" 37748064 "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5" "node-v24.22.1-win-x64" $NodeDir
+        } else { Log "  Node.js already present (Amadeus' own copy)." "Green" }
+        Refresh-Path
+        if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Die "Could not set up Node.js. Look at this window and the log." }
+        Log ("  Node.js ready: " + $NodeDir) "Green"
+    }
 
+    # FFmpeg (her voice engine reads audio with it): winget for this user,
+    # else the official portable build.
     if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log "  FFmpeg already present." "Green" }
-    else { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
+    else {
+        if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
+        if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) {
+                Install-PortableZip "FFmpeg 9.0.2" "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" 114768076 "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba" "ffmpeg-9.0.2-essentials_build" $FfmpegDir
+            }
+            Refresh-Path
+            if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log ("  FFmpeg ready: " + $FfmpegDir) "Green" }
+            else { Log "  WARNING: FFmpeg could not be set up - her voice may not work. Run the installer again later." "Yellow" }
+        }
+    }
 
-    winget install -e --id Git.LFS --silent --accept-source-agreements --accept-package-agreements | Out-Null
-    & git lfs install 2>$null
+    # Speech model for videos (video plan, MH 2026-11-03: part of every
+    # install, no question): faster-whisper "small", pinned like her other
+    # downloads (backend/transcribe.py lists the same files - a test keeps
+    # them equal). Never fatal: the app fetches it itself when it is missing.
+    $SpeechRev = "536b0662742c02347bc0e980a01041f333bce120"
+    $SpeechDir = Join-Path $ToolsDir "speech\faster-whisper-small"
+    $SpeechFiles = @(
+        @("config.json", 2370, "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"),
+        @("model.bin", 483546902, "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"),
+        @("tokenizer.json", 2203239, "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"),
+        @("vocabulary.txt", 459861, "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"))
+    try {
+        foreach ($f in $SpeechFiles) {
+            Get-VerifiedFile ("https://huggingface.co/Systran/faster-whisper-small/resolve/" + $SpeechRev + "/" + $f[0]) (Join-Path $SpeechDir $f[0]) $f[1] $f[2] ("speech model " + $f[0])
+        }
+        Set-Content -LiteralPath (Join-Path $SpeechDir ".verified") -Value $SpeechRev -NoNewline -Encoding ascii
+        Log "  Speech model for videos ready." "Green"
+    } catch {
+        Log ("  WARNING: the speech model for videos could not be downloaded now (" + $_.Exception.Message + "). Amadeus downloads it herself later.") "Yellow"
+    }
+
+    # Git LFS: Git for Windows already includes it; MinGit does not - then
+    # its official portable git-lfs.exe goes next to the other tools.
+    & (Resolve-Exe "git") lfs version 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        if (-not (Test-Path (Join-Path $LfsDir "git-lfs.exe"))) {
+            Install-PortableZip "Git LFS 3.8.0" "https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-windows-amd64-v3.8.0.zip" 5862396 "b62e7b8ceddee635f691233d77de8eaa4b213e9209e0173811d8cfa77f7882c1" "git-lfs-3.8.0" $LfsDir
+        }
+        Refresh-Path
+        & (Resolve-Exe "git") lfs version 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { Die "Could not set up Git LFS. Look at this window and the log." }
+    }
+    Invoke-Tool "Setting up Git LFS" (Resolve-Exe "git") @("lfs", "install")
     Log "  Git + LFS ready." "Green"
 
     # ---------- STEP 3: Amadeus project ----------
@@ -595,8 +1797,13 @@ try {
                 # (Git's own fast-forward safety still applies: if an update
                 # ever needed to rewrite one of these files, the merge fails
                 # and the files stay exactly as the user left them.)
+                # Extra files nobody committed do not block either (v4.13,
+                # VM test 2026-10-25: "Install Amadeus.bat" saves
+                # install_windows.ps1 next to itself, and testers drop tools
+                # into the folder - every update was refused). An update never
+                # deletes them; one it would overwrite makes git refuse.
                 $personal = "llm_server\.txt|llm_model\.txt|personality\.txt|api_key\.txt"
-                $status   = & git status --porcelain | Where-Object { $_ -notmatch $personal }
+                $status   = & git status --porcelain --untracked-files=no | Where-Object { $_ -notmatch $personal }
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
@@ -624,8 +1831,35 @@ try {
             Log "  (Not a git folder - cannot update it; using it as is.)" "Yellow"
         }
     } else {
-        Ensure-Clone $ForkUrl $proj $Branch @("backend\main.py","start_windows.bat")
+        Ensure-Clone $ForkUrl $proj $Branch @("backend\main.py","start_windows.bat") $true
     }
+
+    # Which Python environments this install uses. Normally the plain names;
+    # with -EnvSuffix its own set. The suffix is remembered inside the
+    # project folder (start_windows.bat, check_amadeus.bat and the launcher
+    # read the same file), and a re-run without -EnvSuffix keeps it - so a
+    # forgotten option can never install into another install's environments.
+    $suffixFile = Join-Path $proj ".runtime\env_suffix.txt"
+    $savedSuffix = ""
+    if (Test-Path $suffixFile) { $savedSuffix = (Get-Content $suffixFile -Raw).Trim() }
+    if ($EnvSuffix) {
+        $wanted = "-" + $EnvSuffix.TrimStart("-")
+        if ($savedSuffix -and $savedSuffix -ne $wanted) {
+            Die ("This folder already uses the environments ending in '" + $savedSuffix + "'. Run again with -EnvSuffix " + $savedSuffix.TrimStart("-") + " (or install into a new folder).")
+        }
+        $sfx = $wanted
+    } else {
+        $sfx = $savedSuffix
+        if ($sfx) { Log ("  This install uses its own Python environments (ending in '" + $sfx + "') - keeping them.") "Yellow" }
+    }
+    if ($sfx -and -not $savedSuffix) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $suffixFile -Parent) | Out-Null
+        Set-Content -Path $suffixFile -Value $sfx -NoNewline -Encoding ascii
+    }
+    $EnvApp   = "amadeus" + $sfx
+    $EnvCm    = "amadeus-cm" + $sfx
+    $EnvVoice = "GPTSoVits" + $sfx
+    Log ("  Python environments: " + $EnvApp + ", " + $EnvCm + ", " + $EnvVoice)
 
     # ---------- STEP 4: voice engine ----------
     Step 4 "Downloading the voice engine (GPT-SoVITS)"
@@ -650,12 +1884,12 @@ try {
 
     # ---------- STEP 5: backend env ----------
     Step 5 "Setting up the Amadeus Python environments"
-    Ensure-Env "amadeus"
+    Ensure-Env $EnvApp
     # The memory sidecar's package list needs a newer Python (3.12+) than the
-    # app environment (3.10), so it gets its own environment. The launcher
-    # finds it on first start and builds the sidecar from it.
-    Ensure-Env "amadeus-cm" "3.13"
-    Invoke-PipInEnv "amadeus" @("--upgrade", "pip") | Out-Null
+    # app environment (3.10), so it gets its own environment; the sidecar's
+    # venv is built from it at the end of this step.
+    Ensure-Env $EnvCm "3.13"
+    Invoke-PipInEnv $EnvApp @("install", "--upgrade", "pip") "Updating pip (app)"
     # ddgs: the DuckDuckGo search library behind her web search (weather is
     # separate - it uses a keyless Open-Meteo feed and needs no library).
     # The 2026-10-07 fresh-VM run proved a fresh PC was missing this: she
@@ -664,8 +1898,12 @@ try {
     # e2k: a small offline English->katakana model (public-domain code; its
     # model is trained on CC-BY-SA dictionaries) so her voice says English
     # words the Japanese way instead of switching to an English accent.
-    Invoke-PipInEnv "amadeus" @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k")
-    if ($LASTEXITCODE -ne 0) { throw "Could not install the backend packages. Send me the log." }
+    # pillow: checks and shrinks the pictures you show her (and removes
+    # their location data) before her model sees them. pypdf + python-docx:
+    # read the PDF and Word documents you give her.
+    Invoke-PipInEnv $EnvApp @("install", "Flask", "flask-cors", "requests", "tqdm", "langchain", "langchain-openai", "pydantic", "ddgs", "e2k", "pillow", "pypdf", "python-docx") "Installing the app packages"
+    if ($LASTEXITCODE -ne 0) { throw ("Could not install the backend packages. Send me the log. The last lines were:`n" + (Get-ToolTail)) }
+    Log ("  App packages installed" + $(if ($script:LastToolInstalled) { " (" + $script:LastToolInstalled + " new)" } else { "" }) + ".") "Green"
     # Smoke test: the whole backend must import cleanly in this environment.
     $backend = Join-Path $proj "backend"
     Push-Location $backend
@@ -674,18 +1912,46 @@ try {
     # behind a passing smoke test.
     # Direct Python where the toolbox layout is standard (see Env-Python
     # above); the helper route stays as the fallback.
-    $amPy = Env-Python "amadeus"
-    if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
-    else { $smoke = & $conda run -n amadeus python -c "import api; import ddgs; import e2k; print('SMOKE_OK')" 2>&1 | Out-String }
+    $amPy = Env-Python $EnvApp
+    if ($amPy) { $smoke = & $amPy -c "import api; import ddgs; import e2k; import PIL; import pypdf; import docx; print('SMOKE_OK')" 2>&1 | Out-String }
+    else { $smoke = & $conda run -n $EnvApp python -c "import api; import ddgs; import e2k; import PIL; import pypdf; import docx; print('SMOKE_OK')" 2>&1 | Out-String }
+    Write-LogOnly ("  backend smoke test output: " + $smoke.Trim())
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
 
+    # Her memory (the CharacterMemory sidecar: its venv + about 1.3 GB of
+    # packages). Set up HERE, not on her first start (v4.13): a first launch
+    # used to begin with this download, as a wall of text after the user
+    # thought installing was done. The launcher's own setup code does the
+    # work (launcher.py --setup-memory), so install and launch can never set
+    # it up two different ways; the launcher still repairs it at start if
+    # this step could not finish. Not fatal: she works without it.
+    # uv, a much faster package installer, for her memory's fully pinned
+    # package list (the same versions as pip, in about a third of the time).
+    # Not for the voice engine: its list is not pinned and uv picks other
+    # versions there (tested 2026-10-24). Not fatal: the launcher falls back
+    # to pip without it.
+    Invoke-PipInEnv $EnvApp @("install", "uv==0.12.24") "Installing uv (a faster package installer)"
+    $cmPy = Env-Python $EnvCm
+    $launcherPy = Join-Path $proj "scripts\launcher.py"
+    $setupArgs = @($launcherPy, "--setup-memory")
+    if ($cmPy) { $setupArgs += @("--cm-python", $cmPy) }
+    if ($amPy) { Invoke-Tool "Setting up her memory (about 1.3 GB)" $amPy $setupArgs }
+    else { Invoke-Tool "Setting up her memory (about 1.3 GB)" $conda (@("run", "-n", $EnvApp, "--no-capture-output", "python") + $setupArgs) }
+    if ($LASTEXITCODE -eq 0) { Log "  Her memory is set up." "Green"; Start-EmbedModelDownload $proj }
+    else { Log ("  Her memory could not be set up right now - Amadeus finishes it when she starts. The last lines were:`n" + (Get-ToolTail)) "Yellow" }
+
     # ---------- STEP 6: voice env (PyTorch first, then the rest) ----------
     Step 6 "Setting up the voice engine environment (big download, be patient)"
-    Ensure-Env "GPTSoVits"
+    Ensure-Env $EnvVoice
     Push-Location $gpt
     $pipLog = Join-Path $InstallDir "voice_pip.log"
+    # A fresh voice_pip.log per run (the voice engine's pip output; the same
+    # lines also go into install_log.txt).
+    try { [IO.File]::WriteAllText($pipLog, ("Voice engine packages, installer " + $InstallerVersion + ", " + (Get-Date) + "`r`n"), $Utf8NoBom) } catch {}
+    # Up-to-date pip first: its "raw" progress mode drives the progress line.
+    Invoke-PipInEnv $EnvVoice @("install", "--upgrade", "pip") "Updating pip (voice engine)" $pipLog
 
     # --- 6a. Install PyTorch FIRST, with the build that matches your hardware.
     #         Doing it before requirements.txt means the big download happens once
@@ -707,9 +1973,10 @@ try {
     # re-run on such a machine moves on in seconds. (On a fresh PC the
     # answer is 'none' and the normal download happens.)
     $torchProbe = "try:`n    import torch`n    print('T|' + torch.__version__ + '|' + str(torch.version.cuda or 'cpu') + '|' + str(torch.cuda.is_available()))`nexcept Exception:`n    print('NONE')`n"
-    $gptPy = Env-Python "GPTSoVits"
+    $gptPy = Env-Python $EnvVoice
     if ($gptPy) { $torchInfo = (& $gptPy -c $torchProbe 2>&1 | Out-String).Trim() }
-    else { $torchInfo = (& $conda run -n GPTSoVits python -c $torchProbe 2>&1 | Out-String).Trim() }
+    else { $torchInfo = (& $conda run -n $EnvVoice python -c $torchProbe 2>&1 | Out-String).Trim() }
+    Write-LogOnly ("  PyTorch check: " + $torchInfo + " (NVIDIA card seen: " + $hasGpu + ", voice build: " + $voiceBuild + ")")
     $torchReady = $false
     if ($torchInfo -match '^T\|') {
         $tp = $torchInfo.Split('|')   # T | version | cuda build tag | can-see-GPU
@@ -718,14 +1985,14 @@ try {
     if ($torchReady) {
         Log ("  PyTorch " + $tp[1] + " is already in place and ready for this machine - skipping the download.") "Green"
     } else {
-        Invoke-PipInEnv "GPTSoVits" @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null   # clear any stale copy
+        Invoke-PipInEnv $EnvVoice @("uninstall", "-y", "torch", "torchvision", "torchaudio") "Removing an old PyTorch" $pipLog   # clear any stale copy
         if ($voiceBuild -eq 'cuda') {
             Log "  NVIDIA GPU found - installing PyTorch CUDA 12.8 (the graphics-card version)." "Green"
-            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") 2>&1 | Tee-Object -FilePath $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128") "Installing PyTorch (graphics-card version, about 2.5 GB)" $pipLog
         } else {
             if ($hasGpu) { Log "  This graphics card is too old for the voice engine's graphics-card version (it needs an RTX 20 / GTX 16 series card or newer). Her voice will run on the processor instead - it works, just slower." "Yellow" }
             else { Log "  No working NVIDIA GPU found - installing the CPU version (works, but voice is slower)." "Yellow" }
-            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") "Installing PyTorch (processor version)" $pipLog
         }
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
@@ -735,8 +2002,8 @@ try {
     }
 
     # --- 6b. Install the remaining voice packages (any error is now captured).
-    Invoke-PipInEnv "GPTSoVits" @("install", "-r", "extra-req.txt", "--no-deps") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
-    Invoke-PipInEnv "GPTSoVits" @("install", "-r", "requirements.txt") 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+    Invoke-PipInEnv $EnvVoice @("install", "-r", "extra-req.txt", "--no-deps") "Installing the voice engine extras" $pipLog
+    Invoke-PipInEnv $EnvVoice @("install", "-r", "requirements.txt") "Installing the voice engine packages" $pipLog
     if ($LASTEXITCODE -ne 0) {
         # Last resort: install everything except the Japanese text helper
         # (pyopenjtalk). The patched voice code treats it as optional, so
@@ -745,7 +2012,7 @@ try {
         $reqCore = Join-Path $gpt "requirements-core.txt"
         Get-Content $reqAll | Where-Object { $_ -notmatch "pyopenjtalk" } | Set-Content -Path $reqCore -Encoding ascii
         Log "  Retrying the voice packages without the optional Japanese text helper..." "Yellow"
-        Invoke-PipInEnv "GPTSoVits" @("install", "-r", $reqCore) 2>&1 | Tee-Object -FilePath $pipLog -Append | Out-Null
+        Invoke-PipInEnv $EnvVoice @("install", "-r", $reqCore) "Installing the voice engine packages (without the Japanese text helper)" $pipLog
         if ($LASTEXITCODE -eq 0) {
             Log "  Voice packages installed (Japanese text helper skipped - voice still works)." "Yellow"
         } else {
@@ -764,8 +2031,8 @@ try {
     # too old for this PyTorch says "available" and then fails here.
     $gpuProbe = "import torch`nif not torch.cuda.is_available():`n    print('GPU_NO')`nelse:`n    try:`n        x = torch.ones(8, device='cuda')`n        print('GPU_OK' if float((x * 2).sum()) == 16.0 else 'GPU_FAIL|wrong result')`n    except Exception as e:`n        print('GPU_FAIL|' + (str(e).strip().splitlines() or [''])[0])`n"
     if ($gptPy) { $gpuCheck = & $gptPy -c $gpuProbe 2>&1 | Out-String }
-    else { $gpuCheck = & $conda run -n GPTSoVits python -c $gpuProbe 2>&1 | Out-String }
-    try { Add-Content -Path $LogPath -Value ("  PyTorch GPU check: " + $gpuCheck.Trim()) } catch {}
+    else { $gpuCheck = & $conda run -n $EnvVoice python -c $gpuProbe 2>&1 | Out-String }
+    Write-LogOnly ("  PyTorch GPU check: " + $gpuCheck.Trim())
     if ($hasGpu -and $voiceBuild -eq 'cpu') {
         Log "  Running in CPU mode (graphics card too old for the voice engine - her voice uses the processor)." "Yellow"
     } elseif ($hasGpu) {
@@ -774,8 +2041,8 @@ try {
             # The card is seen but too old for this PyTorch: swap in the
             # processor version so her voice works instead of failing.
             Log "  Your graphics card could not run the voice engine's graphics-card version. Switching her voice to the processor (works, just slower)..." "Yellow"
-            Invoke-PipInEnv "GPTSoVits" @("uninstall", "-y", "torch", "torchvision", "torchaudio") 2>&1 | Out-Null
-            Invoke-PipInEnv "GPTSoVits" @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") 2>&1 | Tee-Object -FilePath $pipLog -Append
+            Invoke-PipInEnv $EnvVoice @("uninstall", "-y", "torch", "torchvision", "torchaudio") "Removing the graphics-card PyTorch" $pipLog
+            Invoke-PipInEnv $EnvVoice @("install", "torch", "torchvision", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu") "Installing PyTorch (processor version)" $pipLog
             if ($LASTEXITCODE -ne 0) {
                 $tail = (Get-Content $pipLog -Tail 15) -join "`n"
                 throw "PyTorch (processor version) failed to install. The last lines of the error are in voice_pip.log (your Amadeus folder):`n$tail"
@@ -788,70 +2055,57 @@ try {
         Log "  Running in CPU mode (no GPU detected)." "Yellow"
     }
 
-    # ---------- STEP 8: pretrained voice models ----------
-    Step 8 "Downloading the voice model files (several GB, be patient)"
-    $hf  = Join-Path $env:TEMP "GPT-SoVITS-hf"
-    # NOTE: this HuggingFace repo keeps every model file at its TOP level -
-    # there is no 'pretrained_models' subfolder. So we treat the whole cloned
-    # folder as the set of files to copy, and use one marker file (s2G488k.pth)
-    # to know the download finished, so a re-run does NOT download again.
-    if (-not (Test-Path (Join-Path $hf "s2G488k.pth"))) {
-        if (Test-Path $hf) { Remove-Item -Recurse -Force $hf -ErrorAction SilentlyContinue }
-        & git clone https://huggingface.co/lj1995/GPT-SoVITS $hf
-        if ($LASTEXITCODE -ne 0) { throw "Could not download the voice model files. Check your internet connection, then run the installer again." }
-    } else { Log "  Voice model files already downloaded - reusing them." "Yellow" }
+    # ---------- STEP 8: her voice's model files ----------
+    # v4.13: only the files her voice loads (about 1.2 GB, see $VoiceFileTable),
+    # each checked against its published checksum - they started downloading
+    # in the background right after the first question. Before, this step
+    # cloned the voice engine's whole model page (every engine version, ~6.5
+    # GB) and left a ~13 GB copy in the temp folder.
+    Step 8 "Her voice's model files (about 1.2 GB)"
     $dst = Join-Path $gpt "GPT_SoVITS\pretrained_models"
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
-    # Copy everything from the cloned repo (but skip its hidden .git folder).
-    Get-ChildItem -Path $hf -Force | Where-Object { $_.Name -ne ".git" } | ForEach-Object {
-        Copy-Item -Path $_.FullName -Destination $dst -Recurse -Force
-    }
-    if (-not (Test-Path (Join-Path $dst "s2G488k.pth"))) { throw "The voice model files copied but look incomplete (missing s2G488k.pth). Run the installer again to retry." }
-    Log "  Voice model files copied into place." "Green"
-    # The newer voice engine detects the language of each line with a
-    # language-identification model (about 130 MB) that it fetches ON FIRST
-    # USE - and its downloader refuses to run unless its cache folder already
-    # exists (a fresh clone has none), which made the very first voice line
-    # fail on fresh installs (2026-10-07, fresh-VM test). Pre-download it now
-    # so her first voice line never waits on a network fetch. Best effort: if
-    # this download fails (offline machine, blocked CDN), the launcher creates
-    # the cache folder at start and the engine fetches the model on first use
-    # instead.
-    $fldDir = Join-Path $dst "fast_langdetect"
-    New-Item -ItemType Directory -Force -Path $fldDir | Out-Null
-    $fldFile = Join-Path $fldDir "lid.176.bin"
-    if (Test-Path $fldFile) {
-        Log "  Voice language model already present." "Yellow"
+    $voiceFiles = @(Get-VoiceFiles)
+    if ($voiceFiles.Count -gt 0) {
+        Wait-Background "voice" $voiceFiles "Downloading her voice files"
+        foreach ($f in $voiceFiles) {
+            $leaf = Split-Path $f[4] -Leaf
+            try {
+                Get-VerifiedFile $f[0] $f[1] $f[2] $f[3] ("voice file " + $leaf)
+                New-Item -ItemType Directory -Force -Path (Split-Path $f[4] -Parent) | Out-Null
+                Move-Item -LiteralPath $f[1] -Destination $f[4] -Force
+                Remove-Item -LiteralPath ($f[1] + ".verified") -Force -ErrorAction SilentlyContinue
+            } catch {
+                # The language detector is optional: the engine fetches it
+                # itself the first time she speaks. Every other file is needed.
+                if ($leaf -ne "lid.176.bin") { throw }
+                Log ("  Could not download the voice language model right now (" + $_.Exception.Message + "). No problem - the voice engine downloads it the first time she speaks.") "Yellow"
+            }
+        }
+        Log "  Her voice files are in place." "Green"
     } else {
-        $fldUrl = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
-        # Download with Python (its TLS works on more machines than
-        # PowerShell's - on some PCs Invoke-WebRequest cannot open an SSL
-        # connection at all while Python is fine); PowerShell is the fallback.
-        $fldOk = $false
-        $py = Join-Path $condaHome "python.exe"
-        if (Test-Path $py) {
-            try {
-                Log "  Downloading the voice language model (about 130 MB)..."
-                & $py -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" $fldUrl $fldFile
-                $fldOk = ($LASTEXITCODE -eq 0)
-            } catch { $fldOk = $false }
-        }
-        if (-not $fldOk) {
-            try {
-                Log "  Downloading the voice language model (about 130 MB)..."
-                Invoke-WebRequest $fldUrl -OutFile $fldFile -UseBasicParsing -TimeoutSec 1800
-                $fldOk = ($LASTEXITCODE -eq 0)
-            } catch { $fldOk = $false }
-        }
-        if ($fldOk -and (Test-Path $fldFile)) {
-            Log "  Voice language model pre-downloaded." "Green"
-        } else {
-            # A half-downloaded file would be TRUSTED later (the engine only
-            # fetches when the file is absent), so delete it and fall back to
-            # a fresh automatic download at first use.
-            Remove-Item $fldFile -Force -ErrorAction SilentlyContinue
-            Log "  Could not pre-download the voice language model right now (is your internet reachable?). No problem - the voice engine will download it automatically the first time she speaks." "Yellow"
-        }
+        Log "  Her voice files are already in place." "Yellow"
+    }
+    if (-not (Test-Path (Join-Path $dst "gsv-v2final-pretrained\s2G2333k.pth"))) { throw "Her voice files look incomplete (gsv-v2final-pretrained\s2G2333k.pth is missing). Run the installer again to retry." }
+    # The engine only downloads the language detector itself when this
+    # folder exists (fresh-VM test 2026-10-07: her first line failed).
+    New-Item -ItemType Directory -Force -Path (Join-Path $dst "fast_langdetect") | Out-Null
+    Remove-Item -LiteralPath (Join-Path $InstallDir "downloads\voice") -Recurse -Force -ErrorAction SilentlyContinue
+    # Her Japanese pronunciation dictionary (open_jtalk, ~23 MB): the voice
+    # engine's text library fetches it the first time she speaks, which made
+    # her first line wait (2026-10-24 test). Fetch it now. Best effort: if
+    # this fails, the library still fetches it on first use.
+    $voicePy = Join-Path $condaHome ("envs\" + $EnvVoice + "\python.exe")
+    if (Test-Path -LiteralPath $voicePy) {
+        Invoke-Tool "Preparing her Japanese pronunciation dictionary" $voicePy @("-I", "-c", "import pyopenjtalk; pyopenjtalk.g2p('あ'); print('JTALK_OK')")
+        if ((Get-ToolTail) -match "JTALK_OK") { Log "  Her Japanese pronunciation dictionary is in place." "Green" }
+        else { Log "  Her Japanese pronunciation dictionary could not be prepared right now - it downloads the first time she speaks." "Yellow" }
+    }
+    # The old full download (installers before v4.13) in the temp folder:
+    # ~13 GB nobody needs any more.
+    $oldHf = Join-Path $env:TEMP "GPT-SoVITS-hf"
+    if (Test-Path -LiteralPath $oldHf) {
+        Remove-Item -LiteralPath $oldHf -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $oldHf)) { Log "  Removed the old full voice-model download from the temp folder (about 13 GB freed)." "Green" }
     }
     # The voice engine reads Western-script words (the name you typed in,
     # "AI", ...) with a separate english text module. That module needs a
@@ -878,13 +2132,14 @@ try {
     # The 120 s socket timeout in $nltkCode keeps a stalled download from
     # hanging forever (it then falls back to the yellow note + on-first-use
     # fetch, as before).
-    $nltkPy = Join-Path $condaHome "envs\GPTSoVits\python.exe"
+    $nltkPy = Join-Path $condaHome ("envs\" + $EnvVoice + "\python.exe")
     if (Test-Path $nltkPy) {
         $nltkOut = & $nltkPy -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
     } else {
         # Fallback for exotic layouts where the env's python is elsewhere.
-        $nltkOut = & $conda run -n GPTSoVits python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
+        $nltkOut = & $conda run -n $EnvVoice python -c $nltkCode $nltkDir averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict 2>&1 | Out-String
     }
+    Write-LogOnly ("  voice text data fetch output: " + $nltkOut.Trim())
     if ($nltkOut -match "NLTK_DATA_OK") {
         Log "  Voice text data for Western-script words is in place." "Green"
     } else {
@@ -896,13 +2151,41 @@ try {
     Push-Location (Join-Path $proj "frontend")
     # --no-audit --no-fund: skip npm's background registry checks - they
     # save nothing for an install and can add tens of seconds on fresh PCs.
-    & npm install --no-audit --no-fund | Out-Null
+    Invoke-Tool "Setting up the web interface" (Join-Path $env:SystemRoot "System32\cmd.exe") @("/d", "/c", "npm", "install", "--no-audit", "--no-fund")
     if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else { Log "  Frontend ready." "Green" }
     Pop-Location
 
+    # ---------- STEP 10: built-in local model (option A only) ----------
+    # Last on purpose: the biggest download, and a failure here must not
+    # block anything else (re-running the installer resumes it).
+    $llmReady = $false
+    if ($llmChoice.mode -eq "builtin") {
+        Step 10 ("Setting up her built-in local model - " + $TierTable.models.($llmChoice.model).label + " (big download, be patient)")
+    } elseif ($hw.choice.offered) {
+        Step 10 "Installing llama.cpp, so you can also run a GGUF model of your own on this PC"
+    }
+    $llmReady = Install-LocalLlm $proj $llmChoice $hw
+    Wait-EmbedModelDownload
+
     # ---------- DONE ----------
-    Step 10 "ALL DONE!"
+    Step 11 "ALL DONE!"
     Log "" "Green"
+    if ($llmChoice.mode -eq "builtin") {
+        if ($llmReady) {
+            Log ("Everything is installed. Amadeus thinks with her built-in local model (" + $TierTable.models.($llmChoice.model).label + ") - nothing to connect.") "Green"
+        } else {
+            Log "Everything is installed EXCEPT her built-in local model (see the messages above)." "Yellow"
+            Log "Run this installer again when you can - it continues the download where it stopped." "Yellow"
+        }
+        Log "To START Amadeus, double-click this file:" "Green"
+        Log ("       " + (Join-Path $proj "start_windows.bat"))
+        Log "(You can switch to your own model or a cloud service any time in Settings -> Connection.)"
+        Log "When a game needs the graphics memory, start her with 'Start Amadeus without her model.bat' instead (load her model later in Settings -> Connection, or unload it there any time)."
+        Log ""
+        Log ("(Install log saved to: " + $LogPath + ")")
+        Offer-StartAmadeus $proj
+        exit 0
+    }
     Log "Everything is installed. Amadeus needs a model to think with:" "Green"
     Log "  - a cloud model service (e.g. OpenRouter or OpenAI), or"
     Log "  - a local model server on this PC (e.g. KoboldCpp, Unsloth"
@@ -912,13 +2195,17 @@ try {
     Log ("       " + (Join-Path $proj "start_windows.bat"))
     Log "  2) When she opens in your browser, read her introduction message -"
     Log "     it walks you through connecting your model, step by step."
-    Log "  3) (Shortcut) You can also open Settings -> Connection and click"
-    Log "     'Test connection' - the dot turns green when she can reach"
-    Log "     your model. Pick your model from the chips (or type its name)"
-    Log "     and paste its API key, if your provider has one."
+    Log "  3) (Shortcut) You can also open Settings -> Connection, enter the"
+    Log "     server address and API key, press 'Refresh list' and pick your"
+    Log "     model (type to search), then press 'Use this model'."
+    if ($llmReady) {
+        Log "  To run a GGUF model on this PC instead: put the file in"
+        Log ("       " + $ModelsDir)
+        Log "     then choose Built-in in Settings -> Connection and press Refresh list."
+    }
     Log ""
     Log ("(Install log saved to: " + $LogPath + ")")
-    Read-Host "Press Enter to close this window" | Out-Null
+    Offer-StartAmadeus $proj
 
 } catch {
     Log ("UNEXPECTED ERROR: " + $_.Exception.Message) "Red"

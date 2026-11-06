@@ -63,7 +63,8 @@ class _Base(_FreshAppTests):
             patch.object(self.chat, "reset_llm", lambda: None),
             patch.object(self.chat, "_finalize", lambda pack, llm: pack),
             patch.object(self.chat, "ja_voice", SimpleNamespace(
-                build_voice_context=lambda trust: {"role": "system", "content": "v"})),
+                build_closeness_context=lambda trust: {"role": "system", "content": "CLOSENESS"},
+            build_voice_rules=lambda: {"role": "system", "content": "v"})),
             patch.object(self.chat, "stats", SimpleNamespace(load_stat=lambda key: 50.0)),
         ]
 
@@ -231,6 +232,7 @@ class RegenerateTests(_Base):
         self.assertNotIn("最初のこんにちは", text)
         self.assertNotIn("never answered it", text)
         self.assertNotIn("has not replied to it", text)
+        self.assertNotIn("no reply to it yet", text)   # wording since 2026-10-29
         self.assertIn("ALPHA-HER-REPLY", text)
 
     def test_switch_greeting_regenerates_as_a_switch_from_the_same_tab(self):

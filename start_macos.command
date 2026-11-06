@@ -46,14 +46,14 @@ CONDA_EXE="$(find_conda)" || {
 "$CONDA_EXE" run \
     -n amadeus \
     --no-capture-output \
-    python "$PROJECT_ROOT/scripts/launcher.py"
+    python "$PROJECT_ROOT/scripts/launcher.py" "$@"
 
 EXIT_CODE=$?
 
 if [[ $EXIT_CODE -ne 0 ]]; then
     echo
     echo "Amadeus launcher exited with an error."
-    echo "Check .runtime/logs for service logs."
+    echo "The details are in the logs folder: $PROJECT_ROOT/logs"
     read "?Press Enter to close..."
 fi
 

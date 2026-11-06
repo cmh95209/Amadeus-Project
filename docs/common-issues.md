@@ -14,7 +14,7 @@ The launcher attempts to clear stale Amadeus listeners from:
 If a port cannot be cleared, inspect:
 
 ```text
-.runtime/logs/
+logs/
 ```
 
 The backend intentionally uses port `5050` rather than `5000` to avoid
@@ -27,10 +27,12 @@ conflicts with macOS services that commonly use port 5000.
 The memory sidecar is optional by design — if it isn't running, everything
 else works and she simply doesn't remember across sessions.
 
-- Check that it started: `.runtime/logs/cm-sidecar.log` (the launcher also
+- Check that it started: `logs/cm-sidecar.log` (the launcher also
   prints a warning if the sidecar never became ready).
-- First launch is slow (a few minutes): the launcher builds the sidecar's
-  venv and downloads its packages. Wait for the next start.
+- The installer sets the sidecar up (its venv and packages, about 1.3 GB;
+  details in `logs/memory-setup.log`). If that step could not finish, the
+  launcher finishes it on the next start (a few minutes; details in
+  `logs/launcher.log`).
 - On a manual install, make sure the `amadeus-cm` conda environment
   (Python 3.13) exists — the launcher builds the sidecar from it.
 - The sidecar needs the same model server as the app to *learn* (it
@@ -62,7 +64,7 @@ http://127.0.0.1:5050
 When running the full launcher, inspect:
 
 ```text
-.runtime/logs/backend.log
+logs/backend.log
 ```
 
 ---

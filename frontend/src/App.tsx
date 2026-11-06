@@ -1,7 +1,39 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Live2DCharacter from "./components/Live2DCharacter";
 import SamplingSettings from "./components/SamplingSettings";
-import { deriveFooter, placeGreeting } from "./greetingFlow";
+import MoodPanel from "./components/MoodPanel";
+import { SystemPanel } from "./components/SystemPanel";
+import { QuitPanel } from "./components/QuitPanel";
+import { useSystemStatus, RESTART_GREET_KEY } from "./useSystemStatus";
+import { ModelPicker } from "./components/ModelPicker";
+import { NameListEditor, nameListProblem } from "./components/NameListEditor";
+import { SourcesBar } from "./components/SourcesBar";
+import { LinkedText } from "./components/LinkedText";
+import { AttachMenu } from "./components/AttachMenu";
+import { AttachmentTray } from "./components/AttachmentTray";
+import { PictureStrip } from "./components/PictureStrip";
+import { PictureViewer } from "./components/PictureViewer";
+import { DocumentViewer } from "./components/DocumentViewer";
+import { VideoViewer } from "./components/VideoViewer";
+import { useAttachments } from "./useAttachments";
+import {
+  PASTE_MAX_CHARS,
+  REACTION_CHOICES,
+  canSend,
+  filesFrom,
+  getReactionSetting,
+  herReplyIds,
+  isDocument,
+  isVideo,
+  namedFile,
+  pastedTextFile,
+  readsLine,
+  setReactionSetting,
+  withKnownPictures,
+} from "./attachments";
+import type { PictureInfo, ReactionChoice, ReactionReply } from "./attachments";
+import { knownLinkKeys } from "./linkText";
+import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
 import {
@@ -9,6 +41,9 @@ import {
   getCurrentModel,
   getPersonality,
   setPersonality,
+  getDefaultNotices,
+  answerDefaultNotice,
+  DefaultNotice,
   getApiKeyStatus,
   setApiKey,
   getMemory,
@@ -17,11 +52,14 @@ import {
   sendMessage,
   getGreeting,
   getConversationGreeting,
+  pokeConversation,
   setModel,
   getWebAccess,
   setWebAccess,
-  getDeepThinking,
-  setDeepThinking,
+  getWebReading,
+  setWebReading,
+  getReasoning,
+  setReasoning,
   sendInteraction,
   editMessage,
   deleteMessage,
@@ -30,10 +68,16 @@ import {
   regenerateGreeting,
   sendPresence,
   activateReplyVersion,
-  regenerateMessageVoice,
+  speakMessage,
   getVoiceRetention,
   setVoiceRetention,
-  getContextBudget,
+  getContextBudgetInfo,
+  getBrainMode,
+  setBrainMode,
+  getBuiltinModel,
+  loadBuiltinModel,
+  unloadBuiltinModel,
+  openModelsFolder,
   setContextBudget,
   getLLMServer,
   setLLMServer,
@@ -43,8 +87,12 @@ import {
   suggestNameReading,
   getUserProfile,
   setUserProfile,
+  getNames,
+  setNames,
   testConnection,
   ConnectionStatus,
+  BrainMode,
+  BuiltinModel,
   Conversation,
   listConversations,
   createConversation,
@@ -54,8 +102,9 @@ import {
   getStats,
   StatInfo,
 } from "./api";
+import type { NameEntry, ReasoningInfo, ReasoningKey, ReasoningLevel } from "./api";
 
-import { interactions } from "./interactions";
+import { interactions, pokeSpots } from "./interactions";
 import type { InteractionName } from "./interactions";
 
 // Server tags can carry an "org/" prefix (e.g. "unsloth/Qwen3.8-27B-GGUF")
@@ -63,6 +112,11 @@ import type { InteractionName } from "./interactions";
 // part after the final "/" so the matching chip still highlights as active.
 function baseModelName(name: string): string {
   return name.trim().split("/").pop() ?? "";
+}
+
+// A model file's name without its folder (Windows or macOS paths).
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? "";
 }
 
 // Settings choices for the "about you" section.
@@ -81,6 +135,26 @@ function addressOptions(name: string): [string, string][] {
     ["custom", "Custom…"],
   ];
 }
+// The message being typed, kept across a reload (see the effect in App).
+const DRAFT_KEY = "amadeus.draft";
+const DRAFT_KEEP_MS = 12 * 60 * 60 * 1000;
+function readDraft(): string {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? "null") as { text?: unknown; at?: number } | null;
+    if (!saved || typeof saved.text !== "string" || !saved.at) return "";
+    return Date.now() - saved.at < DRAFT_KEEP_MS ? saved.text : "";
+  } catch {
+    return "";
+  }
+}
+
+const REASONING_CHOICES: Array<[ReasoningLevel, string]> = [
+  ["off", "Off"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+];
+
 export default function App() {
   const [messages, setMessages] = useState<MemoryMessage[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -95,12 +169,12 @@ export default function App() {
   const [renamingConvId, setRenamingConvId] = useState<number | null>(null);
   const [convDraft, setConvDraft] = useState("");
   const [sessionsBusy, setSessionsBusy] = useState(false);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(readDraft);
   const [model, setModelName] = useState("");
   const [webAccess, setWebAccessState] = useState<boolean | null>(null);
   const [webToggling, setWebToggling] = useState(false);
-  const [deepThinking, setDeepThinkingState] = useState<boolean | null>(null);
-  const [deepThinkingBusy, setDeepThinkingBusy] = useState(false);
+  const [reasoning, setReasoningState] = useState<ReasoningInfo | null>(null);
+  const [reasoningBusy, setReasoningBusy] = useState(false);
   // Display-only, so it lives in this browser (no backend setting file).
   const [showJapanese, setShowJapanese] = useState<boolean>(() => {
     try {
@@ -109,6 +183,18 @@ export default function App() {
       return false;
     }
   });
+  // Off (default): her voice and the bubble wait for the English line, so
+  // text and voice arrive together. On: she starts speaking as soon as her
+  // Japanese line is written; her Japanese line is then always shown, so the
+  // bubble is never blank while the English is being written.
+  const [voiceEarly, setVoiceEarly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("amadeusVoiceEarly") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const japaneseShown = showJapanese || voiceEarly;
   const [editSaving, setEditSaving] = useState(false);
   const [voiceRetention, setVoiceRetentionState] = useState<number>(100);
   const [contextBudget, setContextBudgetState] = useState<number>(40000);
@@ -117,6 +203,8 @@ export default function App() {
   const [userNameReading, setUserNameReading] = useState("");
   const [readingSuggesting, setReadingSuggesting] = useState(false);
   const [readingNote, setReadingNote] = useState("");
+  // Settings -> Preferences -> Names she knows (saved with the Save button).
+  const [nameRows, setNameRows] = useState<NameEntry[]>([]);
   // Pronouns: "" (not set), a preset, or "custom" + pronounsCustom.
   const [pronounsChoice, setPronounsChoice] = useState("");
   const [pronounsCustom, setPronounsCustom] = useState("");
@@ -124,8 +212,22 @@ export default function App() {
   const [addressChoice, setAddressChoice] = useState("auto");
   const [addressCustom, setAddressCustom] = useState("");
   const [connStatus, setConnStatus] = useState<ConnectionStatus | null>(null);
+  // How she thinks (built-in model vs the user's own); null = unknown.
+  const [brain, setBrain] = useState<BrainMode | null>(null);
+  // Settings -> Connection -> Built-in: her model's server and the file picker.
+  const [builtinModel, setBuiltinModel] = useState<BuiltinModel | null>(null);
+  const [modelChoice, setModelChoice] = useState<string>("");
+  const [modelBusy, setModelBusy] = useState(false);
+  const [brainSwitching, setBrainSwitching] = useState(false);
+  const builtinMode = brain?.mode === "builtin";
+  // The built-in model's cap on the history budget (null = no cap).
+  const [builtinBudgetCap, setBuiltinBudgetCap] = useState<number | null>(null);
+  const [defaultBudget, setDefaultBudget] = useState<number>(40000);
   const [connTesting, setConnTesting] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Web ON: what her reply is doing right now ("Searching the web: ...",
+  // "Reading game8.co...") - shown under the typing dots; "" = nothing to say.
+  const [webStatus, setWebStatus] = useState("");
   const [status, setStatus] = useState("Connecting to Amadeus...");
   // The footer's health inputs (deriveFooter): is the backend answering at
   // all, and where the startup greeting stands. A refresh that already
@@ -143,12 +245,21 @@ export default function App() {
   // launch), the connection probe re-runs it once the backend answers.
   const initState = useRef<"pending" | "ok" | "failed">("pending");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Phone layouts only: the conversations list is a pull-out menu (☰).
+  const [railOpen, setRailOpen] = useState(false);
+  // Settings -> Quit: the choice under the heading (closed with Settings).
+  const [quitOpen, setQuitOpen] = useState(false);
+  useEffect(() => {
+    if (!settingsOpen) setQuitOpen(false);
+  }, [settingsOpen]);
+  // Settings -> Preferences -> "Read pages thoroughly" (saved at once).
+  const [webReading, setWebReadingState] = useState<{ mode: "thorough" | "quick"; reason: string } | null>(null);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [apiKey, setApiKeyInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
-  const [settingsSection, setSettingsSection] = useState<"connection" | "personality" | "sampling">("connection");
+  const [settingsSection, setSettingsSection] = useState<"connection" | "preferences" | "personality" | "sampling" | "system">("connection");
   const [statsInfo, setStatsInfo] = useState<StatInfo[]>([]);
   const [personality, setPersonalityText] = useState("");
   const [savedPersonality, setSavedPersonality] = useState("");
@@ -158,6 +269,9 @@ export default function App() {
   const [personalityError, setPersonalityError] = useState("");
   const [personalityNotice, setPersonalityNotice] = useState("");
   const [personalityReload, setPersonalityReload] = useState(0);
+  const [defaultNotices, setDefaultNotices] = useState<DefaultNotice[]>([]);
+  const [defaultNoticeBusy, setDefaultNoticeBusy] = useState(false);
+  const [defaultNoticeDone, setDefaultNoticeDone] = useState("");
   const personalityDirty = personalityLoaded && personality !== savedPersonality;
   const settingsBusy = savingSettings || personalitySaving;
   const modalRef = useRef<HTMLDivElement>(null);
@@ -166,6 +280,9 @@ export default function App() {
   messages.forEach((m, i) => {
     if (m.role !== "user") lastAssistantIndex = i;
   });
+  // Settings -> System: live status + Restart (polls only while that section
+  // is open or a restart is under way).
+  const sys = useSystemStatus(settingsOpen && settingsSection === "system");
   const footer = deriveFooter({
     status,
     backendDown,
@@ -173,9 +290,22 @@ export default function App() {
     conn: connStatus,
     notListedForMs: notListedSince.current === null ? null : Date.now() - notListedSince.current,
     greetPhase,
+    restarting: sys.restarting,
   });
   const connStatusText = !connStatus
     ? "Not tested yet."
+    : connStatus.builtin
+      ? connStatus.builtin_model_missing
+        ? "Her built-in model is not installed yet - run the installer again (it continues where it stopped)."
+        : connStatus.builtin_state === "unloaded"
+          ? "Her built-in model is not loaded - load it below."
+        : connStatus.builtin_state === "failed"
+          ? "Her built-in model could not load - see below."
+        : !connStatus.reachable
+          ? "Her built-in model is not running. Restart Amadeus to start it."
+          : connStatus.loading || !connStatus.model_found
+            ? "Her built-in model is loading..."
+            : "Her built-in model is running."
     : !connStatus.reachable
       ? `Can't reach ${connStatus.address}. ${connStatus.error ? connStatus.error : "Is the server running?"}`
       : connStatus.model_configured
@@ -194,6 +324,7 @@ export default function App() {
   }
 
   const bottomRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const characterRef = useRef<Live2DCharacterHandle>(null);
   // Startup greeting: once per app start (sessionStorage blocks a refresh
   // from re-greeting) plus a re-fire the moment the model server becomes
@@ -204,6 +335,12 @@ export default function App() {
   );
   const modelWasFound = useRef<boolean | null>(null);
   const greetingInFlight = useRef<boolean>(false);
+  // Save stores its settings one by one: a probe must not ask /greet in
+  // between (it would see e.g. the model but not yet the name and answer
+  // with a "still missing" line). A Save that lands while a greet is in
+  // flight is remembered and re-asked once that call returns.
+  const saveInProgress = useRef<boolean>(false);
+  const pendingSavedGreet = useRef<boolean>(false);
   const switchGreetingInFlight = useRef<boolean>(false);
   // Bumped on every message the user sends. A greeting compares it before
   // and after its request: a change means the user spoke while she was
@@ -221,15 +358,164 @@ export default function App() {
   const ceremonyPendingRef = useRef<boolean>(false);
   ceremonyPendingRef.current = ceremonyPending;
 
+  // Pictures you show her (attachments Phase 2): the tray, her desk, her
+  // reaction when you attach something, the full-size viewer.
+  const loadingRef = useRef(false);
+  loadingRef.current = loading;
+  const [viewerPicture, setViewerPicture] = useState<PictureInfo | null>(null);
+  const [dropGlow, setDropGlow] = useState(false);
+  const [attachNote, setAttachNote] = useState("");
+  const [reactionChoice, setReactionChoice] = useState<ReactionChoice>("always");
+  const pictures = useAttachments({
+    conversationId: () => displayedConvIdRef.current,
+    mayReact: () => !loadingRef.current && !ceremonyPendingRef.current && hasApiKey === true,
+    onReaction: (reply) => showAttachReaction(reply),
+  });
+
+  function showAttachReaction(reply: ReactionReply) {
+    if (reply.conversationId != null && displayedConvIdRef.current !== null &&
+        reply.conversationId !== displayedConvIdRef.current) return;
+    setMessages((current) => [...current, {
+      role: "assistant",
+      content: reply.response,
+      japanese: reply.japanese,
+      id: reply.assistantId,
+      is_greeting: true,
+      greeting_regenerable: false,
+    }]);
+    if (reply.speechUrl) {
+      const url = reply.speechUrl;
+      void characterRef.current?.prepareSpeech()
+        .then(() => characterRef.current?.playSpeech(url))
+        .catch(() => undefined);
+      rememberVoiceLine(reply.assistantId);
+    }
+  }
+
+  function addPictureFiles(files: File[]) {
+    if (!files.length) return;
+    setAttachNote("");
+    pictures.addFiles(files.map((f) => namedFile(f)));
+  }
+
+  // Drag and drop anywhere in the window (D2): only the message box glows.
+  useEffect(() => {
+    let depth = 0;
+    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const enter = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth += 1;
+      setDropGlow(true);
+    };
+    const over = (event: DragEvent) => {
+      if (hasFiles(event)) event.preventDefault();
+    };
+    const leave = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDropGlow(false);
+    };
+    const drop = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth = 0;
+      setDropGlow(false);
+      if (ceremonyPendingRef.current) return;
+      addPictureFiles(filesFrom(event.dataTransfer?.files));
+    };
+    window.addEventListener("dragenter", enter);
+    window.addEventListener("dragover", over);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragenter", enter);
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("drop", drop);
+    };
+  }, []);
+
+  // Her desk and "how many fit" follow the chat on screen.
+  useEffect(() => {
+    if (displayedConvId == null) return;
+    void pictures.refreshDesk(displayedConvId);
+    void pictures.refreshCaps(displayedConvId);
+  }, [displayedConvId]);
+
+  useEffect(() => {
+    void getReactionSetting().then(setReactionChoice).catch(() => undefined);
+  }, []);
+
+  async function changeReactionChoice(value: ReactionChoice) {
+    const previous = reactionChoice;
+    setReactionChoice(value);
+    try {
+      setReactionChoice(await setReactionSetting(value));
+    } catch (error) {
+      setReactionChoice(previous);
+      setSettingsError(error instanceof Error ? error.message : "Could not save that setting");
+    }
+  }
+
   useEffect(() => {
     void initialize();
   }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({
-      behavior: "smooth",
-    });
+    // Scroll only the message list: scrollIntoView would also push the whole
+    // page up on phones.
+    // Far away (a chat just opened): jump; close by (a new line): glide.
+    const list = bottomRef.current?.parentElement;
+    if (!list) return;
+    const distance = list.scrollHeight - list.clientHeight - list.scrollTop;
+    list.scrollTo({ top: list.scrollHeight, behavior: distance > list.clientHeight * 2 ? "auto" : "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    // Safety net: if anything still scrolls the page itself (a phone browser
+    // revealing a focused box, say), put it straight back so the app stays
+    // anchored to the screen.
+    function pin() {
+      if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+    }
+    window.addEventListener("scroll", pin, { passive: true });
+    return () => window.removeEventListener("scroll", pin);
+  }, []);
+
+  useEffect(() => {
+    // Keep what is typed: Android may close the app in the background (a
+    // call, the gallery) and it reloads when you come back.
+    try {
+      if (input) localStorage.setItem(DRAFT_KEY, JSON.stringify({ text: input, at: Date.now() }));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch {
+      // Not kept across a reload - harmless.
+    }
+  }, [input]);
+
+  useLayoutEffect(() => {
+    // The message box grows with what is typed (the CSS max-height caps it,
+    // then it scrolls) and shrinks back once the message is sent. A new
+    // screen width re-wraps the lines, so measure again on resize too.
+    // The scrollbar only appears once it is capped, so short text uses the
+    // box's full width. A growing box shrinks the chat above it, so if her
+    // newest line was in view, keep it there.
+    const box = composerRef.current;
+    if (!box) return;
+    function fit() {
+      const list = bottomRef.current?.parentElement;
+      const atBottom = !!list && list.scrollHeight - list.clientHeight - list.scrollTop < 40;
+      box!.style.height = "auto";
+      box!.style.overflowY = "hidden";
+      box!.style.height = `${box!.scrollHeight}px`;
+      if (box!.scrollHeight > box!.clientHeight + 1) box!.style.overflowY = "auto";
+      if (list && atBottom) list.scrollTop = list.scrollHeight;
+    }
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [input]);
 
   useEffect(() => {
     try {
@@ -239,13 +525,21 @@ export default function App() {
     }
   }, [showJapanese]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem("amadeusVoiceEarly", voiceEarly ? "1" : "0");
+    } catch {
+      // Storage blocked: the switch still works for this visit.
+    }
+  }, [voiceEarly]);
+
   // Chat replies arrive with her Japanese line, but greetings and touch
   // reactions are added locally without it. While the Japanese line is
   // shown, pick those up once from the server's copy (each id only once,
   // so a line that really has no Japanese never causes a reload loop).
   const japaneseFetched = useRef<Set<number>>(new Set());
   useEffect(() => {
-    if (!showJapanese || loading || editingId !== null) return;
+    if (!japaneseShown || loading || editingId !== null) return;
     const missing = messages.filter(
       (m) => m.role !== "user" && m.id != null && m.japanese === undefined &&
         !japaneseFetched.current.has(m.id)
@@ -266,7 +560,7 @@ export default function App() {
         );
       })
       .catch(() => undefined);
-  }, [showJapanese, loading, editingId, messages]);
+  }, [japaneseShown, loading, editingId, messages]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -288,12 +582,87 @@ export default function App() {
     return () => { cancelled = true; };
   }, [settingsOpen, personalityReload]);
 
+  // "A newer default is available" notes (personality / voice rules the user
+  // edited). Optional: a failed check just shows no note.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let cancelled = false;
+    void getDefaultNotices().then((list) => {
+      if (!cancelled) setDefaultNotices(list);
+    }).catch(() => {
+      if (!cancelled) setDefaultNotices([]);
+    });
+    return () => { cancelled = true; };
+  }, [settingsOpen, personalityReload]);
+
+  async function answerNotice(notice: DefaultNotice, choice: "use_new" | "keep_mine") {
+    if (defaultNoticeBusy) return;
+    if (choice === "use_new" && notice.name === "personality" && personalityDirty
+        && !window.confirm("Discard your unsaved personality changes and use the new default?")) return;
+    setDefaultNoticeBusy(true);
+    setDefaultNoticeDone("");
+    try {
+      const backup = await answerDefaultNotice(notice.name, choice);
+      setDefaultNotices((list) => list.filter((n) => n.name !== notice.name));
+      if (choice === "use_new") {
+        setDefaultNoticeDone(`Done - she now uses the new default ${notice.label}. Your old version was saved as ${backup} in backend\\data.`);
+        if (notice.name === "personality") setPersonalityReload((n) => n + 1);
+      }
+    } catch (error) {
+      setDefaultNoticeDone(error instanceof Error ? error.message : "Could not update the file. Please try again.");
+    } finally {
+      setDefaultNoticeBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let cancelled = false;
+    getWebReading()
+      .then((w) => { if (!cancelled) setWebReadingState({ mode: w.mode, reason: w.reason }); })
+      .catch(() => { if (!cancelled) setWebReadingState(null); });
+    return () => { cancelled = true; };
+  }, [settingsOpen]);
+
+  async function toggleWebReading() {
+    if (!webReading) return;
+    const mode = webReading.mode === "thorough" ? "quick" : "thorough";
+    try {
+      await setWebReading(mode);
+      const w = await getWebReading();
+      setWebReadingState({ mode: w.mode, reason: w.reason });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save the web reading setting");
+    }
+  }
+
   useEffect(() => {
     if (!settingsOpen) return;
     const previousFocus = document.activeElement as HTMLElement | null;
     modalRef.current?.focus();
     return () => { previousFocus?.focus(); };
   }, [settingsOpen]);
+
+  // Her built-in model's panel: fresh state whenever Settings opens, and a
+  // light poll while it loads (Loading... -> Loaded / Could not load).
+  // Custom mode: the server's model list is there when Settings opens (no
+  // "Test connection" needed), plus whether her built-in model is stopped.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    if (builtinMode || brain?.available) void refreshBuiltinModel();
+    if (!builtinMode) void testConnection().then(setConnStatus).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen, builtinMode]);
+
+  useEffect(() => {
+    if (!settingsOpen || builtinModel?.state !== "loading") return;
+    const timer = window.setInterval(() => {
+      void refreshBuiltinModel();
+      void refreshConnection();
+    }, 2000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen, builtinModel?.state]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -361,7 +730,11 @@ export default function App() {
   }
 
   async function fireGreeting(justSaved = false, isRetry = false) {
-    if (greetingInFlight.current || greetedThisSession.current) return;
+    if (greetedThisSession.current) return;
+    if (greetingInFlight.current) {
+      if (justSaved) pendingSavedGreet.current = true; // re-asked when it returns
+      return;
+    }
     if (loading) {
       // Do not interrupt an in-flight turn. A retry that cannot run must
       // still settle the footer (her reply will prove the line works).
@@ -379,7 +752,28 @@ export default function App() {
     }
     let failed = false;
     try {
-      const g = await getGreeting(justSaved);
+      // Back after a restart from Settings: she says so, once.
+      let restarted = false;
+      try {
+        restarted = sessionStorage.getItem(RESTART_GREET_KEY) === "1";
+      } catch {
+        restarted = false;
+      }
+      const g = await getGreeting(justSaved, restarted);
+      if (restarted && (g.ready || g.superseded)) {
+        try {
+          sessionStorage.removeItem(RESTART_GREET_KEY);
+        } catch {
+          // nothing to clear
+        }
+      }
+      // A first-launch line never cuts off the one she is still saying
+      // (e.g. the built-in model got ready mid-intro): wait until she has
+      // finished before it is shown, voiced, or unlocks the chat box. The
+      // backend has already stored it.
+      if (g.kind !== undefined && g.response) {
+        await waitUntilQuiet(() => characterRef.current?.isSpeechBusy() ?? false);
+      }
       if (g.ceremony) setCeremonyState(g.ceremony); // gate + note follow this
       if (g.superseded) {
         // The user spoke while she was writing: the backend dropped the
@@ -390,7 +784,7 @@ export default function App() {
         return;
       }
       const line = g.response;
-      if (!line || (!g.ready && !(g.kind === "intro" || g.kind === "trying" || g.kind === "reminder"))) {
+      if (!line || (!g.ready && !isCeremonyWaitLine(g.kind, g.wait))) {
         // Nothing to say this probe (model not servable yet, or the
         // ceremony is waiting): back to idle, and let the next probe that
         // finds the model re-fire it.
@@ -406,15 +800,15 @@ export default function App() {
       // ready=false (the model is down by definition on a fresh install) and
       // still must be shown: they are what teach a first-time user to
       // connect their model.
-      const ceremonialWait =
-        g.kind === "intro" || g.kind === "trying" || g.kind === "reminder";
+      const ceremonialWait = isCeremonyWaitLine(g.kind, g.wait);
       if (!ceremonialWait) {
         greetedThisSession.current = true;
         sessionStorage.setItem("amadeusGreeted", "1");
       }
       settleGreetPhase(ceremonialWait ? "idle" : "done");
-      // Scripted first-launch lines (intro / trying / reminder / fallback)
-      // can never be regenerated; ordinary greetings and the wake-up can.
+      // Scripted first-launch lines (intro / trying / reminder / fallback,
+      // and their built-in variants) can never be regenerated; ordinary
+      // greetings and the wake-up can.
       const regenerable = g.kind === undefined || g.kind === "wake";
       setMessages((current) => placeGreeting(current, {
         role: "assistant", content: line, id: g.assistantId, is_greeting: true,
@@ -435,6 +829,13 @@ export default function App() {
       failed = true;
     } finally {
       greetingInFlight.current = false;
+    }
+    if (pendingSavedGreet.current) {
+      // Settings were saved while this call was out: the backend answered
+      // the OLD settings - ask again with the saved ones.
+      pendingSavedGreet.current = false;
+      void fireGreeting(true);
+      return;
     }
     if (failed) {
       if (isRetry) {
@@ -502,7 +903,7 @@ export default function App() {
       // the backend answers with a new line when it has one, or with
       // silence).
       const ceremonialWait = ceremonyPendingRef.current && !greetedThisSession.current;
-      if (!greetedThisSession.current &&
+      if (!greetedThisSession.current && !saveInProgress.current &&
           ((found && modelWasFound.current !== true) || ceremonialWait)) {
         void fireGreeting();
       }
@@ -572,13 +973,51 @@ export default function App() {
     return () => window.clearTimeout(id);
   }, [status]);
 
+  // Custom model, "Refresh list": apply the address (and a newly typed key)
+  // first, so the list is the one the server gives with those settings.
+  async function refreshServerModels() {
+    if (connTesting) return;
+    setConnTesting(true);
+    setSettingsError("");
+    try {
+      await setLLMServer(serverAddress);
+      if (apiKey.trim()) {
+        await setApiKey(apiKey.trim());
+        setHasApiKey(true);
+        setApiKeyInput("");
+      }
+      setConnStatus(await testConnection());
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not reach the server.");
+    } finally {
+      setConnTesting(false);
+    }
+  }
+
+  // Custom model, "Use this model": save the picked model at once.
+  async function applyCustomModel() {
+    const next = model.trim();
+    if (!next) return;
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      await setModel(next);
+      setStatus(`Model set to ${next}`);
+      setSettingsNotice(`She now uses ${next}.`);
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not save the model.");
+    }
+  }
+
   async function handleTestConnection() {
     if (connTesting) return;
     setConnTesting(true);
     try {
       // Apply the address being edited first, so the test matches what
-      // "Save connection" would store.
-      await setLLMServer(serverAddress);
+      // "Save connection" would store (not in built-in mode: the address
+      // field is hidden there and the test checks her built-in model).
+      if (!builtinMode) await setLLMServer(serverAddress);
       setConnStatus(await testConnection());
     } catch {
       setConnStatus(null);
@@ -589,31 +1028,37 @@ export default function App() {
 
   async function initialize() {
     try {
-      const [memory, currentModel, configured, webOn, deepThinkingOn, convs, voiceCap, budgetCap, serverAddr, savedName, profile] =
+      const [memory, currentModel, configured, webOn, reasoningInfo, convs, voiceCap, budgetInfo, serverAddr, savedName, profile, brainInfo, names] =
         await Promise.all([
           getMemory(),
           getCurrentModel(),
           getApiKeyStatus(),
           getWebAccess().catch(() => true),
-          getDeepThinking().catch(() => false),
+          getReasoning().catch(() => null),
           listConversations().catch(() => null),
           getVoiceRetention().catch(() => 100),
-          getContextBudget().catch(() => 40000),
+          getContextBudgetInfo().catch(() => ({ budget: 40000, builtinCap: null, defaultBudget: 40000 })),
           getLLMServer().catch(() => ""),
           getUsername().catch(() => ({ name: "", reading: "" })),
           getUserProfile().catch(() => ({ pronouns: "", address: "auto" })),
+          getBrainMode().catch(() => null),
+          getNames().catch(() => [] as NameEntry[]),
         ]);
 
       setMessages(memory);
-      setModelName(currentModel);
+      setModelName(currentModel === "No Model Selected." ? "" : currentModel);
       setHasApiKey(configured);
       setWebAccessState(webOn);
-      setDeepThinkingState(deepThinkingOn);
+      setReasoningState(reasoningInfo);
       setVoiceRetentionState(voiceCap);
-      setContextBudgetState(budgetCap);
+      setContextBudgetState(budgetInfo.budget);
+      setBuiltinBudgetCap(budgetInfo.builtinCap);
+      setDefaultBudget(budgetInfo.defaultBudget);
+      setBrain(brainInfo);
       setServerAddressState(serverAddr);
       setUserName(savedName.name);
       setUserNameReading(savedName.reading);
+      setNameRows(names);
       if (!profile.pronouns || PRONOUN_PRESETS.includes(profile.pronouns)) {
         setPronounsChoice(profile.pronouns);
       } else {
@@ -653,7 +1098,8 @@ export default function App() {
 
     const text = input.trim();
 
-    if (!text || loading) {
+    // Words OR a ready picture (never while a picture is still being prepared).
+    if (!canSend(text, pictures.cards) || loading) {
       return;
     }
 
@@ -676,21 +1122,67 @@ export default function App() {
     );
 
     userSpokeSeq.current += 1;
+    // The ready pictures go with this message (her reaction, if not said
+    // yet, is dropped).
+    const sent = pictures.takeForSend();
     setMessages((current) => [
       ...current,
       {
         role: "user",
         content: text,
+        ...(sent.pictures.length ? { attachments: sent.pictures } : {}),
       },
     ]);
 
     setInput("");
     setLoading(true);
-    setStatus("Amadeus is thinking...");
+    setStatus(sent.ids.length ? "Amadeus is looking..." : "Amadeus is thinking...");
+    if (sent.ids.length) characterRef.current?.setLooking(true);
 
     try {
-      const turn = await sendMessage(text);
-      const reply = turn.reply;
+      // Her hold-on line (web ON) is spoken at once; her answer's voice waits
+      // until it is finished, never cutting it off.
+      let asideSpoken = false;
+      setWebStatus("");
+      const turn = await sendMessage(text, {
+        onStatus: (line) => setWebStatus(line),
+        onAside: (aside) => {
+          setMessages((current) => {
+            const next = [...current];
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i].role === "user" && next[i].id == null) {
+                next[i] = { ...next[i], id: aside.userId };
+                break;
+              }
+            }
+            next.push({
+              role: "assistant",
+              content: aside.response,
+              japanese: aside.japanese,
+              id: aside.assistantId,
+              is_aside: true,
+            });
+            return next;
+          });
+          if (aside.speechUrl) {
+            asideSpoken = true;
+            void speechReady?.then((ok) => {
+              if (ok && aside.speechUrl) {
+                void characterRef.current?.playSpeech(aside.speechUrl).catch(() => undefined);
+                rememberVoiceLine(aside.assistantId);
+              }
+            });
+          }
+        },
+      }, sent.ids);
+      characterRef.current?.setLooking(false);
+      let reply = turn.reply;
+      if (!voiceEarly && !reply.response) {
+        // Default: wait for the English line, so the bubble and her voice
+        // arrive together (the typing dots stay up meanwhile).
+        const english = await turn.text.catch(() => "");
+        reply = { ...reply, response: english || reply.japanese || "" };
+      }
 
       // The reply tells us which conversation the turn was stored in. If the
       // pane is showing a different one, the pane went stale - reload it.
@@ -720,15 +1212,39 @@ export default function App() {
           content: reply.response,
           japanese: reply.japanese,
           id: reply.assistantId,
+          translating: !reply.response,
+          ...(reply.sources && reply.sources.length > 0 ? { sources: reply.sources } : {}),
+          ...(reply.docReads ? { doc_reads: reply.docReads } : {}),
         });
         return next;
       });
 
       setStatus("Online");
+      setWebStatus("");
+      if (sent.ids.length) {
+        // Her desk now holds them; their numbers in the chat come back with it.
+        void pictures.refreshDesk(reply.conversationId ?? displayedConvIdRef.current)
+          .then((desk) => setMessages((current) => current.map((m) =>
+            m.role === "user" && m.id === reply.userId
+              ? { ...m, attachments: withKnownPictures(m.attachments, desk) } : m)));
+        void pictures.refreshCaps(reply.conversationId ?? displayedConvIdRef.current);
+        // A picture-only first message names the chat from its caption, which
+        // is written a moment after her reply: pick the new title up then.
+        if (!text) {
+          window.setTimeout(() => void refreshConversations(), 4000);
+          window.setTimeout(() => void refreshConversations(), 10000);
+        }
+      }
       // A real reply proves the line works: an unsettled or failed startup
       // greeting no longer needs to be reported.
       settleGreetPhase("done");
       if (reply.speechUrl && await speechReady) {
+        if (asideSpoken) {
+          // Let her finish the hold-on line first (it may still be loading).
+          await new Promise((r) => setTimeout(r, 300));
+          await waitUntilQuiet(() => characterRef.current?.isSpeechBusy() ?? false,
+            { quietMs: 250, pollMs: 100, maxMs: 30_000 });
+        }
         void characterRef.current?.playSpeech(reply.speechUrl).catch((error) => {
           setStatus(error instanceof Error ? error.message : "Speech playback failed");
         });
@@ -749,7 +1265,7 @@ export default function App() {
               const next = [...current];
               for (let i = next.length - 1; i >= 0; i--) {
                 if (next[i].role === "assistant" && next[i].id === reply.assistantId) {
-                  next[i] = { ...next[i], content: english };
+                  next[i] = { ...next[i], content: english, translating: false };
                   break;
                 }
               }
@@ -765,8 +1281,13 @@ export default function App() {
           // promise just never settles usefully.
         });
     } catch (error) {
+      characterRef.current?.setLooking(false);
+      // The backend put the pictures back in the tray: so does the screen,
+      // ready to send again.
+      if (sent.taken.length) pictures.restore(sent.taken);
       setMessages((current) => [
-        ...current,
+        ...current.map((m) => (m.role === "user" && m.id == null && m.attachments
+          ? { ...m, attachments: undefined } : m)),
         {
           role: "assistant",
           content:
@@ -782,6 +1303,7 @@ export default function App() {
       void refreshConnection();
     } finally {
       setLoading(false);
+      setWebStatus("");
       void refreshConversations();
     }
   }
@@ -811,27 +1333,37 @@ export default function App() {
     const nextModel = model.trim();
 
     if (settingsBusy || loading) return;
-    if (!nextModel) {
-      setSettingsError("Enter an LLM model.");
+    // Built-in mode: her model, server and key come from the installer, so
+    // Save stores only the rest (name, pronouns, ...) and never touches the
+    // user's own model settings (kept for when they switch back).
+    // No model chosen yet: everything else is still saved (2026-10-24 -
+    // the name may come before the connection; she then asks for the
+    // connection, and the notice below points at the Model row).
+    const noModelYet = !nextModel && !builtinMode;
+    const namesProblem = nameListProblem(nameRows);
+    if (namesProblem) {
+      setSettingsError(namesProblem);
+      setSettingsSection("preferences");
       return;
     }
 
     setSavingSettings(true);
+    saveInProgress.current = true;
     setSettingsError("");
     setSettingsNotice("");
     let keySaved = false;
     try {
-      if (apiKey.trim()) {
+      if (!builtinMode && apiKey.trim()) {
         await setApiKey(apiKey.trim());
         keySaved = true;
         setHasApiKey(true);
         setApiKeyInput("");
       }
-      await setModel(nextModel);
+      if (!builtinMode && !noModelYet) await setModel(nextModel);
       const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
-      await setContextBudget(contextBudget);
-      await setLLMServer(serverAddress);
+      setContextBudgetState(await setContextBudget(contextBudget));
+      if (!builtinMode) await setLLMServer(serverAddress);
       // Saved last and never fatal: a backend older than this WebUI has no
       // /setUserProfile yet, and that must not undo the settings above.
       let profileSaved = true;
@@ -846,6 +1378,13 @@ export default function App() {
       } catch {
         profileSaved = false;
       }
+      try {
+        setNameRows(await setNames(nameRows));
+      } catch {
+        profileSaved = false;
+      }
+      // Everything is stored: from here on a probe may ask /greet again.
+      saveInProgress.current = false;
       void refreshConnection();
       // A name with no reading yet: let the backend suggest how she says it
       // (one short model call). Never overwrites what the user typed meanwhile.
@@ -864,11 +1403,12 @@ export default function App() {
       // the probe's job).
       void fireGreeting(true);
 
-      setStatus(`Model set to ${nextModel}`);
+      setStatus(builtinMode || noModelYet ? "Settings saved" : `Model set to ${nextModel}`);
       setSettingsNotice(
-        profileSaved
-          ? "Connection settings saved."
-          : "Connection settings saved, but pronouns / what she calls you were not (restart the backend, then save again)."
+        (profileSaved
+          ? "Settings saved."
+          : "Settings saved, but pronouns / what she calls you / names she knows were not (restart the backend, then save again).") +
+        (noModelYet ? " No model chosen yet - pick one in the Model row under Connection." : "")
       );
       // Keep Settings open so drafts in the Personality section are preserved.
     } catch (error) {
@@ -877,7 +1417,92 @@ export default function App() {
         (error instanceof Error ? error.message : "Could not save settings")
       );
     } finally {
+      saveInProgress.current = false;
       setSavingSettings(false);
+    }
+  }
+
+  // Settings -> Connection: "Built-in" / "Custom Model". Saved at once; the
+  // launcher starts (or stops) her built-in model only when Amadeus starts,
+  // so the note asks for a restart.
+  async function chooseBrain(mode: "builtin" | "custom") {
+    if (brainSwitching || !brain || brain.mode === mode) return;
+    if (mode === "builtin" && !brain.available) return;
+    setBrainSwitching(true);
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      const next = await setBrainMode(mode);
+      setBrain(next);
+      // Each mode keeps its own conversation number: show the new mode's.
+      const budget = await getContextBudgetInfo().catch(() => null);
+      if (budget) {
+        setBuiltinBudgetCap(budget.builtinCap);
+        setDefaultBudget(budget.defaultBudget);
+        setContextBudgetState(budget.budget);
+      }
+      setSettingsNotice(
+        mode !== "builtin"
+          ? "Switched to your own model. Her built-in model was unloaded (its graphics memory is free)."
+          : next.model_missing
+            ? "Switched to her built-in model. Add a model file (see Model below) and press Load."
+            : "Switched to her built-in model - it is loading now."
+      );
+      void refreshConnection();
+      void refreshBuiltinModel();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not switch.");
+    } finally {
+      setBrainSwitching(false);
+    }
+  }
+
+  // Her built-in model's server: state + the GGUF files in her models folder
+  // ("Refresh list" asks again). The dropdown keeps the user's pick.
+  async function refreshBuiltinModel() {
+    try {
+      const info = await getBuiltinModel();
+      setBuiltinModel(info);
+      setModelChoice((current) => {
+        const names = info.files.map((f) => f.name);
+        if (current && names.includes(current)) return current;
+        const loaded = info.state !== "unloaded" ? baseName(info.file) : "";
+        return names.includes(loaded) ? loaded : baseName(info.selected) || names[0] || "";
+      });
+    } catch {
+      setBuiltinModel(null);
+    }
+  }
+
+  async function loadChosenModel() {
+    if (!modelChoice || modelBusy) return;
+    setModelBusy(true);
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      await loadBuiltinModel(modelChoice);
+      await refreshBuiltinModel();
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not load her model.");
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function unloadModel() {
+    if (modelBusy) return;
+    setModelBusy(true);
+    setSettingsError("");
+    try {
+      await unloadBuiltinModel();
+      await refreshBuiltinModel();
+      setSettingsNotice("Her model was unloaded - its graphics memory is free. She can't answer until you load it again.");
+      void refreshConnection();
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not unload her model.");
+    } finally {
+      setModelBusy(false);
     }
   }
 
@@ -903,25 +1528,19 @@ export default function App() {
     }
   }
 
-  async function toggleDeepThinking() {
-    if (deepThinkingBusy || deepThinking === null) return;
-
-    const next = !deepThinking;
-    setDeepThinkingState(next);
-    setDeepThinkingBusy(true);
-
+  async function changeReasoning(key: ReasoningKey, level: ReasoningLevel) {
+    if (reasoningBusy || !reasoning) return;
+    const before = reasoning;
+    setReasoningState({ ...reasoning, [key]: level });
+    setReasoningBusy(true);
     try {
-      await setDeepThinking(next);
-      setStatus(next ? "Deep thinking on" : "Deep thinking off");
+      setReasoningState(await setReasoning({ [key]: level }));
+      setStatus(`Reasoning (${key === "translations" ? "translations" : "her replies"}): ${level}`);
     } catch (error) {
-      setDeepThinkingState(!next);
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "Could not toggle deep thinking"
-      );
+      setReasoningState(before);
+      setStatus(error instanceof Error ? error.message : "Could not change reasoning");
     } finally {
-      setDeepThinkingBusy(false);
+      setReasoningBusy(false);
     }
   }
 
@@ -938,6 +1557,7 @@ export default function App() {
       await resetMemory(activeConvId ?? undefined);
 
       setMessages([]);
+      void pictures.refreshDesk();      // its pictures went with it
       setStatus("This conversation was cleared");
     } catch (error) {
       setStatus(
@@ -1001,26 +1621,37 @@ export default function App() {
 
   // The saved WAV only exists once GPT-SoVITS finished streaming the line.
   // Poll briefly after playback starts so the Replay button can appear.
+  // A voiced line of hers gets its Replay button at once (2026-10-24, VM
+  // test: the button waited for the saved clip, and the page stopped
+  // looking after 40 s - a processor needs up to minutes per line, and an
+  // interrupted line is never saved at all). Replay plays the clip when it
+  // exists, else streams the line again (replayVoice). The clip is saved
+  // only when her voice reaches the end, so look for it once she is quiet.
   function rememberVoiceLine(assistantId: number | undefined) {
     if (assistantId == null) return;
+    setMessages((current) =>
+      current.map((m) => (m.id === assistantId ? { ...m, has_japanese: true } : m))
+    );
     const rel = `/message_audio/generated/voice_${assistantId}.wav`;
-    let tries = 0;
-    const check = async () => {
-      tries += 1;
-      try {
-        const probe = await fetch(API_BASE + rel, { method: "HEAD", cache: "no-store" });
-        if (probe.ok) {
-          setMessages((current) =>
-            current.map((m) => (m.id === assistantId ? { ...m, audio_url: rel } : m))
-          );
-          return;
+    void (async () => {
+      await waitUntilQuiet(() => characterRef.current?.isSpeechBusy() ?? false,
+        { quietMs: 1500, pollMs: 500, maxMs: 15 * 60_000 });
+      for (let tries = 0; tries < 5; tries++) {
+        try {
+          const probe = await fetch(API_BASE + rel, { method: "HEAD", cache: "no-store" });
+          if (probe.ok) {
+            setMessages((current) =>
+              current.map((m) => (m.id === assistantId ? { ...m, audio_url: rel } : m))
+            );
+            return;
+          }
+        } catch {
+          // The backend may still be writing it.
         }
-      } catch {
-        // Not ready yet; the line may still be generating.
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
       }
-      if (tries < 20) window.setTimeout(() => void check(), 2000);
-    };
-    void check();
+      // Not saved (her voice was cut off): Replay streams the line again.
+    })();
   }
 
   async function refreshConversations() {
@@ -1164,16 +1795,28 @@ export default function App() {
           setStatus(error instanceof Error ? error.message : "Replay failed");
         });
       } else {
-        // The voice file was cleared; re-synthesize it from her saved line.
-        setStatus("Generating voice line...");
-        const audioUrl = await regenerateMessageVoice(message.id);
-        setMessages((current) =>
-          current.map((m) => (m.id === message.id ? { ...m, audio_url: audioUrl } : m))
-        );
-        await characterRef.current?.playSpeech(API_BASE + audioUrl).catch((error) => {
-          setStatus(error instanceof Error ? error.message : "Replay failed");
-        });
-        setStatus("Online");
+        // No saved clip (cut off, never played, or cleared by the cap):
+        // stream her saved line again - first sound in seconds, not after
+        // the whole clip is made - and keep it once heard to the end.
+        const replay = await speakMessage(message.id);
+        if (replay.audioUrl) {
+          const audioUrl = replay.audioUrl;
+          setMessages((current) =>
+            current.map((m) => (m.id === message.id ? { ...m, audio_url: audioUrl } : m))
+          );
+          await characterRef.current?.playSpeech(API_BASE + audioUrl).catch((error) => {
+            setStatus(error instanceof Error ? error.message : "Replay failed");
+          });
+        } else if (replay.speechUrl) {
+          setStatus("Voicing her line...");
+          let started = true;
+          await characterRef.current?.playSpeech(replay.speechUrl).catch((error) => {
+            started = false;
+            setStatus(error instanceof Error ? error.message : "Replay failed");
+          });
+          if (started) setStatus("Online");
+          rememberVoiceLine(message.id);
+        }
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Replay failed");
@@ -1220,10 +1863,25 @@ export default function App() {
   async function removeMessage(message: MemoryMessage) {
     if (message.id == null || loading) return;
     if (!window.confirm("Remove this message from the conversation?")) return;
+    // Your picture message: her reply about the picture can go with it (L4,
+    // 2026-10-27) - otherwise she would still talk about a picture that is gone.
+    const index = messages.indexOf(message);
+    const hers = message.role === "user" && message.attachments?.length && index >= 0
+      ? herReplyIds(messages, index) : [];
+    const what = message.attachments?.every(isDocument) ? "document"
+      : message.attachments?.every(isVideo) ? "video" : "picture";
+    const withHers = hers.length > 0 && window.confirm(
+      `Also delete her reply about this ${what}?\n\nOK = delete her reply too. Cancel = keep her reply.`);
     try {
       await deleteMessage(message.id);
-      setMessages((current) => current.filter((m) => m.id !== message.id));
-      setStatus("Message removed");
+      for (const id of withHers ? hers : []) await deleteMessage(id);
+      if (withHers) setMessages(await getMemory());
+      else setMessages((current) => current.filter((m) => m.id !== message.id));
+      if (message.attachments?.length) {
+        void pictures.refreshDesk();   // its pictures went with it
+        void refreshConversations();   // a "Picture: ..." title may be gone too
+      }
+      setStatus(withHers ? "Message and her reply removed" : "Message removed");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not remove the message");
     }
@@ -1258,7 +1916,8 @@ export default function App() {
     setLoading(true);
     setStatus("Amadeus is rethinking...");
     try {
-      const reply = await regenerate();
+      setWebStatus("");
+      const reply = await regenerate({ onStatus: (line) => setWebStatus(line) });
       // The previous reply is kept as an earlier version; reload the active
       // view so the new version and the version arrows appear correctly.
       setMessages(await getMemory());
@@ -1272,6 +1931,7 @@ export default function App() {
       void refreshConnection();
     } finally {
       setLoading(false);
+      setWebStatus("");
     }
   }
 
@@ -1302,8 +1962,48 @@ export default function App() {
     }
   }
 
+  // The user pokes her (the Poke button or a tap on her shoulders): she
+  // starts talking in the tab on screen. Her line is a greeting-like line of
+  // its own (regenerable, no version arrows).
+  async function handlePoke() {
+    const convId = displayedConvIdRef.current;
+    if (loading || convId == null) return;
+    characterRef.current?.stopSpeech();
+    characterRef.current?.playMotion("TapReaction");
+    const speechReady = characterRef.current?.prepareSpeech().then(
+      () => true,
+      () => false
+    );
+    setLoading(true);
+    setStatus("Amadeus is thinking...");
+    try {
+      const g = await pokeConversation(convId);
+      setStatus("Online");
+      if (!g.ready || !g.response) {
+        if (!g.superseded) setStatus("She can't talk yet - the AI server isn't ready.");
+        return;
+      }
+      if (displayedConvIdRef.current !== convId) return; // tab moved on; shows on return
+      const line = g.response;
+      setMessages((current) => placeGreeting(current, {
+        role: "assistant", content: line, id: g.assistantId, is_greeting: true,
+        greeting_regenerable: true,
+      }));
+      if (g.speechUrl) rememberVoiceLine(g.assistantId);
+      if (g.speechUrl && (await speechReady)) {
+        void characterRef.current?.playSpeech(g.speechUrl).catch(() => undefined);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Poke failed");
+      void refreshConnection();
+    } finally {
+      setLoading(false);
+      void refreshConversations();
+    }
+  }
+
   return (
-    <main className="shell">
+    <main className={`shell${railOpen ? " rail-open" : ""}`}>
       {/* Character Panel */}
       <section className="character-panel">
         <header className="brand">
@@ -1339,6 +2039,20 @@ export default function App() {
                 </button>
               );
             })}
+
+            {Object.entries(pokeSpots).map(([key, spot]) => (
+              <button
+                key={key}
+                type="button"
+                className="touch-button"
+                style={spot.position}
+                aria-label={spot.label}
+                disabled={loading || ceremonyPending}
+                onClick={() => void handlePoke()}
+              >
+                {spot.label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -1361,9 +2075,39 @@ export default function App() {
       </section>
 
       {/* Conversation Sessions Rail */}
-      <nav className="sessions-rail" aria-label="Conversations">
+      {railOpen && (
+        <button
+          type="button"
+          className="rail-backdrop"
+          aria-label="Close conversations"
+          onClick={() => setRailOpen(false)}
+        />
+      )}
+
+      <nav
+        className="sessions-rail"
+        aria-label="Conversations"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setRailOpen(false);
+        }}
+      >
         <div className="sessions-head">
-          <button type="button" onClick={() => void newChat()} disabled={loading || sessionsBusy}>
+          <button
+            type="button"
+            className="rail-close"
+            aria-label="Close conversations"
+            onClick={() => setRailOpen(false)}
+          >
+            ✕
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRailOpen(false);
+              void newChat();
+            }}
+            disabled={loading || sessionsBusy}
+          >
             + New chat
           </button>
         </div>
@@ -1391,7 +2135,10 @@ export default function App() {
                   type="button"
                   className="session-title"
                   title={conv.title}
-                  onClick={() => void switchConversation(conv.id)}
+                  onClick={() => {
+                    setRailOpen(false);
+                    void switchConversation(conv.id);
+                  }}
                 >
                   {conv.title}
                 </button>
@@ -1421,6 +2168,16 @@ export default function App() {
       {/* Chat Panel */}
       <section className="chat-panel">
         <div className="chat-toolbar">
+          <button
+            type="button"
+            className="ghost-button rail-toggle"
+            aria-label="Conversations"
+            aria-expanded={railOpen}
+            onClick={() => setRailOpen(true)}
+          >
+            ☰
+          </button>
+
           <div className="chat-toolbar-id">
             <span className="eyebrow">
               LAB MEMBER 004
@@ -1432,9 +2189,28 @@ export default function App() {
           </div>
 
           <div className="toolbar-actions">
+            {/* Reload the page - the installed phone app has no address bar.
+                She does not greet again (amadeusGreeted lives on in this tab);
+                held back while she is replying so the answer is not cut off. */}
+            <button
+              type="button"
+              className="ghost-button refresh-button"
+              onClick={() => window.location.reload()}
+              disabled={loading}
+              aria-label="Refresh page"
+              title={loading ? "Wait for her reply to finish" : "Refresh page"}
+            >
+              ↻
+            </button>
+
             <button
               className="ghost-button"
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => {
+                // First start ("open the settings menu and tell me your
+                // name"): her name box lives in Preferences.
+                if (!userName.trim()) setSettingsSection("preferences");
+                setSettingsOpen(true);
+              }}
             >
               Settings
             </button>
@@ -1496,7 +2272,7 @@ export default function App() {
                         title={
                           message.audio_url
                             ? "Replay voice line"
-                            : "Voice was cleared — it will be re-synthesized"
+                            : "Replay voice line (no saved recording yet - she says it again)"
                         }
                         onClick={() => void replayVoice(message)}
                       >
@@ -1568,7 +2344,7 @@ export default function App() {
                     </button>
                   )}
                   {message.role !== "user" && index === lastAssistantIndex && !loading &&
-                    !message.is_greeting && (
+                    !message.is_greeting && !message.is_aside && (
                     <>
                       <button
                         type="button"
@@ -1612,13 +2388,34 @@ export default function App() {
                 </div>
               ) : (
                 <div className="bubble">
-                  {message.content}
-                  {showJapanese && message.role !== "user" && message.japanese && (
+                  {message.role === "user" && message.attachments && message.attachments.length > 0 && (
+                    <PictureStrip pictures={message.attachments} onOpen={setViewerPicture} />
+                  )}
+                  <LinkedText text={message.content}
+                    known={message.role === "user" ? undefined : knownLinkKeys(message.sources)} />
+                  {message.translating && !message.content && (
+                    <span className="bubble-translating" aria-label="Writing the English line">
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                  )}
+                  {japaneseShown && message.role !== "user" && message.japanese && (
                     <span className="bubble-japanese" lang="ja">
-                      {message.japanese}
+                      <LinkedText text={message.japanese} known={knownLinkKeys(message.sources)} />
                     </span>
                   )}
                 </div>
+              )}
+
+              {message.role !== "user" && message.sources && message.sources.length > 0 &&
+                editingId !== message.id && (
+                <SourcesBar sources={message.sources} />
+              )}
+              {message.role !== "user" && message.doc_reads && editingId !== message.id && (
+                <p className="doc-reads" title="What she watched or read for this reply">
+                  {readsLine(message.doc_reads)}
+                </p>
               )}
             </article>
           ))}
@@ -1635,21 +2432,62 @@ export default function App() {
                 <i />
                 <i />
               </div>
+              {webStatus && (
+                <div className="web-status" role="status" aria-live="polite">
+                  <span className="web-status-spinner" aria-hidden="true" />
+                  {webStatus}
+                </div>
+              )}
             </article>
           )}
 
           <div ref={bottomRef} />
         </div>
 
+        {/* Pictures: the privacy note (once), cards not sent yet, her desk */}
+        <AttachmentTray
+          cards={pictures.cards}
+          desk={pictures.desk}
+          privacyNote={pictures.privacyNote}
+          onRemoveCard={pictures.removeCard}
+          onRemoveFromDesk={(id) => void pictures.removeFromDesk(id)}
+          onOpenPicture={setViewerPicture}
+          onClosePrivacyNote={pictures.closePrivacyNote}
+        />
+        {attachNote && <p className="attach-note" role="status">{attachNote}</p>}
+
         {/* Message Input */}
         <form
-          className="composer"
+          className={`composer${dropGlow ? " drop-glow" : ""}`}
           onSubmit={submit}
         >
+          <AttachMenu
+            caps={pictures.caps}
+            disabled={ceremonyPending}
+            onFiles={addPictureFiles}
+            onOpen={() => void pictures.refreshCaps()}
+            onNote={setAttachNote}
+          />
           <textarea
+            ref={composerRef}
             value={input}
             onChange={(event) => {
               setInput(event.target.value);
+            }}
+            onPaste={(event) => {
+              // A pasted picture becomes a card; pasted words stay words -
+              // unless they are a long text (E3): then a "Pasted text" card.
+              const files = filesFrom(event.clipboardData?.items);
+              if (files.length) {
+                event.preventDefault();
+                addPictureFiles(files);
+                return;
+              }
+              const text = event.clipboardData?.getData("text/plain") ?? "";
+              if (text.length > PASTE_MAX_CHARS) {
+                event.preventDefault();
+                addPictureFiles([pastedTextFile(text)]);
+              }
             }}
             onKeyDown={(event) => {
               if (
@@ -1662,7 +2500,7 @@ export default function App() {
               }
             }}
             disabled={ceremonyPending}
-            placeholder={ceremonyPending ? "..." : "Message Amadeus..."}
+            placeholder={ceremonyPending ? "..." : dropGlow ? "Drop anywhere to show Amadeus" : "Message Amadeus..."}
             rows={1}
             aria-disabled={ceremonyPending}
           />
@@ -1684,12 +2522,31 @@ export default function App() {
           </button>
 
           <button
+            type="button"
+            className="poke-button"
+            onClick={() => void handlePoke()}
+            disabled={loading || ceremonyPending}
+            title="Poke her - she starts talking"
+            aria-label="Poke"
+          >
+            <span aria-hidden="true">👉</span>
+            <span className="poke-label" aria-hidden="true">Poke</span>
+          </button>
+
+          <button
             type="submit"
-            disabled={!input.trim() || loading || ceremonyPending}
+            disabled={!canSend(input, pictures.cards) || loading || ceremonyPending}
+            title={pictures.cards.some((c) => c.state === "preparing")
+              ? "Waiting for your pictures to be ready" : undefined}
           >
             Send
           </button>
         </form>
+        {viewerPicture && (isDocument(viewerPicture)
+          ? <DocumentViewer doc={viewerPicture} onClose={() => setViewerPicture(null)} />
+          : isVideo(viewerPicture)
+            ? <VideoViewer video={viewerPicture} onClose={() => setViewerPicture(null)} />
+            : <PictureViewer picture={viewerPicture} onClose={() => setViewerPicture(null)} />)}
         {ceremonyPending && (
           <p className="ceremony-note" role="status">
             She's still coming online — finish the setup in Settings.
@@ -1747,285 +2604,335 @@ export default function App() {
                 </h3>
               </div>
 
-              <button
-                className="close-button"
-                aria-label="Close settings"
-                onClick={closeSettings}
-                disabled={settingsBusy}
-              >
-                ×
-              </button>
+              <div className="modal-heading-actions">
+                <button
+                  type="button"
+                  className="ghost-button quit-button"
+                  aria-expanded={quitOpen}
+                  onClick={() => setQuitOpen((open) => !open)}
+                >
+                  Quit
+                </button>
+                <button
+                  className="close-button"
+                  aria-label="Close settings"
+                  onClick={closeSettings}
+                  disabled={settingsBusy}
+                >
+                  ×
+                </button>
+              </div>
             </div>
+
+            {quitOpen && <QuitPanel onCancel={() => setQuitOpen(false)} />}
 
             <nav className="settings-sections" aria-label="Settings sections">
               <button type="button" aria-pressed={settingsSection === "connection"}
                 onClick={() => setSettingsSection("connection")}>Connection</button>
+              <button type="button" aria-pressed={settingsSection === "preferences"}
+                onClick={() => setSettingsSection("preferences")}>Preferences</button>
               <button type="button" aria-pressed={settingsSection === "personality"}
                 onClick={() => setSettingsSection("personality")}>
-                Personality{personalityDirty && <span className="unsaved-dot" aria-label="Unsaved changes" />}
+                Personality & mood{personalityDirty && <span className="unsaved-dot" aria-label="Unsaved changes" />}
               </button>
               <button type="button" aria-pressed={settingsSection === "sampling"}
                 onClick={() => setSettingsSection("sampling")}>
                 Model Sampling
               </button>
+              <button type="button" aria-pressed={settingsSection === "system"}
+                onClick={() => setSettingsSection("system")}>
+                System{sys.restarting && <span className="unsaved-dot" aria-label="Restarting" />}
+              </button>
             </nav>
 
             <div hidden={settingsSection !== "connection"}>
-              <p className="settings-intro">
-                Amadeus works with any OpenAI-compatible model server - local (Unsloth
-                Desktop, Ollama, llama.cpp, LM Studio, vLLM) or cloud (OpenRouter,
-                OpenAI, and similar). For a local server, leave the address blank to
-                auto-detect it, or type the address your app shows (usually
-                http://localhost:8888/v1). For a cloud server, paste its API base URL
-                and your key below.
-              </p>
-
-              <label>
-                Model server address
-                <input
-                  value={serverAddress}
-                  disabled={settingsBusy}
-                  onChange={(event) => setServerAddressState(event.target.value)}
-                  placeholder="http://localhost:8888/v1  (blank = auto-detect)"
-                  spellCheck={false}
-                  autoComplete="off"
-                  aria-describedby="server-address-help"
-                />
-              </label>
-              <p className="settings-help" id="server-address-help">
-                {serverAddress
-                  ? "Requests go to this address."
-                  : "Blank = auto-detect local servers on ports 8888 / 8000."}
-                {" "}Press "Save connection" to apply a change.
-              </p>
-
-              <label>
-                API key
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => setApiKeyInput(event.target.value)}
-                  placeholder={hasApiKey ? "Enter a replacement key" : "Enter your API key"}
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  disabled={settingsBusy}
-                  aria-describedby="api-key-help"
-                />
-              </label>
-              <p className="settings-help" id="api-key-help">
-                {hasApiKey ? "A key is saved. Leave blank to keep it." : "No API key is saved."}
-                {" "}Local servers usually accept any value; cloud providers (OpenRouter,
-                OpenAI) require your real key.
-              </p>
-
-              <label>
-                LLM model
-
-                <input
-                  value={model}
-                  disabled={settingsBusy}
-                  onChange={(event) => {
-                    setModelName(event.target.value);
-                  }}
-                  placeholder="your model name"
-                />
-              </label>
-
-              <label>
-                Your name
-                <input
-                  value={userName}
-                  disabled={settingsBusy}
-                  onChange={(event) => {
-                    setUserName(event.target.value);
-                    // The reading belonged to the old name.
-                    setUserNameReading("");
-                    setReadingNote("");
-                  }}
-                  placeholder="what she should call you (optional)"
-                  autoComplete="off"
-                  spellCheck={false}
-                  aria-describedby="your-name-help"
-                />
-              </label>
-              <p className="settings-help" id="your-name-help">
-                Optional. If you give her a name, she calls you by it. Leave
-                blank to clear it.
-              </p>
-
-              <label>
-                How she says it
-                <div className="reading-row">
-                  <input
-                    value={userNameReading}
-                    disabled={settingsBusy || !userName.trim()}
-                    onChange={(event) => {
-                      setUserNameReading(event.target.value);
-                      setReadingNote("");
-                    }}
-                    placeholder={userName.trim() ? "press Suggest, or type katakana" : "set your name first"}
-                    autoComplete="off"
-                    spellCheck={false}
-                    lang="ja"
-                    aria-describedby="name-reading-help"
-                  />
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => void handleSuggestReading()}
-                    disabled={settingsBusy || readingSuggesting || !userName.trim()}
-                  >
-                    {readingSuggesting ? "Suggesting…" : "Suggest"}
-                  </button>
-                </div>
-              </label>
-              {readingNote && <p className="settings-error" role="status">{readingNote}</p>}
-              <p className="settings-help" id="name-reading-help">
-                Her voice speaks Japanese, so your name is said from this
-                katakana (e.g. Alex → アレックス). Press Suggest to fill it in,
-                or leave it empty and it's suggested when you save. Change it
-                if it sounds wrong.
-              </p>
-
-              <label>
-                Your pronouns
-                <select
-                  value={pronounsChoice}
-                  disabled={settingsBusy}
-                  onChange={(event) => setPronounsChoice(event.target.value)}
-                  aria-describedby="pronouns-help"
-                >
-                  <option value="">Not set</option>
-                  {PRONOUN_PRESETS.map((p) => (
-                    <option key={p} value={p}>{p}</option>
-                  ))}
-                  <option value="custom">Custom…</option>
-                </select>
-              </label>
-              {pronounsChoice === "custom" && (
-                <label>
-                  Custom pronouns
-                  <input
-                    value={pronounsCustom}
-                    disabled={settingsBusy}
-                    onChange={(event) => setPronounsCustom(event.target.value)}
-                    placeholder="e.g. xe/xem"
-                    maxLength={40}
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                </label>
-              )}
-              <p className="settings-help" id="pronouns-help">
-                Optional. Used when she, her memory and the translation talk
-                about you. Her spoken Japanese rarely needs them.
-              </p>
-
-              <label>
-                What she calls you
-                <select
-                  value={addressChoice}
-                  disabled={settingsBusy}
-                  onChange={(event) => setAddressChoice(event.target.value)}
-                  aria-describedby="address-help"
-                >
-                  {addressOptions(userName).map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              </label>
-              {addressChoice === "custom" && (
-                <label>
-                  Custom form of address
-                  <input
-                    value={addressCustom}
-                    disabled={settingsBusy}
-                    onChange={(event) => setAddressCustom(event.target.value)}
-                    placeholder="e.g. a nickname, in katakana or kanji"
-                    maxLength={30}
-                    autoComplete="off"
-                    spellCheck={false}
-                    lang="ja"
-                  />
-                </label>
-              )}
-              <p className="settings-help" id="address-help">
-                "Let her decide" starts polite (さん) and gets more familiar as
-                trust grows, taking your pronouns into account. The ending also
-                shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
-              </p>
-
-              {connStatus && connStatus.reachable && connStatus.models.length > 0 && (
-                <div className="model-chips">
-                  <span className="model-chips-label">Models on the server:</span>
-                  {connStatus.models.map((name) => (
+              {brain && (
+                <div className="brain-choice" role="group" aria-label="How she thinks">
+                  <span className="brain-choice-label">How she thinks</span>
+                  <div className="brain-choice-buttons">
                     <button
-                      key={name}
                       type="button"
-                      className={baseModelName(model) === baseModelName(name) ? "active" : ""}
-                      disabled={settingsBusy}
-                      title="Use this model"
-                      onClick={() => setModelName(name)}
+                      aria-pressed={builtinMode}
+                      disabled={brainSwitching || settingsBusy || !brain.available}
+                      title={brain.available ? "Her own model, running on this PC" : "Set up by the installer"}
+                      onClick={() => void chooseBrain("builtin")}
                     >
-                      {name}
+                      Built-in
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      aria-pressed={!builtinMode}
+                      disabled={brainSwitching || settingsBusy}
+                      onClick={() => void chooseBrain("custom")}
+                    >
+                      Custom Model (your own local or Cloud model)
+                    </button>
+                  </div>
+                  {!brain.available && (
+                    <p className="settings-help">
+                      Built-in is set up by the installer: run it again and
+                      choose option A to give her a model that runs on this PC.
+                    </p>
+                  )}
                 </div>
               )}
 
-              <div
-                className={`conn-status${
-                  !connStatus
-                    ? ""
-                    : !connStatus.reachable
-                      ? " fail"
-                      : connStatus.model_configured && !connStatus.model_found
-                        ? " warn"
-                        : " ok"
-                }`}
-                role="status"
-              >
-                <span className="conn-dot" aria-hidden="true" />
-                <span className="conn-text">{connStatusText}</span>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => void handleTestConnection()}
-                  disabled={connTesting || settingsBusy}
-                >
-                  {connTesting ? "Testing..." : "Test connection"}
-                </button>
+              {/* Server / Model / Status - the same three rows in both modes. */}
+              <div className="conn-section">
+                <span className="conn-section-title">Server</span>
+                {builtinMode ? (
+                  <p className="settings-help">
+                    {brain?.runner_missing
+                      ? "This PC - but llama.cpp (the program that runs her model) is not installed yet. Run the installer again (it continues where it stopped)."
+                      : brain?.model_missing
+                        ? "This PC - but there is no model file yet. Put a GGUF file in her models folder and press Refresh list below, or run the installer again and choose A to download hers."
+                        : "This PC. Her built-in model runs privately here - nothing to connect."}
+                  </p>
+                ) : (<>
+                  <p className="settings-intro">
+                    Any OpenAI-compatible model server - local (Unsloth Desktop, Ollama,
+                    llama.cpp, LM Studio, vLLM) or cloud (OpenRouter, OpenAI, and similar).
+                    For a local server, leave the address blank to auto-detect it, or type
+                    the address your app shows (usually http://localhost:8888/v1). For a
+                    cloud server, paste its API base URL and your key.
+                  </p>
+                  <label>
+                    Model server address
+                    <input
+                      value={serverAddress}
+                      disabled={settingsBusy}
+                      onChange={(event) => setServerAddressState(event.target.value)}
+                      placeholder="http://localhost:8888/v1  (blank = auto-detect)"
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-describedby="server-address-help"
+                    />
+                  </label>
+                  <p className="settings-help" id="server-address-help">
+                    {serverAddress
+                      ? "Requests go to this address."
+                      : "Blank = auto-detect local servers on ports 8888 / 8000."}
+                  </p>
+                  <label>
+                    API key
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={(event) => setApiKeyInput(event.target.value)}
+                      placeholder={hasApiKey ? "Enter a replacement key" : "Enter your API key"}
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      disabled={settingsBusy}
+                      aria-describedby="api-key-help"
+                    />
+                  </label>
+                  <p className="settings-help" id="api-key-help">
+                    {hasApiKey ? "A key is saved. Leave blank to keep it." : "No API key is saved."}
+                    {" "}Local servers usually accept any value; cloud providers (OpenRouter,
+                    OpenAI) require your real key.
+                  </p>
+                </>)}
               </div>
 
-              <label>
-                Keep last voice recordings
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={voiceRetention}
-                  disabled={settingsBusy}
-                  aria-describedby="voice-retention-help"
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
-                    setVoiceRetentionState(
-                      Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
-                    );
-                  }}
-                />
-              </label>
-              <p className="settings-help" id="voice-retention-help">
-                How many voice recordings to keep on disk. 0 keeps everything.
-                Older ones are deleted automatically, but any reply can always be
-                replayed — its line is re-synthesized on demand.
-              </p>
+              <div className="conn-section">
+                <span className="conn-section-title">Model</span>
+                {builtinMode ? (<>
+                  <div className="conn-row">
+                    <ModelPicker
+                      ariaLabel="Her model"
+                      options={(builtinModel?.files ?? []).map((f) => ({
+                        value: f.name,
+                        hint: `${f.gb.toLocaleString("en-US")} GB`,
+                      }))}
+                      value={modelChoice}
+                      onChange={setModelChoice}
+                      disabled={modelBusy || !builtinModel}
+                      emptyText="No model files in her models folder"
+                    />
+                    <button type="button" className="ghost-button" disabled={modelBusy}
+                      onClick={() => void refreshBuiltinModel()}>
+                      Refresh list
+                    </button>
+                  </div>
+                  {builtinModel && (
+                    <div className="conn-row">
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={modelBusy || !modelChoice || builtinModel.state === "loading" ||
+                          (builtinModel.state === "loaded" && baseName(builtinModel.file) === modelChoice)}
+                        onClick={() => void loadChosenModel()}
+                      >
+                        {builtinModel.state === "loaded" && baseName(builtinModel.file) !== modelChoice
+                          ? "Switch to this model"
+                          : "Load"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={modelBusy || builtinModel.state === "unloaded"}
+                        onClick={() => void unloadModel()}
+                      >
+                        Unload
+                      </button>
+                    </div>
+                  )}
+                  <p className="settings-help">
+                    Unload frees her graphics memory (for a game, for example); she
+                    can't answer until you load her model again. To use your own GGUF
+                    model, put the file in{" "}
+                    <span className="settings-path">{builtinModel?.folder || "her models folder"}</span>{" "}
+                    and press Refresh list. Your own model runs with this PC's
+                    settings{brain?.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
+                    a model too big for your graphics card will not load.
+                  </p>
+                  {builtinModel && builtinModel.catalog.length > 0 && (
+                    <details className="model-catalog">
+                      <summary>Get more models</summary>
+                      <ul>
+                        {builtinModel.catalog.map((m) => (
+                          <li key={m.key}>
+                            <div className="model-catalog-text">
+                              <span className="model-catalog-name">{m.label}</span>
+                              <span className="model-catalog-note">
+                                {m.gb.toLocaleString("en-US")} GB
+                                {m.fit === "recommended" && " - recommended for this PC"}
+                                {m.fit === "smaller" && " - smaller: faster, less capable"}
+                                {m.fit === "bigger" && " - bigger than this PC's recommended model: may be slow or not fit your graphics card"}
+                              </span>
+                            </div>
+                            {m.installed ? (
+                              <span className="model-catalog-installed">In the folder</span>
+                            ) : (
+                              <a className="ghost-button" href={m.url} target="_blank" rel="noopener noreferrer">
+                                Download
+                              </a>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="conn-row">
+                        <button type="button" className="ghost-button"
+                          onClick={() => void openModelsFolder().catch((error) =>
+                            setSettingsError(error instanceof Error ? error.message : "Could not open the folder."))}>
+                          Open models folder
+                        </button>
+                        <button type="button" className="ghost-button" disabled={modelBusy}
+                          onClick={() => void refreshBuiltinModel()}>
+                          Refresh list
+                        </button>
+                      </div>
+                      <p className="settings-help">
+                        Download opens in your browser and saves the file to your
+                        Downloads folder. Move it into her models folder, then press
+                        Refresh list - it appears in the model list above. The files
+                        come from Unsloth's official Gemma 4 pages on Hugging Face.
+                      </p>
+                    </details>
+                  )}
+                </>) : (<>
+                  <div className="conn-row">
+                    <ModelPicker
+                      ariaLabel="Model"
+                      options={(connStatus?.reachable ? connStatus.models : []).map((name) => ({ value: name }))}
+                      value={model}
+                      onChange={setModelName}
+                      allowCustom
+                      disabled={settingsBusy}
+                      emptyText="Press Refresh list to see the server's models"
+                    />
+                    <button type="button" className="ghost-button" disabled={connTesting || settingsBusy}
+                      onClick={() => void refreshServerModels()}>
+                      {connTesting ? "Refreshing..." : "Refresh list"}
+                    </button>
+                  </div>
+                  <div className="conn-row">
+                    <button type="button" className="ghost-button"
+                      disabled={settingsBusy || !model.trim()}
+                      onClick={() => void applyCustomModel()}>
+                      Use this model
+                    </button>
+                  </div>
+                  <p className="settings-help">
+                    Type to search the server's models, or type a name it does not
+                    list. Refresh list uses the address and key above. The app talks
+                    to the model you choose; it cannot load or unload models on another
+                    program's server.
+                  </p>
+                </>)}
+              </div>
+
+              <div className="conn-section">
+                <span className="conn-section-title">Status</span>
+                {builtinMode && builtinModel && !brain?.runner_missing ? (
+                  <div className={`conn-status ${
+                    builtinModel.state === "loaded" ? "ok" : builtinModel.state === "failed" ? "fail" : "warn"
+                  }`} role="status">
+                    <span className="conn-dot" aria-hidden="true" />
+                    <span className="conn-text">
+                      {builtinModel.state === "loaded"
+                        ? `Loaded: ${baseName(builtinModel.file)}`
+                        : builtinModel.state === "loading"
+                          ? `Loading ${baseName(builtinModel.file)}...`
+                          : builtinModel.state === "failed"
+                            ? `Could not load ${baseName(builtinModel.file)}: ${builtinModel.error}`
+                            : "Not loaded - she can't answer until her model is loaded."}
+                    </span>
+                  </div>
+                ) : null}
+                {builtinMode && builtinModel && !brain?.runner_missing &&
+                  (builtinModel.state === "loaded" || builtinModel.state === "loading") && (
+                  <p className="settings-help" role="status">
+                    {builtinModel.pictures
+                      ? `Pictures: yes - she can see pictures you attach${
+                        builtinModel.picturesWhere === "processor"
+                          ? " (read on the processor, to keep room on the graphics card)"
+                          : builtinModel.picturesWhere === "card" ? " (read on the graphics card)" : ""}.`
+                      : `Pictures: no - ${builtinModel.picturesNote || "she can't see pictures with this model"}.`}
+                  </p>
+                )}
+                {builtinMode && builtinModel && !brain?.runner_missing ? null : (
+                  <div
+                    className={`conn-status${
+                      !connStatus
+                        ? ""
+                        : !connStatus.reachable
+                          ? " fail"
+                          : connStatus.model_configured && !connStatus.model_found
+                            ? " warn"
+                            : " ok"
+                    }`}
+                    role="status"
+                  >
+                    <span className="conn-dot" aria-hidden="true" />
+                    <span className="conn-text">{connStatusText}</span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => void handleTestConnection()}
+                      disabled={connTesting || settingsBusy}
+                    >
+                      {connTesting ? "Testing..." : "Test connection"}
+                    </button>
+                  </div>
+                )}
+                {!builtinMode && brain?.available && builtinModel && (
+                  <p className="settings-help">
+                    {builtinModel.state === "unloaded"
+                      ? "Her built-in model: not loaded (its program is stopped)."
+                      : builtinModel.state === "failed"
+                        ? "Her built-in model: not loaded (it could not start)."
+                        : `Her built-in model: still ${builtinModel.state} - switch to Built-in and press Unload to stop it.`}
+                  </p>
+                )}
+              </div>
 
               <label>
                 Conversation memory (tokens)
                 <input
                   type="number"
                   min={500}
-                  max={1000000}
+                  max={builtinBudgetCap ?? 1000000}
                   step={500}
                   value={contextBudget}
                   disabled={settingsBusy}
@@ -2039,74 +2946,72 @@ export default function App() {
                 />
               </label>
               <p className="settings-help" id="context-budget-help">
-                How much recent conversation she keeps in each prompt, in
-                estimated tokens. Lower = remembers less but replies faster and
-                uses less memory — good for small local models. Default is
-                40000. The model's context window should hold this number plus
-                about 6000.
+                How much of your recent conversation she keeps in mind.
+                Amadeus also reserves about 10,000 tokens for her character
+                and her reply. We recommend at least 12,000.
+                {builtinBudgetCap !== null ? (
+                  <>
+                    {" "}Default on this PC: {defaultBudget.toLocaleString("en-US")}{" "}
+                    (lower if your graphics card has less memory). Her built-in
+                    model has room for up to {builtinBudgetCap.toLocaleString("en-US")}.
+                  </>
+                ) : (
+                  <>
+                    {" "}Default: {defaultBudget.toLocaleString("en-US")}. Your
+                    model's context window must hold this number plus about
+                    10,000.
+                  </>
+                )}
               </p>
 
-              <div className="settings-toggle-row" aria-label="Deep thinking">
-                <div className="settings-toggle-text">
-                  <span className="settings-toggle-title">Deep thinking</span>
-                  <span className="settings-toggle-desc">
-                    Lets her reason before deciding to search the web. Slower,
-                    so off by default. Only affects messages while web access is on.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={`settings-toggle${deepThinking ? " on" : ""}`}
-                  onClick={toggleDeepThinking}
-                  disabled={deepThinkingBusy || deepThinking === null}
-                  aria-pressed={!!deepThinking}
-                >
-                  <span className="settings-toggle-knob" aria-hidden="true" />
-                  <span>{deepThinking ? "On" : "Off"}</span>
-                </button>
+              <div className="settings-reasoning" aria-label="Reasoning">
+                <label>
+                  Reasoning: her replies ({builtinMode ? "built-in model" : "your model"})
+                  <select
+                    value={reasoning ? reasoning[builtinMode ? "replies_builtin" : "replies_custom"] : "off"}
+                    disabled={!reasoning || reasoningBusy}
+                    onChange={(event) => void changeReasoning(
+                      builtinMode ? "replies_builtin" : "replies_custom",
+                      event.target.value as ReasoningLevel)}
+                    aria-describedby="reasoning-help"
+                  >
+                    {REASONING_CHOICES.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Reasoning: translations
+                  <select
+                    value={reasoning ? reasoning.translations : "off"}
+                    disabled={!reasoning || reasoningBusy}
+                    onChange={(event) => void changeReasoning(
+                      "translations", event.target.value as ReasoningLevel)}
+                    aria-describedby="reasoning-help"
+                  >
+                    {REASONING_CHOICES.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="settings-help" id="reasoning-help">
+                  Lets her think before she answers: better thought-through,
+                  but slower (on cloud models a few seconds more per level; on
+                  the built-in model much more on smaller graphics cards), and
+                  cloud services charge for the thinking too. "Her replies"
+                  also covers greetings and deciding whether to search the
+                  web; "translations" covers the English line and what her
+                  memory learns. Some cloud models can't turn reasoning off
+                  completely - they use their lowest level instead. If her
+                  replies look cut off or broken with reasoning on, raise Max
+                  output tokens in the Sampling tab.
+                </p>
               </div>
 
-              <div className="settings-toggle-row" aria-label="Show her Japanese line">
-                <div className="settings-toggle-text">
-                  <span className="settings-toggle-title">Show her Japanese line</span>
-                  <span className="settings-toggle-desc">
-                    Shows the Japanese she actually spoke under each of her
-                    messages - this is also what she remembers. Editing one of
-                    her messages rewrites it to match (her long-term memory may
-                    already have learned the old line). Saved in this browser.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={`settings-toggle${showJapanese ? " on" : ""}`}
-                  onClick={() => setShowJapanese((v) => !v)}
-                  aria-pressed={showJapanese}
-                >
-                  <span className="settings-toggle-knob" aria-hidden="true" />
-                  <span>{showJapanese ? "On" : "Off"}</span>
-                </button>
-              </div>
-
-              {statsInfo.length > 0 && (
-                <div className="stats-block" aria-label="Relationship stats">
-                  <p className="stats-intro">
-                    How it works: closeness shifts a little at a time across many
-                    messages. Warm, friendly chats slowly raise it a few points; tense
-                    or rude ones lower it. Higher levels unlock warmer, more playful
-                    conversation.
-                  </p>
-                  {statsInfo.map((s) => (
-                    <div key={s.key} className="stat-row">
-                      <div className="stat-line">
-                        <span className="stat-label">{s.label}</span>
-                        <span className="stat-value">
-                          {Math.round(s.value)}/{s.max}{s.tier ? ` — ${s.tier}` : ""}
-                        </span>
-                      </div>
-                      {s.description && <p className="settings-help">{s.description}</p>}
-                    </div>
-                  ))}
-                </div>
+              {!userName.trim() && (
+                <p className="settings-help">
+                  Also tell her your name in the Preferences tab - she waits for it.
+                </p>
               )}
 
               {settingsError && <p className="settings-error" role="alert">{settingsError}</p>}
@@ -2126,15 +3031,311 @@ export default function App() {
                   onClick={saveModel}
                   disabled={settingsBusy || loading}
                 >
-                  {savingSettings ? "Saving..." : "Save connection"}
+                  {savingSettings ? "Saving..." : builtinMode ? "Save" : "Save connection"}
                 </button>
               </div>
             </div>
 
-            <section hidden={settingsSection !== "personality"} aria-label="Personality editor">
+            <div hidden={settingsSection !== "preferences"}>
+              <div className="conn-section">
+                <span className="conn-section-title">About you</span>
+                <label>
+                  Your name
+                  <input
+                    value={userName}
+                    disabled={settingsBusy}
+                    onChange={(event) => {
+                      setUserName(event.target.value);
+                      // The reading belonged to the old name.
+                      setUserNameReading("");
+                      setReadingNote("");
+                    }}
+                    placeholder="what she should call you"
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-describedby="your-name-help"
+                  />
+                </label>
+                <p className="settings-help" id="your-name-help">
+                  Required: she needs to know who she is talking to, and she
+                  calls you by this name. She waits for it on her first start.
+                </p>
+
+                <label>
+                  How she says it
+                  <div className="reading-row">
+                    <input
+                      value={userNameReading}
+                      disabled={settingsBusy || !userName.trim()}
+                      onChange={(event) => {
+                        setUserNameReading(event.target.value);
+                        setReadingNote("");
+                      }}
+                      placeholder={userName.trim() ? "press Suggest, or type katakana" : "set your name first"}
+                      autoComplete="off"
+                      spellCheck={false}
+                      lang="ja"
+                      aria-describedby="name-reading-help"
+                    />
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => void handleSuggestReading()}
+                      disabled={settingsBusy || readingSuggesting || !userName.trim()}
+                    >
+                      {readingSuggesting ? "Suggesting…" : "Suggest"}
+                    </button>
+                  </div>
+                </label>
+                {readingNote && <p className="settings-error" role="status">{readingNote}</p>}
+                <p className="settings-help" id="name-reading-help">
+                  Her voice speaks Japanese, so your name is said from this
+                  katakana (e.g. Alex → アレックス). Press Suggest to fill it in,
+                  or leave it empty and it's suggested when you save. Change it
+                  if it sounds wrong.
+                </p>
+
+                <label>
+                  Your pronouns
+                  <select
+                    value={pronounsChoice}
+                    disabled={settingsBusy}
+                    onChange={(event) => setPronounsChoice(event.target.value)}
+                    aria-describedby="pronouns-help"
+                  >
+                    <option value="">Not set</option>
+                    {PRONOUN_PRESETS.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                    <option value="custom">Custom…</option>
+                  </select>
+                </label>
+                {pronounsChoice === "custom" && (
+                  <label>
+                    Custom pronouns
+                    <input
+                      value={pronounsCustom}
+                      disabled={settingsBusy}
+                      onChange={(event) => setPronounsCustom(event.target.value)}
+                      placeholder="e.g. xe/xem"
+                      maxLength={40}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </label>
+                )}
+                <p className="settings-help" id="pronouns-help">
+                  Optional. Used when she, her memory and the translation talk
+                  about you. Her spoken Japanese rarely needs them.
+                </p>
+
+                <label>
+                  What she calls you
+                  <select
+                    value={addressChoice}
+                    disabled={settingsBusy}
+                    onChange={(event) => setAddressChoice(event.target.value)}
+                    aria-describedby="address-help"
+                  >
+                    {addressOptions(userName).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                {addressChoice === "custom" && (
+                  <label>
+                    Custom form of address
+                    <input
+                      value={addressCustom}
+                      disabled={settingsBusy}
+                      onChange={(event) => setAddressCustom(event.target.value)}
+                      placeholder="e.g. a nickname, in katakana or kanji"
+                      maxLength={30}
+                      autoComplete="off"
+                      spellCheck={false}
+                      lang="ja"
+                    />
+                  </label>
+                )}
+                <p className="settings-help" id="address-help">
+                  "Let her decide" starts polite (さん) and gets more familiar as
+                  trust grows, taking your pronouns into account. The ending also
+                  shows in the English line (e.g. {(userName.trim() || "Alex") + "-kun"}).
+                </p>
+
+
+                <NameListEditor
+                  rows={nameRows}
+                  onChange={setNameRows}
+                  disabled={settingsBusy}
+                  suggest={suggestNameReading}
+                />
+                <p className="settings-help" id="names-help">
+                  Names she should write and say the same way every time - friends,
+                  family, pets, characters (e.g. Ineffa → イネファ). Her Japanese line,
+                  her voice and the English line all follow this list. Press Suggest
+                  for a reading, or type it in katakana.
+                </p>
+              </div>
+
+              <div className="conn-section">
+                <span className="conn-section-title">Chat & voice</span>
+                <div className="settings-toggle-row" aria-label="Show her Japanese line">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Show her Japanese line</span>
+                    <span className="settings-toggle-desc">
+                      Shows the Japanese she actually spoke under each of her
+                      messages - this is also what she remembers. Editing one of
+                      her messages rewrites it to match (her long-term memory may
+                      already have learned the old line). Saved in this browser.
+                      {voiceEarly && " Always on while her voice starts early (below)."}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${japaneseShown ? " on" : ""}`}
+                    onClick={() => setShowJapanese((v) => !v)}
+                    aria-pressed={japaneseShown}
+                    disabled={voiceEarly}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{japaneseShown ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+                <div className="settings-toggle-row" aria-label="Start her voice early">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Start her voice early</span>
+                    <span className="settings-toggle-desc">
+                      She starts speaking as soon as her Japanese line is written,
+                      and the English appears a moment later. Her Japanese line is
+                      shown meanwhile. Off: her voice and the English text arrive
+                      together, a few seconds later. Saved in this browser.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${voiceEarly ? " on" : ""}`}
+                    onClick={() => setVoiceEarly((v) => !v)}
+                    aria-pressed={voiceEarly}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{voiceEarly ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+                <div className="settings-reasoning" aria-label="She reacts when you attach something">
+                  <label>
+                    She reacts when you attach something
+                    <select
+                      value={reactionChoice}
+                      onChange={(event) => void changeReactionChoice(event.target.value as ReactionChoice)}
+                      aria-describedby="reaction-help"
+                    >
+                      {REACTION_CHOICES.map((choice) => (
+                        <option key={choice.value} value={choice.value}>{choice.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-help" id="reaction-help">
+                    One short line from her when you attach a picture, before you
+                    send it (she hasn't seen it yet). Saved at once.
+                  </p>
+                </div>
+
+                <div className="settings-toggle-row" aria-label="Read pages thoroughly">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Read pages thoroughly</span>
+                    <span className="settings-toggle-desc">
+                      When web access is on and she searches, she opens the top
+                      pages and takes notes before answering - more accurate, a
+                      few seconds slower. Off: she only reads the best part of the
+                      top page (quicker).
+                      {webReading?.reason ? " Now: " + webReading.reason : ""}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${webReading?.mode === "thorough" ? " on" : ""}`}
+                    onClick={() => void toggleWebReading()}
+                    aria-pressed={webReading?.mode === "thorough"}
+                    disabled={!webReading}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{webReading?.mode === "thorough" ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+
+                <label>
+                  Keep last voice recordings
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={voiceRetention}
+                    disabled={settingsBusy}
+                    aria-describedby="voice-retention-help"
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setVoiceRetentionState(
+                        Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+                      );
+                    }}
+                  />
+                </label>
+                <p className="settings-help" id="voice-retention-help">
+                  How many voice recordings to keep on disk. 0 keeps everything.
+                  Older ones are deleted automatically, but any reply can always be
+                  replayed — its line is re-synthesized on demand.
+                </p>
+              </div>
+
+
+
+              {settingsError && <p className="settings-error" role="alert">{settingsError}</p>}
+              {settingsNotice && <p className="settings-success" role="status">{settingsNotice}</p>}
+
+              <div className="modal-actions">
+                <button
+                  className="ghost-button"
+                  onClick={closeSettings}
+                  disabled={settingsBusy}
+                >
+                  Close
+                </button>
+
+                <button
+                  className="primary-button"
+                  onClick={saveModel}
+                  disabled={settingsBusy || loading}
+                >
+                  {savingSettings ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+
+            <section hidden={settingsSection !== "personality"} aria-label="Personality and mood">
+              <MoodPanel active={settingsOpen && settingsSection === "personality"} stats={statsInfo} />
               <p className="personality-intro" id="personality-help">
                 Shape how Amadeus speaks and responds. Edit the current personality below.
               </p>
+              {defaultNotices.map((notice) => (
+                <div key={notice.name} className="settings-notice" role="status">
+                  <p>
+                    <strong>A newer default is available.</strong>{" "}
+                    Her default {notice.label} {notice.name === "voice" ? "were" : "was"} improved in this update.
+                    You had edited {notice.name === "voice" ? "yours, so they were" : "yours, so it was"} kept as {notice.name === "voice" ? "they are" : "it is"}.
+                  </p>
+                  <button type="button" disabled={defaultNoticeBusy} onClick={() => void answerNotice(notice, "use_new")}>
+                    Use the new default
+                  </button>{" "}
+                  <button type="button" disabled={defaultNoticeBusy} onClick={() => void answerNotice(notice, "keep_mine")}>
+                    Keep mine
+                  </button>
+                </div>
+              ))}
+              {defaultNoticeDone && <p className="settings-success" role="status">{defaultNoticeDone}</p>}
               {personalityLoading ? <p className="settings-help" role="status">Loading personality...</p> : (
                 <>
                   {personalityLoaded && <>
@@ -2180,6 +3381,10 @@ export default function App() {
 
             <section hidden={settingsSection !== "sampling"} aria-label="Model sampling">
               <SamplingSettings busy={settingsBusy || loading} />
+            </section>
+
+            <section hidden={settingsSection !== "system"} aria-label="System">
+              <SystemPanel sys={sys} />
             </section>
           </div>
         </div>

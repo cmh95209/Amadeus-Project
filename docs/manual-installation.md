@@ -18,8 +18,10 @@ Before installing Amadeus, make sure you have:
   remove the old C-compiler requirement. (An NVIDIA GPU is strongly
   recommended for faster voice synthesis; CPU operation is possible.)
 
-Note: **FFmpeg is NOT required** — Amadeus serves her voice as WAV through
-Python audio libraries and never invokes the FFmpeg program.
+Note: **FFmpeg (with `ffprobe`) is needed only for videos.** Her voice is
+served as WAV through Python audio libraries and never invokes FFmpeg; sending
+her a video does. The installers put a copy in `~/.amadeus-tools/ffmpeg/bin`
+when the system has none; one on your `PATH` works too.
 
 An OpenAI-compatible LLM server (local or cloud) is needed to actually chat;
 it is configured in the app after installation, not during it.
@@ -107,7 +109,7 @@ pip install -r extra-req.txt --no-deps
 pip install -r requirements.txt
 ```
 
-(No FFmpeg installation is needed — see step 0.)
+(Her voice needs no FFmpeg; videos do — see step 0.)
 
 ### Initialize fast-langdetect
 

@@ -211,6 +211,36 @@ class NameReadingTests(unittest.TestCase):
                 self.assertFalse(speech_text.is_kana(bad))
 
 
+class MisreadJapaneseTests(unittest.TestCase):
+    """Words pyopenjtalk misreads are sent in kana (言ってね -> ゲンッテネ)."""
+
+    def test_itte_is_sent_in_kana(self):
+        cases = {
+            "言ってね。": "いってね。",
+            "何かあったら言ってね。": "何かあったらいってね。",
+            "ちゃんと言ってね。": "ちゃんといってね。",
+            "時々言ってね": "時々いってね",
+            "「言って」": "「いって」",
+        }
+        for shown, spoken in cases.items():
+            with self.subTest(text=shown):
+                self.assertEqual(to_spoken(shown), spoken)
+
+    def test_kanji_compounds_are_left_alone(self):
+        for text in ("発言ってなに？", "方言って面白い", "一言ってね", "伝言ってね"):
+            with self.subTest(text=text):
+                self.assertEqual(to_spoken(text), text)
+
+    def test_other_forms_are_untouched(self):
+        for text in ("言ったでしょ。", "言う", "言わないで"):
+            with self.subTest(text=text):
+                self.assertEqual(to_spoken(text), text)
+
+    def test_works_with_numbers_and_english(self):
+        self.assertEqual(to_spoken("14:30に言ってね。"), "14時30分にいってね。")
+        self.assertEqual(to_spoken("OKなら言ってね。"), "オーケーならいってね。")
+
+
 class TtsHookTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)

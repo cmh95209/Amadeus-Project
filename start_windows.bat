@@ -10,15 +10,22 @@ rem `conda run -n amadeus python`: without the conda middleman, Ctrl+C is
 rem handled cleanly by the launcher (no "CondaError: KeyboardInterrupt" and no
 rem "Terminate batch job (Y/N)?" prompt on exit). GPT-SoVITS still starts
 rem through `conda run -n GPTSoVITS` from inside the launcher, unchanged.
+rem An install made with the installer's -EnvSuffix option has its own
+rem environments (e.g. "amadeus-test"); the suffix is recorded here. Such an
+rem install never falls back to the active conda env, which could belong to
+rem another install on this PC.
+set "ENV_SUFFIX="
+if exist ".runtime\env_suffix.txt" set /p ENV_SUFFIX=<".runtime\env_suffix.txt"
+set "AMADEUS_ENV=amadeus%ENV_SUFFIX%"
 set "AMADEUS_PY="
-if exist "%USERPROFILE%\miniconda3\envs\amadeus\python.exe" set "AMADEUS_PY=%USERPROFILE%\miniconda3\envs\amadeus\python.exe"
-if not defined AMADEUS_PY if exist "%USERPROFILE%\anaconda3\envs\amadeus\python.exe" set "AMADEUS_PY=%USERPROFILE%\anaconda3\envs\amadeus\python.exe"
-if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\miniconda3\envs\amadeus\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\miniconda3\envs\amadeus\python.exe"
-if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\anaconda3\envs\amadeus\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\anaconda3\envs\amadeus\python.exe"
-if not defined AMADEUS_PY if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "AMADEUS_PY=%CONDA_PREFIX%\python.exe"
+if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined ENV_SUFFIX if not defined AMADEUS_PY if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "AMADEUS_PY=%CONDA_PREFIX%\python.exe"
 if defined AMADEUS_PY goto :found_python
 
-echo ERROR: Amadeus's Python (conda env "amadeus") could not be found.
+echo ERROR: Amadeus's Python (conda env "%AMADEUS_ENV%") could not be found.
 echo Install it with scripts\install_windows.ps1 (or: conda env create -f
 echo backend\environment.yml -n amadeus), then try again.
 pause
@@ -33,15 +40,14 @@ rem   2) relax your user's PowerShell script policy as a backup
 set "npm_config_script_shell=cmd.exe"
 powershell -NoProfile -Command "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned" >nul 2>&1
 
-echo Using Amadeus Python: %AMADEUS_PY%
-"%AMADEUS_PY%" "%CD%\scripts\launcher.py"
+"%AMADEUS_PY%" "%CD%\scripts\launcher.py" %*
 
 set "EXIT_CODE=%errorlevel%"
 
 if not "%EXIT_CODE%"=="0" (
     echo.
     echo Amadeus launcher exited with an error.
-    echo Check .runtime\logs for service logs.
+    echo The details are in the logs folder: %CD%\logs
     pause
 )
 

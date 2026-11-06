@@ -1,3 +1,8 @@
+import { isCeremonyWaitLine } from "./greetingFlow";
+import { normalizeSources } from "./sources";
+import type { SourceEntry } from "./sources";
+import type { PictureInfo } from "./attachments";
+
 export type Conversation = {
   id: number;
   title: string;
@@ -23,6 +28,16 @@ export type MemoryMessage = {
   greeting_regenerable?: boolean;
   version_ids?: number[];
   is_greeting?: boolean;
+  /** The web pages / live data her reply used (web access ON); shown under it. */
+  sources?: SourceEntry[];
+  /** What she read of a long document for this reply ("Read: Document 1: notes + pages 54-55"). */
+  doc_reads?: string;
+  /** Her "hold on, let me check" line before a web answer (own line, no Regenerate). */
+  is_aside?: boolean;
+  /** Your message's pictures (user rows). */
+  attachments?: PictureInfo[];
+  /** Screen-only: her voice started before the English line arrived. */
+  translating?: boolean;
 };
 
 export type MessageReply = {
@@ -33,9 +48,22 @@ export type MessageReply = {
   assistantId?: number;
   audioRelUrl?: string;
   conversationId?: number;
+  /** The web pages / live data the reply used (web-ON replies). */
+  sources?: SourceEntry[];
+  /** What she read of a long document ("" / absent when none). */
+  docReads?: string;
 };
 
-export const API_BASE = "http://127.0.0.1:5050";
+// On the PC the backend is at 127.0.0.1:5050. Opened from another device through
+// Tailscale (`tailscale serve`, https), the backend is the same host on port 8443.
+// No window at all (the Node test runner) counts as local.
+const REMOTE_BACKEND_PORT = 8443;
+export const isLocalPage = typeof window === "undefined" ||
+  ["127.0.0.1", "localhost", "[::1]", ""].includes(window.location.hostname);
+
+export const API_BASE = isLocalPage
+  ? "http://127.0.0.1:5050"
+  : `${window.location.protocol}//${window.location.hostname}:${REMOTE_BACKEND_PORT}`;
 
 export async function getPersonality(): Promise<string> {
   const data = await parseResponse(await fetch(`${API_BASE}/getPersonality`, { cache: "no-store" }));
@@ -51,6 +79,26 @@ export async function setPersonality(personality: string): Promise<string> {
   }));
   if (typeof data.personality !== "string") throw new Error("Could not confirm saved personality");
   return data.personality;
+}
+
+// Files the user edited while a newer default shipped (personality / voice
+// rules): Settings shows a one-time note for each.
+export type DefaultNotice = { name: "personality" | "voice"; label: string };
+
+export async function getDefaultNotices(): Promise<DefaultNotice[]> {
+  const data = await parseResponse(await fetch(`${API_BASE}/defaults/notices`, { cache: "no-store" }));
+  return Array.isArray(data.notices) ? (data.notices as DefaultNotice[]) : [];
+}
+
+export async function answerDefaultNotice(
+  name: DefaultNotice["name"], choice: "use_new" | "keep_mine",
+): Promise<string> {
+  const data = await parseResponse(await fetch(`${API_BASE}/defaults/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, choice }),
+  }));
+  return typeof data.backup === "string" ? data.backup : "";
 }
 
 export async function getApiKeyStatus(): Promise<boolean> {
@@ -91,7 +139,17 @@ export type MessageTurn = {
   text: Promise<string>;
 };
 
-export async function sendMessage(userInput: string): Promise<MessageTurn> {
+/** What a live web-ON reply reports while it is being written. */
+export type StreamHooks = {
+  /** A real step: "Searching the web: ...", "Reading game8.co...", ... */
+  onStatus?: (text: string, step: string) => void;
+  /** Her "hold on, let me check" line (saved; speak it at once). */
+  onAside?: (aside: MessageReply) => void;
+};
+
+export async function sendMessage(
+  userInput: string, hooks: StreamHooks = {}, attachmentIds: number[] = [],
+): Promise<MessageTurn> {
   const response = await fetch(`${API_BASE}/`, {
     method: "POST",
     headers: {
@@ -99,14 +157,17 @@ export async function sendMessage(userInput: string): Promise<MessageTurn> {
     },
     body: JSON.stringify({
       user_input: userInput,
+      // The pictures sent with this message (uploaded when attached).
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
     }),
   });
 
   // Voice-first (web OFF) streams two events: "voice" (start audio at once)
   // then "text" (the display line, filled by the backend's fast call 2).
+  // Web ON streams status steps, maybe her hold-on line, then "reply".
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
   if (contentType.includes("text/event-stream")) {
-    return await readVoiceFirstStream(response);
+    return await readVoiceFirstStream(response, hooks);
   }
 
   const data = await parseResponse(response);
@@ -125,6 +186,7 @@ export async function sendMessage(userInput: string): Promise<MessageTurn> {
     assistantId: typeof data.assistant_id === "number" ? data.assistant_id : undefined,
     conversationId:
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
+    sources: normalizeSources(data.sources),
   };
   return { reply, text: Promise.resolve(reply.response) };
 }
@@ -137,9 +199,41 @@ type VoiceFirstEvent = {
   conversation_id?: number;
   response?: string;
   japanese?: string;
+  step?: string;
+  text?: string;
+  message?: string;
+  sources?: unknown;
+  doc_reads?: string;
 };
 
-async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
+function replyFromEvent(event: VoiceFirstEvent, response: string): MessageReply {
+  return {
+    response,
+    japanese: typeof event.japanese === "string" ? event.japanese : undefined,
+    speechUrl:
+      typeof event.speech_id === "string"
+        ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
+        : undefined,
+    userId: typeof event.user_id === "number" ? event.user_id : undefined,
+    assistantId: typeof event.assistant_id === "number" ? event.assistant_id : undefined,
+    conversationId:
+      typeof event.conversation_id === "number" ? event.conversation_id : undefined,
+    ...(typeof event.doc_reads === "string" && event.doc_reads ? { docReads: event.doc_reads } : {}),
+  };
+}
+
+// Hands the turn back as soon as the "voice" event arrives, so her voice can
+// start while the backend is still writing the English line; the rest of the
+// stream is read in the background and settles `text`. (Until 2026-10-20 this
+// waited for the WHOLE stream, so the voice always waited for the English line
+// - 2 s on the built-in model, 9-20 s on cloud.)
+//
+// The same reader handles the web-ON stream (2026-10-25): "status" steps and
+// her "aside" (hold-on line) go to the hooks; "reply" carries the whole reply
+// (both lines + sources) and settles both promises; "error" fails the turn.
+export async function readVoiceFirstStream(
+  response: Response, hooks: StreamHooks = {},
+): Promise<MessageTurn> {
   if (!response.ok) {
     const data = await parseResponse(response);
     throw new Error(data?.message || `Request failed (${response.status})`);
@@ -150,8 +244,12 @@ async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
   }
 
   let resolveReply: ((reply: MessageReply) => void) | null = null;
+  let rejectReply: ((error: unknown) => void) | null = null;
   let resolveText: ((text: string) => void) | null = null;
-  const replyPromise = new Promise<MessageReply>((r) => (resolveReply = r));
+  const replyPromise = new Promise<MessageReply>((resolve, reject) => {
+    resolveReply = resolve;
+    rejectReply = reject;
+  });
   const textPromise = new Promise<string>((r) => (resolveText = r));
 
   let reply: MessageReply | null = null;
@@ -172,61 +270,70 @@ async function readVoiceFirstStream(response: Response): Promise<MessageTurn> {
     }
   };
 
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // Events are "data: <json>" frames terminated by a blank line.
-      let cut: number;
-      while ((cut = buffer.indexOf("\n\n")) !== -1) {
-        const frame = buffer.slice(0, cut);
-        buffer = buffer.slice(cut + 2);
-        for (const line of frame.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          let event: VoiceFirstEvent;
-          try {
-            event = JSON.parse(line.slice(6)) as VoiceFirstEvent;
-          } catch {
-            continue; // a torn frame - the server always terminates frames
-          }
-          if (event.phase === "voice") {
-            reply = {
-              response: "",
-              japanese: typeof event.japanese === "string" ? event.japanese : undefined,
-              speechUrl:
-                typeof event.speech_id === "string"
-                  ? `${API_BASE}/speech/${encodeURIComponent(event.speech_id)}`
-                  : undefined,
-              userId: typeof event.user_id === "number" ? event.user_id : undefined,
-              assistantId:
-                typeof event.assistant_id === "number" ? event.assistant_id : undefined,
-              conversationId:
-                typeof event.conversation_id === "number" ? event.conversation_id : undefined,
-            };
-            settleReply();
-          } else if (event.phase === "text") {
-            if (typeof event.response === "string") text = event.response;
-            settleText(text);
+  const pump = async () => {
+    let failure: unknown = null;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Events are "data: <json>" frames terminated by a blank line.
+        let cut: number;
+        while ((cut = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          for (const line of frame.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            let event: VoiceFirstEvent;
+            try {
+              event = JSON.parse(line.slice(6)) as VoiceFirstEvent;
+            } catch {
+              continue; // a torn frame - the server always terminates frames
+            }
+            if (event.phase === "voice") {
+              reply = replyFromEvent(event, "");
+              settleReply();
+            } else if (event.phase === "text") {
+              if (typeof event.response === "string") text = event.response;
+              settleText(text);
+            } else if (event.phase === "status") {
+              if (typeof event.text === "string") hooks.onStatus?.(event.text, event.step ?? "");
+            } else if (event.phase === "aside") {
+              if (typeof event.response === "string") {
+                hooks.onAside?.(replyFromEvent(event, event.response));
+              }
+            } else if (event.phase === "reply") {
+              const full = typeof event.response === "string" ? event.response : "";
+              reply = { ...replyFromEvent(event, full), sources: normalizeSources(event.sources) };
+              text = full;
+              settleReply();
+              settleText(full);
+            } else if (event.phase === "error") {
+              failure = new Error(event.message || "The reply failed. Please try again.");
+            }
           }
         }
       }
+    } catch (error) {
+      failure = error;
+    } finally {
+      reader.releaseLock();
     }
-  } finally {
-    reader.releaseLock();
-  }
-
-  // The server always sends both events (the text event is bounded by a
-  // server-side timeout and then carries her Japanese line). If the stream
-  // still ends early, settle what arrived and surface the missing voice
-  // phase as an error.
-  settleReply();
-  settleText(text);
-  if (!replySettled) {
-    throw new Error("The backend stream ended before the voice event");
-  }
+    // The server always sends both events (the text event is bounded by a
+    // server-side timeout and then carries her Japanese line). If the stream
+    // ends early, the English box falls back to her Japanese line, and a
+    // missing voice phase surfaces as an error.
+    settleReply();
+    settleText(text || reply?.japanese || "");
+    if (!replySettled && rejectReply) {
+      replySettled = true;
+      (rejectReply as (error: unknown) => void)(
+        failure ?? new Error("The backend stream ended before the voice event"));
+    }
+  };
+  void pump();
 
   const resolvedReply = await replyPromise;
   return { reply: resolvedReply, text: textPromise };
@@ -246,6 +353,9 @@ export type GreetingReply = {
    *  (ceremony wait-lines that do NOT finish the ceremony), "wake" |
    *  "fallback" (ceremony finished), or absent (ordinary greeting). */
   kind?: string;
+  /** A first-launch WAIT line (spoken, the ceremony goes on, the box stays
+   *  locked) - newer backends flag every such line, incl. the built-in ones. */
+  wait?: boolean;
   /** True when the user sent a message while the greeting was being
    *  written: the backend dropped the line (not an error, no retry). */
   superseded?: boolean;
@@ -266,15 +376,18 @@ async function fetchGreetingReport(
   }
   const ceremony = typeof data.ceremony === "string" ? data.ceremony : undefined;
   if (!data.ready) {
-    // A fixed first-launch wait-line (intro / trying / reminder) ships in the
+    // A fixed first-launch wait-line (intro / trying / need_name / ...) ships in the
     // report even while the model is DOWN: those lines need no model, and on a
     // fresh install the model is down until the user connects it - which is
     // exactly what the intro line teaches. Carry the line through instead of
     // dropping it (2026-10-07: the fresh-box run lost the welcome this way).
+    // Every such line counts - the backend flags them all with wait=true
+    // (2026-10-24 VM test: the new "name received" line and the built-in
+    // waiting lines were dropped here, only the three named ones passed).
     const kind = typeof data.kind === "string" ? data.kind : undefined;
+    const wait = data.wait === true;
     const isWaitLine =
-      (kind === "intro" || kind === "trying" || kind === "reminder") &&
-      typeof data.response === "string";
+      isCeremonyWaitLine(kind, wait) && typeof data.response === "string";
     if (!isWaitLine) {
       return {
         ready: false,
@@ -296,6 +409,7 @@ async function fetchGreetingReport(
         typeof data.conversation_id === "number" ? data.conversation_id : undefined,
       ceremony,
       kind,
+      wait,
     };
   }
   if (typeof data.response !== "string") {
@@ -313,14 +427,64 @@ async function fetchGreetingReport(
       typeof data.conversation_id === "number" ? data.conversation_id : undefined,
     ceremony,
     kind: typeof data.kind === "string" ? data.kind : undefined,
+    wait: data.wait === true,
   };
 }
 
-export async function getGreeting(justSaved = false): Promise<GreetingReply> {
+export async function getGreeting(justSaved = false, restarted = false): Promise<GreetingReply> {
   // just_saved tells the backend the user JUST saved connection settings
   // (a fresh attempt: re-say "checking the line", restart its reminder
-  // clock) - the 30 s probes send nothing.
-  return fetchGreetingReport(`${API_BASE}/greet`, justSaved ? { just_saved: true } : {});
+  // clock) - the 30 s probes send nothing. restarted: the page reloaded
+  // after a restart from Settings, so she says she is back.
+  return fetchGreetingReport(`${API_BASE}/greet`, {
+    ...(justSaved ? { just_saved: true } : {}),
+    ...(restarted ? { restarted: true } : {}),
+  });
+}
+
+// Settings -> System (2026-11-01): her parts' live state and the restart.
+export type PartState =
+  "ready" | "offline" | "waiting" | "stopping" | "starting" | "failed" | "off";
+
+export type RestartStatus = {
+  state: "requested" | "running" | "done" | "partial" | "failed";
+  started: number;
+  finished: number | null;
+  message: string;
+  parts: Record<"brain" | "voice" | "memory", PartState>;
+};
+
+export type SystemStatus = {
+  launcher: boolean;
+  /** The launcher can shut everything down (Quit on the PC). */
+  shutdown?: boolean;
+  parts: Record<"brain" | "voice" | "memory", PartState>;
+  restart: RestartStatus | null;
+};
+
+export async function getSystemStatus(): Promise<SystemStatus> {
+  const data = await parseResponse(await fetch(`${API_BASE}/system/status`, { cache: "no-store" }));
+  if (typeof data.launcher !== "boolean" || typeof data.parts !== "object" || !data.parts) {
+    throw new Error("Backend returned an invalid status report");
+  }
+  return data as SystemStatus;
+}
+
+export async function requestRestart(): Promise<RestartStatus> {
+  const data = await parseResponse(await fetch(`${API_BASE}/system/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  }));
+  return data.restart as RestartStatus;
+}
+
+export async function requestShutdown(): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/system/shutdown`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  }));
 }
 
 // "I'm here": the window is visible. Feeds her "last seen" (a greeting
@@ -356,6 +520,11 @@ export async function getConversationGreeting(
   );
 }
 
+// The user poked her (the Poke button or a tap on her shoulders): she starts
+// talking in that tab. Same report shape as a greeting.
+export async function pokeConversation(id: number): Promise<GreetingReply> {
+  return fetchGreetingReport(`${API_BASE}/conversations/${id}/poke`, {});
+}
 
 export async function getMemory(): Promise<MemoryMessage[]> {
   const response = await fetch(`${API_BASE}/getMemory`, {
@@ -366,7 +535,10 @@ export async function getMemory(): Promise<MemoryMessage[]> {
   });
 
   const data = await parseResponse(response);
-  return data.messages ?? [];
+  const messages: MemoryMessage[] = Array.isArray(data.messages) ? data.messages : [];
+  return messages.map((m) =>
+    m.sources === undefined ? m : { ...m, sources: normalizeSources(m.sources) }
+  );
 }
 
 export async function resetMemory(conversationId?: number): Promise<void> {
@@ -416,17 +588,43 @@ export async function setWebAccess(enabled: boolean): Promise<void> {
   }));
 }
 
-export async function getDeepThinking(): Promise<boolean> {
-  const data = await parseResponse(await fetch(`${API_BASE}/getDeepThinking`, { cache: "no-store" }));
-  if (typeof data.enabled !== "boolean") throw new Error("Could not read deep thinking state");
-  return data.enabled;
+/** How she reads pages after a search: "thorough" (reader mode, default) or
+ *  "quick"; `effective` is what is used right now ("quick" on a model server
+ *  that runs one task at a time) and `reason` says why, for Settings. */
+export type WebReading = { mode: "thorough" | "quick"; effective: string; reason: string };
+
+export async function getWebReading(): Promise<WebReading> {
+  const data = await parseResponse(await fetch(`${API_BASE}/webReading`, { cache: "no-store" }));
+  if (data.mode !== "thorough" && data.mode !== "quick") throw new Error("Could not read the web reading setting");
+  return { mode: data.mode, effective: String(data.effective ?? ""), reason: String(data.reason ?? "") };
 }
 
-export async function setDeepThinking(enabled: boolean): Promise<void> {
-  await parseResponse(await fetch(`${API_BASE}/setDeepThinking`, {
+export async function setWebReading(mode: "thorough" | "quick"): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/webReading`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify({ mode }),
+  }));
+}
+
+export type ReasoningLevel = "off" | "low" | "medium" | "high";
+export type ReasoningKey = "replies_builtin" | "replies_custom" | "translations";
+export type ReasoningInfo = Record<ReasoningKey, ReasoningLevel> & {
+  /** Which brain is active: her replies' level is the one for this brain. */
+  mode: "builtin" | "custom";
+  custom_is_cloud: boolean;
+};
+
+// Settings -> Connection -> Reasoning (replaced the Deep thinking switch).
+export async function getReasoning(): Promise<ReasoningInfo> {
+  return await parseResponse(await fetch(`${API_BASE}/reasoning`, { cache: "no-store" }));
+}
+
+export async function setReasoning(levels: Partial<Record<ReasoningKey, ReasoningLevel>>): Promise<ReasoningInfo> {
+  return await parseResponse(await fetch(`${API_BASE}/reasoning`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(levels),
   }));
 }
 
@@ -492,8 +690,12 @@ export async function undoLastReply(): Promise<UndoResult | null> {
   };
 }
 
-export async function regenerate(): Promise<MessageReply> {
+export async function regenerate(hooks: StreamHooks = {}): Promise<MessageReply> {
   const response = await fetch(`${API_BASE}/regenerate`, { method: "POST" });
+  // Web ON: the same live stream as a new reply (status steps, then "reply").
+  if ((response.headers.get("content-type") || "").toLowerCase().includes("text/event-stream")) {
+    return (await readVoiceFirstStream(response, hooks)).reply;
+  }
   const data = await parseResponse(response);
   if (typeof data.response !== "string") throw new Error("Backend returned an invalid response");
   return {
@@ -526,6 +728,22 @@ export async function regenerateMessageVoice(messageId: number): Promise<string>
   return data.audio_url;
 }
 
+/** Replay one of her lines: its saved clip when there is one (audioUrl),
+ *  else a stream of the same line (speechUrl) - first sound in seconds,
+ *  and kept as the clip when heard to the end (2026-10-24). */
+export async function speakMessage(
+  messageId: number,
+): Promise<{ audioUrl?: string; speechUrl?: string }> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/memory/${messageId}/speak`, { method: "POST" })
+  );
+  if (typeof data.audio_url === "string") return { audioUrl: data.audio_url };
+  if (typeof data.speech_id === "string") {
+    return { speechUrl: `${API_BASE}/speech/${encodeURIComponent(data.speech_id)}` };
+  }
+  throw new Error("Could not replay the voice line");
+}
+
 export async function getVoiceRetention(): Promise<number> {
   const data = await parseResponse(await fetch(`${API_BASE}/getVoiceRetention`, { cache: "no-store" }));
   return typeof data.limit === "number" ? data.limit : 100;
@@ -543,8 +761,25 @@ export async function setVoiceRetention(limit: number): Promise<number> {
 }
 
 export async function getContextBudget(): Promise<number> {
+  return (await getContextBudgetInfo()).budget;
+}
+
+export type ContextBudgetInfo = {
+  /** The number Settings shows: the built-in model's own, or the custom model's. */
+  budget: number;
+  /** The most the built-in model's context holds (null = custom mode, no cap). */
+  builtinCap: number | null;
+  /** What a fresh install starts with (the built-in model: this PC's tier). */
+  defaultBudget: number;
+};
+
+export async function getContextBudgetInfo(): Promise<ContextBudgetInfo> {
   const data = await parseResponse(await fetch(`${API_BASE}/getContextBudget`, { cache: "no-store" }));
-  return typeof data.budget === "number" ? data.budget : 40000;
+  return {
+    budget: typeof data.budget === "number" ? data.budget : 40000,
+    builtinCap: typeof data.builtin_cap === "number" ? data.builtin_cap : null,
+    defaultBudget: typeof data.default === "number" ? data.default : 40000,
+  };
 }
 
 export async function setContextBudget(budget: number): Promise<number> {
@@ -607,7 +842,148 @@ export type ConnectionStatus = {
   loading?: boolean;
   /** Is the voice engine answering? undefined from older backends. */
   voice_reachable?: boolean;
+  /** She thinks with the built-in model (installer option A). */
+  builtin?: boolean;
+  /** Built-in mode, but its model / llama.cpp is not on disk. */
+  builtin_model_missing?: boolean;
+  /** Her built-in model's server, run by the app: "unloaded" | "loading" | "loaded" | "failed". */
+  builtin_state?: BuiltinServerState | null;
 };
+
+/** How she thinks: the built-in model the installer set up, or the user's
+ *  own / a cloud model ("custom"). */
+export type BrainMode = {
+  /** The installer set a built-in model up on this install (option A). */
+  available: boolean;
+  mode: "builtin" | "custom";
+  model_label: string;
+  model_missing: boolean;
+  /** llama.cpp itself is missing (not only a model file). */
+  runner_missing: boolean;
+  context: number | null;
+  /** Only after a switch: the change fully applies after a restart. */
+  restart_needed?: boolean;
+};
+
+function toBrainMode(data: Record<string, unknown>): BrainMode {
+  return {
+    available: data.available === true,
+    mode: data.mode === "builtin" ? "builtin" : "custom",
+    model_label: typeof data.model_label === "string" ? data.model_label : "",
+    model_missing: data.model_missing === true,
+    runner_missing: data.runner_missing === true,
+    context: typeof data.context === "number" ? data.context : null,
+    restart_needed: data.restart_needed === true,
+  };
+}
+
+export async function getBrainMode(): Promise<BrainMode> {
+  return toBrainMode(await parseResponse(await fetch(`${API_BASE}/brainMode`, { cache: "no-store" })));
+}
+
+export async function setBrainMode(mode: "builtin" | "custom"): Promise<BrainMode> {
+  return toBrainMode(
+    await parseResponse(
+      await fetch(`${API_BASE}/setBrainMode`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      })
+    )
+  );
+}
+
+// ---- Her built-in model's server (Settings -> Connection -> Built-in) --------
+export type BuiltinServerState = "unloaded" | "loading" | "loaded" | "failed";
+
+export type BuiltinModel = {
+  state: BuiltinServerState;
+  /** The file it runs (or tried to). */
+  file: string;
+  /** Why it could not load (state "failed"). */
+  error: string;
+  /** She runs with her vision file (can see pictures); why not when false. */
+  pictures: boolean;
+  /** Where her pictures are read: "card" / "processor" ("" without pictures). */
+  picturesWhere: string;
+  picturesNote: string;
+  /** Every chat-model GGUF in her models folder. */
+  files: { file: string; name: string; gb: number }[];
+  /** The file she loads by default (the one last loaded fine). */
+  selected: string;
+  folder: string;
+  /** "Get more models": the official files, with browser download links. */
+  catalog: CatalogModel[];
+};
+
+export type CatalogModel = {
+  key: string;
+  label: string;
+  file: string;
+  gb: number;
+  url: string;
+  installed: boolean;
+  /** Compared with the model the installer picked for this PC. */
+  fit: "recommended" | "smaller" | "bigger" | "";
+};
+
+function toBuiltinModel(data: Record<string, unknown>): BuiltinModel {
+  const server = (data.server ?? {}) as Record<string, unknown>;
+  const state = server.state;
+  return {
+    state: state === "loading" || state === "loaded" || state === "failed" ? state : "unloaded",
+    file: typeof server.file === "string" ? server.file : "",
+    error: typeof server.error === "string" ? server.error : "",
+    pictures: server.pictures === true,
+    picturesWhere: typeof server.pictures_where === "string" ? server.pictures_where : "",
+    picturesNote: typeof server.pictures_note === "string" ? server.pictures_note : "",
+    files: Array.isArray(data.files)
+      ? (data.files as Record<string, unknown>[])
+          .filter((f) => typeof f.name === "string")
+          .map((f) => ({ file: String(f.file ?? ""), name: String(f.name), gb: Number(f.gb) || 0 }))
+      : [],
+    selected: typeof data.selected === "string" ? data.selected : "",
+    folder: typeof data.folder === "string" ? data.folder : "",
+    catalog: Array.isArray(data.catalog)
+      ? (data.catalog as Record<string, unknown>[])
+          .filter((m) => typeof m.file === "string" && typeof m.url === "string")
+          .map((m) => ({
+            key: String(m.key ?? ""),
+            label: String(m.label ?? m.file),
+            file: String(m.file),
+            gb: Number(m.gb) || 0,
+            url: String(m.url),
+            installed: m.installed === true,
+            fit: m.fit === "recommended" || m.fit === "smaller" || m.fit === "bigger" ? m.fit : "",
+          }))
+      : [],
+  };
+}
+
+export async function getBuiltinModel(): Promise<BuiltinModel> {
+  return toBuiltinModel(await parseResponse(await fetch(`${API_BASE}/builtinModel`, { cache: "no-store" })));
+}
+
+/** Load (or switch to) a model file from her models folder; it loads in the background. */
+export async function loadBuiltinModel(name: string): Promise<void> {
+  await parseResponse(
+    await fetch(`${API_BASE}/builtinModel/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: name }),
+    })
+  );
+}
+
+/** Open her models folder in Explorer / Finder. */
+export async function openModelsFolder(): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/builtinModel/openFolder`, { method: "POST" }));
+}
+
+/** Stop her model and free its graphics memory. */
+export async function unloadBuiltinModel(): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/builtinModel/unload`, { method: "POST" }));
+}
 
 export async function getLLMServer(): Promise<string> {
   const data = await parseResponse(await fetch(`${API_BASE}/getLLMServer`, { cache: "no-store" }));
@@ -678,6 +1054,35 @@ export async function setUserProfile(profile: UserProfile): Promise<UserProfile>
     })
   );
   return userProfile(data, profile);
+}
+
+/** Settings -> Preferences -> Names she knows: how a name is written in her
+ *  Japanese line (and said by her voice, and spelled in the English line). */
+export type NameEntry = { word: string; reading: string };
+
+function nameEntries(data: Record<string, unknown>): NameEntry[] {
+  const rows = Array.isArray(data.names) ? data.names : [];
+  return rows
+    .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+    .map((r) => ({
+      word: typeof r.word === "string" ? r.word : "",
+      reading: typeof r.reading === "string" ? r.reading : "",
+    }));
+}
+
+export async function getNames(): Promise<NameEntry[]> {
+  return nameEntries(await parseResponse(await fetch(`${API_BASE}/getNames`, { cache: "no-store" })));
+}
+
+export async function setNames(names: NameEntry[]): Promise<NameEntry[]> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/setNames`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names }),
+    })
+  );
+  return nameEntries(data);
 }
 
 /** A suggested reading for a name as typed (not saved yet); saves nothing.
@@ -765,6 +1170,7 @@ export type StatInfo = {
   value: number;
   min: number;
   max: number;
+  scale?: number; // what Settings shows it "out of" (trust: 100, though max is 110)
   description?: string;
   tier?: string;
 };
@@ -772,4 +1178,29 @@ export type StatInfo = {
 export async function getStats(): Promise<StatInfo[]> {
   const data = await parseResponse(await fetch(`${API_BASE}/stats`, { cache: "no-store" }));
   return Array.isArray(data.stats) ? data.stats : [];
+}
+
+export type Concern = {
+  index: number;
+  text: string;
+  status: "open" | "quiet" | "done";
+  added: string | null;
+  due: string | null;
+  done: string | null;
+};
+
+export type Mood = { feelings: string[]; concerns: Concern[] };
+
+// Settings -> Personality & mood: her mood right now (plain words) and the
+// things on her mind about you.
+export async function getMood(): Promise<Mood> {
+  const data = await parseResponse(await fetch(`${API_BASE}/mood`, { cache: "no-store" }));
+  return {
+    feelings: Array.isArray(data.feelings) ? data.feelings : [],
+    concerns: Array.isArray(data.concerns) ? data.concerns : [],
+  };
+}
+
+export async function deleteConcern(index: number): Promise<void> {
+  await parseResponse(await fetch(`${API_BASE}/concerns/${index}`, { method: "DELETE" }));
 }

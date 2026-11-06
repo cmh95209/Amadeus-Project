@@ -155,17 +155,24 @@ class WiringTests(unittest.TestCase):
     RESULTS = ("1. Top page\nsome snippet\nURL: https://example.com/a\n\n"
                "2. Second page\nanother snippet\nURL: https://example.com/b")
 
+    # Since 2026-10-25 the pages are read by webreader (quick mode here; reader
+    # mode is covered in test_websearch.py).
+    QUICK = ("quick", 0, None, True)
+
     def test_appends_fetched_content(self):
+        page = {"status": "ok", "text": "The real numbers: 31.7 C, AQI 142.", "title": "Top",
+                "published": "", "updated": "", "title_month": ""}
         with patch.object(chat, "_run_web_search", return_value=self.RESULTS), \
-             patch.object(webfetch, "fetch_page_text",
-                          return_value=("ok", "The real numbers: 31.7 C, AQI 142.")):
+             patch.object(chat, "web_reading_plan", return_value=self.QUICK), \
+             patch.object(webfetch, "fetch_page", return_value=page):
             out = chat._web_search_with_content("Springfield weather")
         self.assertIn("Top page", out)                 # snippets preserved
         self.assertIn("The real numbers: 31.7 C", out)  # fetched content appended
 
     def test_falls_back_to_snippets_when_walled(self):
         with patch.object(chat, "_run_web_search", return_value=self.RESULTS), \
-             patch.object(webfetch, "fetch_page_text", return_value=("blocked", "")):
+             patch.object(chat, "web_reading_plan", return_value=self.QUICK), \
+             patch.object(webfetch, "fetch_page", return_value={"status": "blocked"}):
             out = chat._web_search_with_content("Springfield weather")
         self.assertEqual(out, self.RESULTS)  # plain snippets, unchanged
 

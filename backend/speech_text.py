@@ -175,6 +175,24 @@ def _swap_name(text: str, name: str, reading: str) -> str:
     return text.replace(name, reading)
 
 
+# --- Japanese words the engine's dictionary misreads (2026-10-26) -------------
+# pyopenjtalk splits 言ってね / 言って。 at the start of a phrase (or after
+# ちゃんと, 時々, ...) into the noun 言 (ゲン) + the quote particle って:
+# "ゲンッテネ". Writing the verb in kana gives the right イッテネ. Skipped
+# when a kanji comes right before 言, so compounds keep their reading
+# (発言って = ハツゲンッテ); 々 is a repeat mark, not a word part, so 時々言って
+# is still fixed. Runs on every line, Japanese-only ones included.
+_MISREAD = [
+    (re.compile(r"(?<![㐀-䶿一-鿿豈-﫿])言って"), "いって"),
+]
+
+
+def _fix_misreadings(text: str) -> str:
+    for pattern, spoken in _MISREAD:
+        text = pattern.sub(spoken, text)
+    return text
+
+
 # --- layer 3: English words (2026-10-17) --------------------------------------
 # Order: the user's pronunciation list, then the built-in one (exact, whole
 # words, case-insensitive) -> ALL-CAPS acronyms spelled the Japanese way
@@ -253,6 +271,137 @@ def _pronunciations() -> dict:
     return merged
 
 
+# ---------- an English sentence, or a name / title? (2026-10-24) ----------
+# Her Japanese line may carry a product name or a title in Latin letters
+# ("iPhone 18 Pro Max", 『My First Cookie Book』) - those stay on screen and her
+# voice says them in katakana. Only real English sentences (a leaked
+# translation) are removed from the line and left out of her voice.
+_FUNCTION_WORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "am", "to", "of",
+    "and", "or", "but", "in", "on", "at", "for", "with", "from", "by", "as",
+    "it", "its", "it's", "this", "that", "these", "those", "i", "i'm", "you",
+    "you're", "your", "we", "they", "he", "she", "my", "me", "our", "their",
+    "do", "does", "did", "not", "so", "if", "what", "how", "can", "will",
+    "just", "have", "has", "there", "here", "about", "like", "very",
+}
+_QUOTED = re.compile(r"『[^』]*』|「[^」]*」|“[^”]*”|【[^】]*】")
+
+
+def is_english_sentence(run: str) -> bool:
+    """True for English prose (40+ letters, or 3+ words with an everyday
+    word such as "the" / "is" / "you"); False for a name or a title."""
+    words = re.findall(r"[A-Za-z][A-Za-z']*", run)
+    if sum(len(w) for w in words) >= 40:
+        return True
+    return len(words) >= 3 and any(w.lower() in _FUNCTION_WORDS for w in words)
+
+
+def quoted_spans(text: str) -> list:
+    """(start, end) of every 『…』「…」“…”【…】 in the text - a title inside
+    Japanese quotes is never a leaked sentence."""
+    return [m.span() for m in _QUOTED.finditer(text or "")]
+
+
+def keeps_latin_run(text: str, start: int, run: str) -> bool:
+    """Whether a Latin run in her Japanese line is a name or title to keep."""
+    if any(a <= start < b for a, b in quoted_spans(text)):
+        return sum(c.isalpha() for c in run) <= 60
+    return not is_english_sentence(run)
+
+
+# ---------- the shared name list (option C, 2026-10-22) ----------
+# The same list also keeps her written line and the English line consistent:
+# Settings -> "Names she knows" edits the user's entries; her prompt asks for
+# them in katakana (ja_voice), a listed word still in Latin letters in her
+# Japanese line is swapped (swap_listed_words), and the translator is told
+# the English spelling of the listed names her line contains (names_in).
+
+def _read_pairs(path: str) -> list:
+    """[(word, kana)] in file order, the word as typed."""
+    pairs = []
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                word, reading = (part.strip() for part in line.split("=", 1))
+                if word and is_kana(reading):
+                    pairs.append((word, reading))
+    except OSError:
+        pass
+    return pairs
+
+
+def load_user_names() -> list:
+    """The user's own entries, [(word, kana)]."""
+    _ensure_user_list()
+    return _read_pairs(USER_LIST)
+
+
+def save_user_names(pairs) -> list:
+    """Replace the user's entries; the comment lines at the top are kept.
+    Pairs with an empty word, a word holding '=' or a line break, or a
+    reading that is not kana are dropped. Returns what was saved."""
+    clean, seen = [], set()
+    for word, reading in pairs:
+        word, reading = (word or "").strip(), (reading or "").strip()
+        if (not word or "=" in word or "\n" in word or not is_kana(reading)
+                or word.casefold() in seen):
+            continue
+        seen.add(word.casefold())
+        clean.append((word, reading))
+    _ensure_user_list()
+    header = []
+    try:
+        with open(USER_LIST, encoding="utf-8-sig") as f:
+            for line in f:
+                if not line.strip().startswith("#"):
+                    break
+                header.append(line.rstrip("\n"))
+    except OSError:
+        header = _USER_LIST_TEMPLATE.rstrip("\n").split("\n")
+    with open(USER_LIST, "w", encoding="utf-8") as f:
+        f.write("\n".join(header + [f"{w} = {r}" for w, r in clean]) + "\n")
+    return clean
+
+
+def swap_listed_words(text: str) -> str:
+    """Her written Japanese line: every listed word still in Latin letters
+    becomes its katakana (exact whole words, any case). A run of 3+ English
+    words (a quoted phrase) is left alone, the same rule the voice uses."""
+    if not text or not re.search(r"[A-Za-z]", text):
+        return text
+    entries = _pronunciations()
+    if not entries:
+        return text
+    out, last = [], 0
+    for m in _PHRASE.finditer(text):
+        if not is_english_sentence(m.group(0)):
+            continue  # a name or title: its listed words are swapped too
+        out.append(_apply_list(text[last:m.start()], entries))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_apply_list(text[last:], entries))
+    return "".join(out)
+
+
+def names_in(text: str) -> list:
+    """[(word, kana)] for the listed readings her Japanese line contains, the
+    user's entries first (one English spelling per reading)."""
+    if not text:
+        return []
+    found, seen = [], set()
+    for word, reading in load_user_names() + _read_pairs(DEFAULT_LIST):
+        # A whole katakana word only: クリス, not the start of クリスマス.
+        if reading in seen or not re.search(
+                r"(?<![ァ-ヺー])" + re.escape(reading) + r"(?![ァ-ヺー])", text):
+            continue
+        seen.add(reading)
+        found.append((word, reading))
+    return found
+
+
 def _apply_list(text: str, entries: dict) -> str:
     if not entries:
         return text
@@ -301,7 +450,13 @@ def _english_to_kana(text: str) -> str:
     if not re.search(r"[A-Za-z]", text):
         return text
     text = _apply_list(text, _pronunciations())
-    protected = [m.span() for m in _PHRASE.finditer(text)]
+    # Only unquoted English prose stays as it is (the chat cleaning drops it
+    # from her line); a name or title of 3+ words, or anything she quotes
+    # (iPhone 18 Pro Max, 『My First Cookie Book』), is said in katakana.
+    quoted = quoted_spans(text)
+    protected = [m.span() for m in _PHRASE.finditer(text)
+                 if is_english_sentence(m.group(0))
+                 and not any(a <= m.start() < b for a, b in quoted)]
 
     def _repl(m):
         start = m.start()
@@ -326,6 +481,49 @@ def _english_to_kana(text: str) -> str:
     return re.sub(r"(?<=[ァ-ヺー])-(?=\d)", "", text)
 
 
+# --- web addresses (2026-10-26) ---------------------------------------------
+# A link in her reply is for the screen (it is clickable there); read aloud it
+# would be spelled out letter by letter. [label](address) keeps its label.
+WEB_LINK_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.)[^\s<>\"'`「」『』【】（）〈〉《》、。，！？・\u3000]+")
+_MD_LINK_RE = re.compile(r"\[([^\]\n]{1,200})\]\(\s*((?:https?://|www\.)[^\s)]+)\s*\)", re.I)
+_LINK_TRAILING = ".,;:!?'\"*_~"
+
+
+def link_spans(text: str) -> list:
+    """(start, end) of each web address in the text, without punctuation
+    stuck to its end and without a closing bracket that is not part of it
+    (the same trimming as the link reader's weblinks._trim)."""
+    spans = []
+    for m in WEB_LINK_RE.finditer(text or ""):
+        link = m.group(0)
+        while link:
+            last = link[-1]
+            if last in _LINK_TRAILING:
+                link = link[:-1]
+            elif last in ")]}" and link.count({")": "(", "]": "[", "}": "{"}[last]) < link.count(last):
+                link = link[:-1]
+            else:
+                break
+        if link:
+            spans.append((m.start(), m.start() + len(link)))
+    return spans
+
+
+def drop_links(text: str) -> str:
+    """The text with its web addresses left out (a [label](address) link
+    keeps its label) - for the voice only."""
+    if not text or not WEB_LINK_RE.search(text):
+        return text
+    t = _MD_LINK_RE.sub(r"\1", text)
+    for start, end in reversed(link_spans(t)):
+        t = t[:start] + t[end:]
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"[（(]\s*[）)]", "", t)               # brackets left empty
+    t = re.sub(r"[：:]\s*(?=[、。！？\n]|$)", "", t)   # "見て：" with nothing after it
+    t = re.sub(r"[ \t]+(?=[、。！？\n]|$)", "", t)
+    return t.strip()
+
+
 def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
     """Rewrite text into the form the voice engine reads naturally:
     the user's name -> its saved reading, English words -> katakana, then
@@ -333,7 +531,7 @@ def to_spoken(text: str, name: str = "", name_reading: str = "") -> str:
     back unchanged."""
     if not text:
         return text
-    swapped = _swap_name(text, name, name_reading)
+    swapped = _fix_misreadings(_swap_name(drop_links(text), name, name_reading))
     normalized = _normalize(swapped)
     t = _english_to_kana(normalized.replace("PM2.5", PM25_SPOKEN))
     if not re.search(r"\d", t):

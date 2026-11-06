@@ -1,0 +1,58 @@
+{
+  "version": 5,
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it and loaded with the model so she can see pictures (2026-10-26: under 16 GB it runs on the processor; vram_need_gb includes the picture working space: +0.1 GB under 16 GB, +0.5 GB on 16 GB+).",
+  "dedicated_card_min_gb": 2,
+  "voice_on_cpu_min_ram_gb": 16,
+  "disk_headroom_gb": 2,
+  "models": {
+    "12B": {
+      "label": "Gemma 4 12B (QAT)",
+      "repo": "unsloth/gemma-4-12b-it-qat-GGUF",
+      "revision": "980b060c40a8539ac159e0501a3e0f66a6365af3",
+      "file": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+      "bytes": 6716356800,
+      "sha256": "90fd44e29e0d7cffeb0fd00dc73cfdab9ed0b0e95306ecf7821ea634c940c370",
+      "mmproj": {"file": "mmproj-F16.gguf", "save_as": "gemma-4-12B-it-qat-mmproj-F16.gguf", "bytes": 175115840, "sha256": "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3"}
+    },
+    "12B-Q3": {
+      "label": "Gemma 4 12B (3-bit, for 8 GB cards)",
+      "repo": "unsloth/gemma-4-12b-it-GGUF",
+      "revision": "fc034cfff751157913579611efad8462ac1be606",
+      "file": "gemma-4-12b-it-Q3_K_M.gguf",
+      "bytes": 5693872960,
+      "sha256": "dbf58f4c413b82b27106867eb42f7087e4172a172f6f201e2e11598a6582e504",
+      "mmproj": {"file": "mmproj-F16.gguf", "save_as": "gemma-4-12b-it-mmproj-F16.gguf", "bytes": 175115840, "sha256": "91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e"}
+    }
+  },
+  "llama_cpp": {
+    "release": "b11400",
+    "builds": {
+      "cuda-13.4": {
+        "min_nvidia_driver": 580,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-13.4-x64.zip", "bytes": 153112447, "sha256": "872175bf23819d3a72a2bfc54aa21d750f0e020a586d1a6eed79cae585d1d23a"},
+          {"name": "cudart-llama-bin-win-cuda-13.4-x64.zip", "bytes": 423535356, "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"}
+        ]
+      },
+      "cuda-12.4": {
+        "min_nvidia_driver": 525,
+        "files": [
+          {"name": "llama-b11400-bin-win-cuda-12.4-x64.zip", "bytes": 264160281, "sha256": "b5c185b6b0a87c875a468ff920e20bfcdb82c0a9a7b219cd52c937d461f35d53"},
+          {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}
+        ]
+      },
+      "vulkan": {
+        "files": [
+          {"name": "llama-b11400-bin-win-vulkan-x64.zip", "bytes": 33307867, "sha256": "77a5b9ad8f3ab34c9f600e60a04136574e5510ac7f93912e6600d616bbaf8ac1"}
+        ]
+      }
+    }
+  },
+  "tiers": [
+    {"id": "6-7",      "min_vram_gb": 6,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 4.6,  "warning": true},
+    {"id": "8-11",     "min_vram_gb": 8,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 6.5,  "warning": false},
+    {"id": "12-15",    "min_vram_gb": 12, "model": "12B",     "context": 24576, "kv_cache": "q8_0", "voice_device": "cuda", "history_default": 14000, "vram_need_gb": 9.6,  "warning": false},
+    {"id": "16-23",    "min_vram_gb": 16, "model": "12B",     "context": 32768, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 22000, "vram_need_gb": 11.0, "warning": false},
+    {"id": "24-plus",  "min_vram_gb": 24, "model": "12B",     "context": 49152, "kv_cache": "f16",  "voice_device": "cuda", "history_default": 32000, "vram_need_gb": 11.5, "warning": false}
+  ]
+}

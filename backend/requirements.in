@@ -7,6 +7,11 @@ langchain
 langchain-openai
 pydantic
 ddgs
+# Pictures the user attaches (check, shrink, strip location data)
+pillow
+# Documents the user attaches (PDF, Word .docx)
+pypdf
+python-docx
 
 # Voice client
 gradio_client

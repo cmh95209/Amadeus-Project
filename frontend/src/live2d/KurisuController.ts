@@ -210,6 +210,16 @@ export class KurisuController {
     if (!this.destroyed) this.model?.setLipSyncValue(value);
   }
 
+  setLooking(looking: boolean): void {
+    if (!this.destroyed) this.model?.setLooking(looking);
+  }
+
+  /** Android may take the graphics memory back while the app is in the
+   *  background; the drawing area then stays blank for good. */
+  isContextLost(): boolean {
+    return !!this.gl?.isContextLost();
+  }
+
   destroy(): void {
     this.destroyed = true;
 
