@@ -6,7 +6,7 @@ Everything Amadeus can do today.
 The current version (v3.0) includes:
 
 - **Her own built-in local model** (v3.0): Gemma 4 through llama.cpp, set up by
-  the installer to fit your graphics card - no account or API key needed
+  the Windows installer to fit your graphics card - no account or API key needed
 - **Pictures, documents and videos** (v3.0): she looks at pictures, reads PDF /
   Word / text documents (long ones with reading notes) and watches videos
   (still frames + what is said)

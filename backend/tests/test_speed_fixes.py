@@ -111,7 +111,11 @@ class OutputCapTests(unittest.TestCase):
     def test_builtin_cap_is_lower(self):
         self.assertLess(llm.BUILTIN_MAX_TOKENS, 4096)
         llm.reset_llm()
+        # No saved Sampling settings: a user's own max_tokens (Settings ->
+        # Model Sampling) rightly wins, and the health check (check_amadeus.bat)
+        # runs these tests on the user's own install.
         with patch.object(llm, "_server_url", return_value="http://127.0.0.1:8091/v1"), \
+             patch.object(llm.memory, "load_sampling", return_value={}), \
              patch.object(llm.builtin_llm, "active", return_value=True), \
              patch.object(llm.builtin_llm, "model_name", return_value="amadeus-builtin"):
             client = llm.get_llm("", "x")

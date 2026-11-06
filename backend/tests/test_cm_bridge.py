@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import attachments
+import builtin_llm
 import cm_bridge
 import chat
 import memory as store
@@ -151,6 +152,14 @@ def _system_text(messages):
 
 class BridgeReplyPromptTests(unittest.TestCase):
     """Drive the REAL getResponsePacked with a stubbed LLM and store."""
+
+    def setUp(self):
+        # An option-A install has data/local_llm.json in "builtin" mode, and the
+        # health check (check_amadeus.bat) runs these tests there: these are
+        # about the custom-model setup, so her built-in model stays out.
+        p = mock.patch.object(builtin_llm, "load_config", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _run_reply(self, memory_block):
         sink = {}

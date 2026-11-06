@@ -149,7 +149,9 @@ HF_MARKER="s2G488k.pth"
 # The ~130 MB language-identification model her voice engine uses to tell
 # which language a line is in. Pre-downloaded so her very first line never
 # waits on a network fetch.
-LID_URL="https://storage.googleapis.com/models-research/20221103_fast_langdetect/lid.176.bin"
+# (The same address as the Windows installer: the old Google Storage copy
+# answers 404 since November 2026.)
+LID_URL="https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
 LID_DEST_REL="GPT_SoVITS/pretrained_models/fast_langdetect"
 
 NLTK_RESOURCES="averaged_perceptron_tagger_eng averaged_perceptron_tagger cmudict"
@@ -617,9 +619,25 @@ if [ -d "$PROJ/.git" ]; then
                 | grep -E '(^|/)(llm_server|llm_model|personality)\.txt$' || true)"
     stashed=""
     if [ -n "$personal" ] && git -C "$PROJ" stash push --quiet -m "amadeus-installer-personal" -- $personal; then
-        stashed="yes"
+        stashed="$(git -C "$PROJ" rev-parse --verify --quiet 'stash@{0}' || true)"
     fi
-    restore_personal() { [ -n "$stashed" ] && git -C "$PROJ" stash pop --quiet >/dev/null 2>&1 || true; }
+    # The user's own versions go back over whatever the update brought - the
+    # same rule as the Windows installer. Not 'stash pop': when a release
+    # changes the shipped personality.txt (v3.0 did), pop merged the two and
+    # left conflict markers in her personality.
+    restore_personal() {
+        [ -n "$stashed" ] || return 0
+        local f
+        for f in $personal; do
+            if git -C "$PROJ" cat-file -e "$stashed:$f" 2>/dev/null; then
+                git -C "$PROJ" show "$stashed:$f" > "$PROJ/$f"
+            fi
+        done
+        if [ "$(git -C "$PROJ" rev-parse --verify --quiet 'stash@{0}' || true)" = "$stashed" ]; then
+            git -C "$PROJ" stash drop --quiet >/dev/null 2>&1 || true
+        fi
+        stashed=""
+    }
     git -C "$PROJ" fetch --quiet origin \
         || { restore_personal; die "Could not reach the project repository." \
                "Check your internet connection, then re-run the installer."; }
@@ -906,7 +924,12 @@ log "  Voice models are in place."
 # refuses to run without its cache directory; her startup code creates it,
 # but downloading HERE means her very first line never waits on the network.)
 LID_FILE="$PRETRAINED/$LID_DEST_REL/lid.176.bin"
+LID_BYTES=131266198   # the published size (the Windows installer checks the same file)
 mkdir -p "$PRETRAINED/$LID_DEST_REL"
+# A download cut off half-way used to stay as "already present" for good.
+if [ -f "$LID_FILE" ] && [ "$(stat -f %z "$LID_FILE" 2>/dev/null || echo 0)" != "$LID_BYTES" ]; then
+    rm -f "$LID_FILE"
+fi
 if [ -f "$LID_FILE" ]; then
     log "  Voice language model already present."
 else
@@ -923,9 +946,12 @@ with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as out:
             break
         out.write(chunk)
 '
-    if run_in_env "GPTSoVits" "$lid_code" "$LID_FILE" "$LID_URL" >/dev/null 2>&1 && [ -s "$LID_FILE" ]; then
+    if run_in_env "GPTSoVits" "$lid_code" "$LID_FILE.part" "$LID_URL" >/dev/null 2>&1 \
+        && [ "$(stat -f %z "$LID_FILE.part" 2>/dev/null || echo 0)" = "$LID_BYTES" ]; then
+        mv -f "$LID_FILE.part" "$LID_FILE"
         log "  Voice language model pre-downloaded."
     else
+        rm -f "$LID_FILE.part"
         log "  WARNING: could not pre-download the voice language model right now."
         log "  (If she is offline at first start, her voice will retry the download automatically.)"
     fi
@@ -999,9 +1025,6 @@ log "     your model. Pick your model from the chips (or type its name)"
 log "     and paste its API key, if your provider has one."
 log "     On a Mac, good choices: a cloud service (OpenRouter, OpenAI...)"
 log "     or a local model server like Ollama, LM Studio or llama.cpp."
-log ""
-log "  Note: her long-term memory is set up on the very first start (a few"
-log "  minutes, one time - she works fine while it finishes in the background)."
 log ""
 log "(Install log saved to: $INSTALL_LOG)"
 

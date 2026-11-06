@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import cm_bridge
+import builtin_llm
 import memory as store
 
 
@@ -64,6 +65,12 @@ class _TestBase(unittest.TestCase):
         self._active = patch.object(store, "load_active_conversation",
                                     return_value=1)
         self._active.start()
+        # An option-A install has data/local_llm.json in "builtin" mode, and the
+        # health check (check_amadeus.bat) runs these tests there: the window
+        # rules here are the custom-model ones, so her built-in model stays out.
+        self._no_builtin = patch.object(builtin_llm, "load_config", return_value=None)
+        self._no_builtin.start()
+        self.addCleanup(self._no_builtin.stop)
         self._prev_merger = store._summary_merger
         store.set_summary_merger(None)
         self._reset_worker_state()

@@ -38,14 +38,24 @@ OFF_COMMANDS = (
 # certificates) are allowed on the account, and prints the page that does it.
 _CHANGE_TIMEOUT = 20
 _ENABLE_LINK_RE = re.compile(r"https://login\.tailscale\.com/\S+")
-# The Mac app keeps its command line inside the app.
+# Where Tailscale puts its command line when it is not on this process's
+# PATH: inside the Mac app, and Windows' Program Files (Tailscale installed
+# while Amadeus was already running is on no PATH she has).
 _MAC_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+
+def _known_places() -> list[str]:
+    places = [_MAC_CLI]
+    for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432"), r"C:\Program Files"):
+        if root:
+            places.append(os.path.join(root, "Tailscale", "tailscale.exe"))
+    return places
 
 
 def _exe() -> str | None:
     found = shutil.which("tailscale")
-    if found is None and os.path.exists(_MAC_CLI):
-        found = _MAC_CLI
+    if found is None:
+        found = next((p for p in _known_places() if os.path.isfile(p)), None)
     return found
 
 

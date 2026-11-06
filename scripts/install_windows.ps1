@@ -1263,11 +1263,11 @@ function Install-BuiltinLlm($proj, $choice){
         $exe = Install-LlamaWithFallback $choice; $serverOk = [bool]$exe
         try { Get-VerifiedFile (Get-HfUrl $m $m.file) $modelPath $m.bytes $m.sha256 $m.label; $modelOk = $true }
         catch { Log ("  " + $_.Exception.Message) "Red" }
-        # Her vision file (for the coming picture support - not used yet).
-        # A failed download never stops the install.
+        # Her vision file: lets her built-in model see the pictures and video
+        # frames you show her. A failed download never stops the install.
         if ($m.mmproj) {
             try { Get-VerifiedFile (Get-HfUrl $m $m.mmproj.file) (Join-Path $ModelsDir $m.mmproj.save_as) $m.mmproj.bytes $m.mmproj.sha256 ($m.label + " - vision file") }
-            catch { Log ("  Vision file not downloaded (she works without it): " + $_.Exception.Message) "Yellow" }
+            catch { Log ("  Vision file not downloaded - she works, but cannot see pictures or videos until you run the installer again: " + $_.Exception.Message) "Yellow" }
         }
     }
     Write-LocalLlmConfig $proj $choice $exe $serverOk $modelPath $modelOk
@@ -1729,18 +1729,22 @@ try {
         Log ("  Node.js ready: " + $NodeDir) "Green"
     }
 
-    # FFmpeg (her voice engine reads audio with it): winget for this user,
-    # else the official portable build.
-    if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log "  FFmpeg already present." "Green" }
+    # FFmpeg (her voice engine reads audio with it; videos need ffmpeg AND
+    # ffprobe): winget for this user, else the official portable build. An
+    # ffmpeg another program put on the PATH without its ffprobe does not
+    # count (videos failed with it) - then Amadeus gets her own copy, which
+    # the app uses for whichever of the two is missing.
+    function Test-FfmpegPair { return [bool]((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -ErrorAction SilentlyContinue)) }
+    if (Test-FfmpegPair) { Log "  FFmpeg already present." "Green" }
     else {
-        if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
-        if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) {
+        if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and -not (Test-Path (Join-Path $FfmpegDir "bin\ffmpeg.exe"))) { Install-Pkg "FFmpeg" "Gyan.FFmpeg"; Refresh-Path }
+        if (-not (Test-FfmpegPair)) {
+            if (-not (Test-Path (Join-Path $FfmpegDir "bin\ffprobe.exe"))) {
                 Install-PortableZip "FFmpeg 9.0.2" "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" 114768076 "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba" "ffmpeg-9.0.2-essentials_build" $FfmpegDir
             }
             Refresh-Path
-            if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { Log ("  FFmpeg ready: " + $FfmpegDir) "Green" }
-            else { Log "  WARNING: FFmpeg could not be set up - her voice may not work. Run the installer again later." "Yellow" }
+            if ((Test-FfmpegPair) -or (Test-Path (Join-Path $FfmpegDir "bin\ffprobe.exe"))) { Log ("  FFmpeg ready: " + $FfmpegDir) "Green" }
+            else { Log "  WARNING: FFmpeg could not be set up - her voice may not work, and videos need it. Run the installer again later." "Yellow" }
         }
     }
 
@@ -1810,7 +1814,7 @@ try {
                 if ($current -eq $Branch -and -not $status) {
                     & git merge --ff-only "fork/$Branch" 2>$null | Out-Null
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
-                    elseif (Move-ToRewrittenHistory "fork/$Branch" $personal) { Log "  Updated to the latest version (the project's history was cleaned up)." "Green" }
+                    elseif (Move-ToRewrittenHistory "fork/$Branch" $personal) { Log "  Updated to the latest version (your own settings and personality were kept)." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
                 } elseif ($current -eq $LegacyBranch -and -not $status) {
                     # An install from an older installer (feature branch): move

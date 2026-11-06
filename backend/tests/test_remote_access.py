@@ -101,6 +101,22 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(remote_access.turn_on(), {"ok": False, "reason": "missing"})
 
 
+class FindTailscaleTests(unittest.TestCase):
+    def test_path_first_then_the_usual_install_places(self):
+        win = r"C:\Program Files\Tailscale\tailscale.exe"
+        with patch.object(remote_access.shutil, "which", return_value="/usr/bin/tailscale"):
+            self.assertEqual(remote_access._exe(), "/usr/bin/tailscale")
+        with patch.object(remote_access.shutil, "which", return_value=None), \
+             patch.object(remote_access.os.path, "isfile", side_effect=lambda p: p == win):
+            self.assertEqual(remote_access._exe(), win)
+        with patch.object(remote_access.shutil, "which", return_value=None), \
+             patch.object(remote_access.os.path, "isfile", side_effect=lambda p: p == remote_access._MAC_CLI):
+            self.assertEqual(remote_access._exe(), remote_access._MAC_CLI)
+        with patch.object(remote_access.shutil, "which", return_value=None), \
+             patch.object(remote_access.os.path, "isfile", return_value=False):
+            self.assertIsNone(remote_access._exe())
+
+
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.client = api.application.test_client()

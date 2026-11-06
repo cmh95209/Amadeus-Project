@@ -56,6 +56,14 @@ class PinnedCommitTests(unittest.TestCase):
         self.assertEqual(_win_commit(), "48b1a0169a28582a8984402f82cf438d3bfa6aca")
         self.assertEqual(_mac_commit(), _win_commit())
 
+    def test_both_installers_fetch_the_same_language_model(self):
+        # 2026-11-06: the Mac's old Google Storage address answered 404.
+        win = re.search(r'\$VoiceLidFile = @\("([^"]+)", "[^"]+", (\d+),', _WIN.read_text(encoding="utf-8"))
+        mac = _MAC.read_text(encoding="utf-8")
+        self.assertEqual(re.search(r'^LID_URL="([^"]+)"', mac, re.M).group(1), win.group(1))
+        self.assertEqual(re.search(r'^LID_BYTES=(\d+)', mac, re.M).group(1), win.group(2))
+        self.assertNotIn("storage.googleapis.com", mac)
+
 
 @unittest.skipUnless(_GIT, "git not available")
 class _FakeUpstream(unittest.TestCase):

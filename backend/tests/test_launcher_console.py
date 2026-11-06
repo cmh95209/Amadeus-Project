@@ -129,7 +129,12 @@ class ConsoleTests(unittest.TestCase):
                 calls.append(cmd)
                 self.launcher._last_tail[:] = _tail
                 return 1
+            # Without uv (the installer puts it in the app environment, and the
+            # health check runs this test there): this is about pip.
+            real_find = self.launcher.importlib.util.find_spec
+            no_uv = lambda name, *a: None if name == "uv" else real_find(name, *a)
             with self.subTest(tail=tail[0]), patch.object(self.launcher, "run_tool", side_effect=fake), \
+                    patch.object(self.launcher.importlib.util, "find_spec", side_effect=no_uv), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertFalse(self.launcher._pip_install_sidecar())
                 self.assertEqual(len(calls), expected_calls)

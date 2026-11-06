@@ -24,14 +24,32 @@ separate memory configuration.
 
 You can change all of these at any time without reinstalling anything.
 
-### Web Access, Deep Thinking, and Voice Retention
+### Her Built-in Model (Windows)
+
+When the Windows installer set up her own model (option A), she needs no
+server address or key: **Settings → Connection** shows it as **Built-in**,
+and can unload, load or switch it (for example when a game needs the
+graphics memory - or start her with `Start Amadeus without her model.bat`).
+You can switch to a cloud service or your own server there at any time.
+
+### Reasoning
+
+**Settings → Connection → Reasoning** sets how much she thinks before she
+answers (off, low, medium, high). It replaced the old "Deep thinking" switch.
+
+### Remote Access (Phone, Tablet, Other PCs)
+
+**Settings → Mobile and remote access** opens her on your own devices
+through Tailscale - step by step in [Remote access](remote-access.md).
+
+### Web Access and Voice Retention
 
 - **Web access** — a toggleable web search (Firecrawl's free keyless search,
   with DuckDuckGo-style `ddgs` as an automatic backup; no API key, no account)
   lets her verify recent events; results carry their dates so she does not
   mistake old news for new, and she reads the top result's page for real
-  content, with an optional "deep thinking" mode that enables model reasoning
-  for the search decision only. A **sources** chip under her reply opens the
+  content (she also reads links you send her). A **sources** chip under her
+  reply opens the
   pages she used. Disabled by default on fresh installs.
 - **Live weather & air quality** — keyless, from public feeds.
 - **Voice retention** — keep the last N generated voice recordings, freeing
@@ -277,15 +295,21 @@ generated speech.
 
 ## Updating Amadeus
 
-Pull the latest project changes:
+**Re-run the installer** (Windows: `Install Amadeus.bat`; Mac: the installer
+line from the README). It updates the project, adds new packages and models,
+skips what is already in place, and keeps your own files: your chats and her
+memory, your saved connection, and her personality if you edited it (Settings
+then offers the new default personality instead of overwriting yours).
+
+If you installed manually, pull the latest project changes:
 
 ```bash
 git pull origin main
 ```
 
-The simplest way to apply everything (environments, voice engine patches,
-models, frontend) is to re-run the installer one-liner for your platform — it
-is resumable and skips what is already in place. If you installed manually:
+If git refuses because your own `personality.txt`, `llm_server.txt` or
+`llm_model.txt` would be overwritten, re-run the installer instead - it
+updates around them. Then:
 
 ### Update Backend Environment
 

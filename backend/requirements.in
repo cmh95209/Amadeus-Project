@@ -7,6 +7,8 @@ langchain
 langchain-openai
 pydantic
 ddgs
+# Her voice reads English words the Japanese way (offline English->katakana)
+e2k
 # Pictures the user attaches (check, shrink, strip location data)
 pillow
 # Documents the user attaches (PDF, Word .docx)

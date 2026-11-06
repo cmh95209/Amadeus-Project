@@ -183,10 +183,10 @@ What can run remotely:
 
 - **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
 
-Since v3.0 the installer can also set up **her own built-in local model**
+Since v3.0 the Windows installer can also set up **her own built-in local model**
 (Gemma 4 through llama.cpp, picked to fit your graphics card) - choose option
 A at the start of the install. Or run a model with a server of your choice and
-point Amadeus at it.
+point Amadeus at it (on a Mac, this is the way).
 
 ---
 
@@ -205,7 +205,7 @@ Connection status + test      ✓
 Multi-session conversations   ✓
 Reply versions + undo         ✓
 Relationship (trust) stats    ✓
-Web access + deep thinking    ✓
+Web access + reasoning levels ✓
 Live weather & air quality    ✓
 Voice retention               ✓
 First-meeting ceremony        ✓
@@ -214,7 +214,7 @@ One-shot installers (Win/Mac) ✓
 Show her Japanese line        ✓
 Japanese-way voice (v2.1)     ✓ numbers, your name, English words
 About you (v2.1)              ✓ pronouns, what she calls you
-Built-in local model (v3.0)   ✓ no account needed
+Built-in local model (v3.0)   ✓ Windows, no account needed
 Pictures, documents, videos   ✓ v3.0
 Closeness levels + feelings   ✓ v3.0
 Remote access (Tailscale)     ✓ v3.0, your own devices only
@@ -238,7 +238,7 @@ The longer sections of this README live in the [docs/ folder](docs/).
 | [Project Structure](docs/architecture.md#project-structure) | What lives in each folder |
 | [Technology](docs/architecture.md#technology) | The stack behind each component |
 | [Manual Installation](docs/manual-installation.md) | The hand-install, step by step |
-| [Configuration](docs/using-amadeus.md#configuration) | Model server, API key, web access, deep thinking |
+| [Configuration](docs/using-amadeus.md#configuration) | Model server, API key, built-in model, reasoning, remote access, web access |
 | [Launching Amadeus](docs/using-amadeus.md#launching-amadeus) | What the launcher starts, and how |
 | [Manual Startup](docs/using-amadeus.md#manual-startup) | Starting each service by hand |
 | [Live2D WebUI](docs/using-amadeus.md#live2d-webui) | Her visual companion in the browser |

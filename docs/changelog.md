@@ -6,7 +6,7 @@ The biggest change since the first build: she can run entirely on your own PC,
 see your pictures, read your documents and watch your videos, and you can open
 her from your phone.
 
-**Her own built-in model.** No account or API key needed: the installer's first
+**Her own built-in model (Windows).** No account or API key needed: the Windows installer's first
 question is how she should think - A) her own local model, set up automatically,
 or B) your own model server or a cloud service, as before. For A it looks at
 your graphics card and memory, picks the Gemma 4 model that fits, and downloads

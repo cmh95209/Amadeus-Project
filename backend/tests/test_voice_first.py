@@ -154,6 +154,14 @@ class VoiceFirstTests(unittest.TestCase):
     """Chat-level checks (call 1 + the turn flow) against a faked LLM and a
     temp SQLite store - the same isolation pattern as test_greeting."""
 
+    def setUp(self):
+        # An option-A install has data/local_llm.json in "builtin" mode, and the
+        # health check (check_amadeus.bat) runs these tests there: these are
+        # about the custom-model setup, so her built-in model stays out.
+        p = patch.object(chat.builtin_llm, "load_config", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _patches(self, fake, mem_db, structured_script=None, plain_script=None,
                  forced_reply=None):
         """Common patch set. structured_script / plain_script / forced_reply

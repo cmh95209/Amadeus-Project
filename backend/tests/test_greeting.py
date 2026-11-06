@@ -226,6 +226,14 @@ class GreetingGenerationTests(unittest.TestCase):
 class ModelReadyGateTests(unittest.TestCase):
     """api.model_ready() is a pure /models probe - no LLM generation."""
 
+    def setUp(self):
+        # An option-A install has data/local_llm.json in "builtin" mode, and the
+        # health check (check_amadeus.bat) runs these tests there: these are
+        # about the custom-model setup, so her built-in model stays out.
+        p = patch.object(api.builtin_llm, "load_config", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _probe(self, reachable, models, error=None):
         return {"reachable": reachable, "models": models, "error": error}
 
