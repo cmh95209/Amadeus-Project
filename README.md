@@ -18,10 +18,12 @@ The project is still actively evolving. It is not intended to be a finished
 product; it is an ongoing attempt to explore what happens when an AI character
 is given personality, voice, visual presence, and continuity over time.
 
-**As of v2.1 (October 2026)**, Amadeus-L has long-term memory, voice-first
-native-Japanese dialogue whose voice reads numbers, your name and English words
-the Japanese way, greeting systems, web search and weather modules, and
-installer scripts for Windows and Mac. See the [Changelog](docs/changelog.md).
+**As of v3.0 (November 2026)**, Amadeus-L can run on her own built-in local
+model (no account needed), sees your pictures, reads your documents and watches
+your videos, grows closer to you over time, and can be opened from your phone
+through Tailscale. She also has long-term memory, voice-first native-Japanese
+dialogue, web search and weather, and installers for Windows and Mac. See the
+[Changelog](docs/changelog.md).
 
 ![Amadeus Preview](docs/images/mainmenu.png)
 
@@ -181,14 +183,16 @@ What can run remotely:
 
 - **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
 
-Amadeus does **not bundle or automatically install a local LLM** — run the
-model with a server of your choice and point Amadeus at it.
+Since v3.0 the installer can also set up **her own built-in local model**
+(Gemma 4 through llama.cpp, picked to fit your graphics card) - choose option
+A at the start of the install. Or run a model with a server of your choice and
+point Amadeus at it.
 
 ---
 
 # Development Roadmap
 
-Status as of v2.1:
+Status as of v3.0:
 
 ```text
 Live2D static rendering       ✓
@@ -210,6 +214,10 @@ One-shot installers (Win/Mac) ✓
 Show her Japanese line        ✓
 Japanese-way voice (v2.1)     ✓ numbers, your name, English words
 About you (v2.1)              ✓ pronouns, what she calls you
+Built-in local model (v3.0)   ✓ no account needed
+Pictures, documents, videos   ✓ v3.0
+Closeness levels + feelings   ✓ v3.0
+Remote access (Tailscale)     ✓ v3.0, your own devices only
 Display-language dropdown     planned (her voice stays Japanese)
 Better animations/Live2D      planned
 Better web and harness tools  planned
@@ -224,7 +232,8 @@ The longer sections of this README live in the [docs/ folder](docs/).
 | Section | What's inside |
 |---------|---------------|
 | [Long-Term Memory (v2.0)](docs/long-term-memory.md) | How her memory works and where it lives |
-| [Latest features (v2.1)](docs/latest-features.md) | Everything she can do today |
+| [Latest features (v3.0)](docs/latest-features.md) | Everything she can do today |
+| [Remote access](docs/remote-access.md) | Open her on your phone through Tailscale |
 | [Architecture](docs/architecture.md) | The five components and how they talk to each other |
 | [Project Structure](docs/architecture.md#project-structure) | What lives in each folder |
 | [Technology](docs/architecture.md#technology) | The stack behind each component |

@@ -5,7 +5,10 @@
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
 #
-#  WHAT'S NEW IN v4.13 (October 2026):
+#  WHAT'S NEW IN v4.13 (November 2026, app v3.0):
+#   - The speech model for videos is downloaded during the install.
+#   - (also in v4.12.2) Graphics cards older than the RTX 20 / GTX 16
+#     series get the processor version of her voice.
 #   - (also in v4.12.3) A damaged Miniconda download cache ("... appears to
 #     be corrupted") is repaired automatically and the step retried once.
 #   - (also in v4.12.2) A Python toolbox left broken by an earlier install

@@ -40,7 +40,7 @@
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
 #
-#  WHAT'S NEW IN v1.5 (November 2026):
+#  WHAT'S NEW IN v1.5 (November 2026, app v3.0):
 #   - Videos: FFmpeg (the video tool) is set up in your home folder when
 #     this Mac has none - a signed, fingerprint-checked download, or
 #     conda-forge's build when that server is down. Never stops the install.

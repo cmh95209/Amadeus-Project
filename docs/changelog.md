@@ -1,6 +1,60 @@
 # Changelog
 
-## Unreleased — Fresher Web Search, and Her Sources Under Each Reply
+## v3.0 — Her Own Mind, Eyes and Ears — November 2026
+
+The biggest change since the first build: she can run entirely on your own PC,
+see your pictures, read your documents and watch your videos, and you can open
+her from your phone.
+
+**Her own built-in model.** No account or API key needed: the installer's first
+question is how she should think - A) her own local model, set up automatically,
+or B) your own model server or a cloud service, as before. For A it looks at
+your graphics card and memory, picks the Gemma 4 model that fits, and downloads
+it (and llama.cpp, which runs it) in the background. In Settings -> Connection
+you can switch, unload or load her model, and add a GGUF model of your own.
+Settings -> Reasoning replaces the old "Deep thinking" switch.
+
+**Pictures, documents and videos.** Attach them to a message and she looks,
+reads or watches:
+- Pictures: she describes and refers back to them later in the chat; her
+  built-in model sees pictures too.
+- Documents (PDF, Word, text): she reads them; long ones get reading notes and
+  a page search, so she can look things up in them.
+- Videos (MP4 and others): prepared in the background, she watches still
+  frames and hears what is said (a speech model comes with the install),
+  writes watch notes, and takes a closer look at the moment you ask about.
+  When a cloud service refuses a video, she falls back to its still frames.
+
+**Closer over time.** Her closeness levels are split finer (Trusted, Devoted,
+Special), her short-term feelings move with your greetings and replies and
+fade over time, and she keeps a list of things on her mind about you. The new
+Settings tab "Personality & mood" and the Settings guide explain it all.
+
+**Poke her, Restart and Quit in Settings.** A Poke button (or a tap on her
+shoulders) gets her talking. Settings -> System shows her parts' live state and
+can restart her or quit everything.
+
+**On your phone.** Phone-sized layouts, a message box that grows with the text,
+a refresh button, and the page can be added to the phone's home screen like an
+app. New Settings tab "Mobile and remote access": open her on your own phone,
+tablet or other PC through Tailscale, with the steps, Copy buttons, a QR code
+and a "Set it up for me" button. It uses Tailscale Serve (your own devices
+only), never Funnel. Guide: [Remote access](remote-access.md).
+
+**Web search, smarter.** Reads the links you send, clickable links in chat,
+lookup memory per chat, "what is on now" answers, varied hold-on lines while
+she searches, guards against wrong years, seasons and made-up flight numbers,
+weather for several places at once.
+
+**Installers (Windows v4.13, macOS v1.5).** No administrator needed on Windows,
+`Install Amadeus.bat` to double-click, big downloads in the background, her
+voice downloads only the files it uses, her memory and the video speech model
+are set up during the install, FFmpeg for videos on the Mac.
+
+To update, download the new installer and run it once more (your settings and
+conversations stay).
+
+### Also in v3.0: fresher web search, and her sources under each reply
 
 **A better search engine.** Her web search now asks Firecrawl's free search
 first (no account, no API key; about 2 seconds, recent results in English
