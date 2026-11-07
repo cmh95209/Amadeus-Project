@@ -55,7 +55,10 @@ are set up during the install, FFmpeg for videos on the Mac, and the Mac
 installer asks the same A/B question as Windows (her built-in model).
 
 To update, download the new installer and run it once more (your settings and
-conversations stay).
+conversations stay). When you have changed her personality or voice rules, it
+asks once whether to replace them with the new v3.0 defaults: Y saves yours
+first in `Amadeus-Project/backups/`, N keeps them (Settings still offers the
+new default with one click).
 
 ### Also in v3.0: fresher web search, and her sources under each reply
 

@@ -78,7 +78,7 @@ Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.co
 ```
 
 Prefer to download the installer by hand? Both installer scripts are attached
-to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.1).
+to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v3.0).
 
 ## macOS (Apple Silicon and Intel)
 
@@ -99,8 +99,8 @@ to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
    To start her without her model (when another program needs the memory),
    double-click `start_macos_no_model.command` instead.
 
-Prefer to download the installer by hand? The Windows and macOS installer script is
-attached to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.1).
+Prefer to download the installer by hand? Both installer scripts are attached
+to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v3.0).
 
 ## Your first meeting
 
