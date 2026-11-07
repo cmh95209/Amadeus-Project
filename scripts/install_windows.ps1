@@ -496,6 +496,128 @@ function Move-ToRewrittenHistory($target, $personalRx){
     return $ok
 }
 
+# ---------- new default personality + voice rules (v3.0) ----------
+# On an update, right after the A/B question: when a NEWER version is coming
+# (this copy's commit differs from the newest one) and her personality or
+# voice rules differ from that version's defaults, the user is asked whether
+# to replace them (Y: the current ones go to Amadeus-Project\backups\ first;
+# N: kept - Settings still offers the new default with one click). Applied in
+# step 3, only after the update really happened. The texts are compared like
+# the app does (backend/defaults_refresh.py normalize: line ends, trailing
+# spaces, outer blank lines).
+$DefaultsFiles = @(
+    @{ name = "personality"; label = "her personality"; user = "backend\data\personality.txt" },
+    @{ name = "voice"; label = "her voice rules"; user = "backend\data\voice_ja.txt" }
+)
+
+function ConvertTo-NormalText($text){
+    if ($null -eq $text) { return $null }
+    $lines = (($text -replace "`r`n", "`n") -split "`n") | ForEach-Object { $_.TrimEnd() }
+    return ($lines -join "`n").Trim()
+}
+
+# A file of a commit as UTF-8 text, or $null (raw bytes: PowerShell's own
+# reading of a program's output would garble her Japanese lines).
+function Get-GitFileText($dir, $spec){
+    $git = Resolve-Exe "git"
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $git
+        $psi.Arguments = Join-ProcessArgs @("-C", $dir, "show", $spec)
+        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $ms = New-Object System.IO.MemoryStream
+        $p.StandardOutput.BaseStream.CopyTo($ms)
+        $p.StandardError.ReadToEnd() | Out-Null
+        $p.WaitForExit()
+        if ($p.ExitCode -ne 0) { return $null }
+        return (New-Object System.Text.UTF8Encoding $false).GetString($ms.ToArray())
+    } catch { return $null }
+}
+
+# The new version's default for one file: the personality's default file,
+# and the voice rules' DEFAULT_VOICE_BLOCK inside ja_voice.py.
+function Get-NewDefaultText($proj, $rev, $name){
+    if ($name -eq "personality") { return (Get-GitFileText $proj ($rev + ":backend/data/personality.default.txt")) }
+    $code = Get-GitFileText $proj ($rev + ":backend/ja_voice.py")
+    if (-not $code) { return $null }
+    $m = [regex]::Match($code, 'DEFAULT_VOICE_BLOCK = r"""(.*?)"""', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if (-not $m.Success) { return $null }
+    return $m.Groups[1].Value
+}
+
+# The labels of the files a coming update would change, or @() (no install
+# yet, already the newest version, the check failed, or nothing differs).
+function Get-DefaultsToOffer($proj){
+    if (-not (Test-Path (Join-Path $proj ".git"))) { return @() }
+    Refresh-Path   # Amadeus' own portable git, when that is the one this PC has
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { return @() }
+    $git = Resolve-Exe "git"
+    & $git -C $proj remote add fork $ForkUrl 2>$null | Out-Null
+    & $git -C $proj fetch fork $Branch 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { return @() }
+    $head = (& $git -C $proj rev-parse HEAD 2>$null | Out-String).Trim()
+    $newest = (& $git -C $proj rev-parse ("fork/" + $Branch) 2>$null | Out-String).Trim()
+    if (-not $newest -or $head -eq $newest) { return @() }
+    $offer = @()
+    foreach ($f in $DefaultsFiles) {
+        $path = Join-Path $proj $f.user
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $new = Get-NewDefaultText $proj $newest $f.name
+        if ($null -eq $new) { continue }
+        $mine = [IO.File]::ReadAllText($path, (New-Object System.Text.UTF8Encoding $false))
+        if ((ConvertTo-NormalText $mine) -ne (ConvertTo-NormalText $new)) { $offer += $f.label }
+    }
+    return $offer
+}
+
+# The question (after the A/B one). $true = replace them in step 3.
+function Confirm-NewDefaults($proj){
+    $offer = @(Get-DefaultsToOffer $proj)
+    if ($offer.Count -eq 0) { return $false }
+    Log ""
+    Log "  ============================================================" "Cyan"
+    Log ("   IMPORTANT: this update brings new versions of " + ($offer -join " and ")) "Cyan"
+    Log "   with lots of improvements." "Cyan"
+    Log "" "Cyan"
+    Log "   If you choose Y, your current versions are REPLACED by the" "Cyan"
+    Log "   new defaults. They are saved first in a new folder inside" "Cyan"
+    Log ("     " + (Join-Path $proj "backups")) "Cyan"
+    Log "   (copy anything you want back from there)." "Cyan"
+    Log "" "Cyan"
+    Log "   Choose N to keep your own versions. You can still switch to" "Cyan"
+    Log "   the new defaults later in Settings, with one click." "Cyan"
+    Log "  ============================================================" "Cyan"
+    return ((Read-Answer "Replace them with the new defaults? Type Y (yes) or N (no, keep mine)" @("Y","N")) -eq "Y")
+}
+
+# Step 3, after the update: save the current files, then put the new
+# defaults in place (the voice rules are removed - the app rebuilds them from
+# its new default, closeness levels included, when she starts).
+function Apply-NewDefaults($proj){
+    $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $dir = Join-Path $proj ("backups\" + $stamp)
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $saved = @()
+    foreach ($f in $DefaultsFiles) {
+        $path = Join-Path $proj $f.user
+        if (Test-Path -LiteralPath $path) {
+            Copy-Item -LiteralPath $path -Destination (Join-Path $dir (Split-Path $f.user -Leaf)) -Force
+            $saved += (Split-Path $f.user -Leaf)
+        }
+    }
+    $note = "Saved by the Amadeus installer on " + (Get-Date) + " before her new defaults were put in place.`r`n`r`n" +
+            "  personality.txt -> backend\data\personality.txt  (her personality)`r`n" +
+            "  voice_ja.txt    -> backend\data\voice_ja.txt     (her voice rules)`r`n`r`n" +
+            "To go back to your version: close Amadeus, copy the file back to that place, start Amadeus again.`r`n" +
+            "(Or copy just the parts you want into her Settings - Personality and mood.)`r`n"
+    Write-Utf8File (Join-Path $dir "README.txt") $note
+    $default = Join-Path $proj "backend\data\personality.default.txt"
+    if (Test-Path -LiteralPath $default) { Copy-Item -LiteralPath $default -Destination (Join-Path $proj "backend\data\personality.txt") -Force }
+    Remove-Item -LiteralPath (Join-Path $proj "backend\data\voice_ja.txt") -Force -ErrorAction SilentlyContinue
+    Log ("  Her new default personality and voice rules are in place. Your previous versions (" + ($saved -join ", ") + ") are in: " + $dir) "Green"
+}
+
 # $shallow (v4.13): only the latest version, not the whole history (the
 # project: ~24 MB instead of ~186 MB). Updates still work - a later fetch
 # brings just the new commits on top.
@@ -1604,6 +1726,9 @@ try {
         Log "TEST: -LlmScreensOnly - stopping here (nothing else was installed)." "Magenta"
         exit 0
     }
+    # The second question: new default personality + voice rules (only on an
+    # update that brings a newer version and when they differ from it).
+    $ReplaceDefaults = Confirm-NewDefaults (Join-Path $InstallDir "Amadeus-Project")
     Log ""
     Log "Everything else installs now. It downloads several gigabytes, so give it time." "Yellow"
     Read-Host "Press Enter to begin" | Out-Null
@@ -1832,6 +1957,14 @@ try {
                     Log ("  The new features live on branch '" + $Branch + "'.") "Yellow"
                 } else {
                     Log "  It has unsaved local changes - not updating, so nothing of yours is lost." "Yellow"
+                }
+                # Her new defaults (the answer from the start): only when the
+                # update above really brought the newest version.
+                if ($ReplaceDefaults) {
+                    $head = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+                    $newest = (& git rev-parse "fork/$Branch" 2>$null | Out-String).Trim()
+                    if ($head -and $head -eq $newest) { Apply-NewDefaults $proj }
+                    else { Log "  Her personality and voice rules were NOT replaced: this copy could not be updated (see above)." "Yellow" }
                 }
             } finally { Pop-Location }
         } else {

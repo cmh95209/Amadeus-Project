@@ -20,6 +20,9 @@ memory_sidecar/data-gym-cache/
 # =====================
 # Amadeus backend runtime data
 # =====================
+# The installer's copies of her personality + voice rules before it put new
+# defaults in place (install_windows.ps1, Apply-NewDefaults)
+/backups/
 backend/__pycache__/
 backend/unused_files/
 
