@@ -68,9 +68,13 @@ class _TestBase(unittest.TestCase):
         # An option-A install has data/local_llm.json in "builtin" mode, and the
         # health check (check_amadeus.bat) runs these tests there: the window
         # rules here are the custom-model ones, so her built-in model stays out.
-        self._no_builtin = patch.object(builtin_llm, "load_config", return_value=None)
-        self._no_builtin.start()
-        self.addCleanup(self._no_builtin.stop)
+        # Both copies: tests that run earlier (test_builtin_server, ...) load
+        # builtin_llm afresh, and memory.py's late "import builtin_llm" then
+        # finds the new one - patching only ours let the real file back in.
+        for mod in {id(m): m for m in (builtin_llm, sys.modules.get("builtin_llm")) if m}.values():
+            p = patch.object(mod, "load_config", return_value=None)
+            p.start()
+            self.addCleanup(p.stop)
         self._prev_merger = store._summary_merger
         store.set_summary_merger(None)
         self._reset_worker_state()

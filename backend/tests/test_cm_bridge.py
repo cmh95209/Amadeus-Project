@@ -157,9 +157,12 @@ class BridgeReplyPromptTests(unittest.TestCase):
         # An option-A install has data/local_llm.json in "builtin" mode, and the
         # health check (check_amadeus.bat) runs these tests there: these are
         # about the custom-model setup, so her built-in model stays out.
-        p = mock.patch.object(builtin_llm, "load_config", return_value=None)
-        p.start()
-        self.addCleanup(p.stop)
+        # Both copies (earlier tests may load builtin_llm afresh; the app's
+        # late imports then find the new one).
+        for mod in {id(m): m for m in (builtin_llm, sys.modules.get("builtin_llm")) if m}.values():
+            p = mock.patch.object(mod, "load_config", return_value=None)
+            p.start()
+            self.addCleanup(p.stop)
 
     def _run_reply(self, memory_block):
         sink = {}
