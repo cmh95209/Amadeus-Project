@@ -397,6 +397,169 @@ class MacUpdateTests(_FakeRelease):
         self.assertIn("users-own", _git("stash", "list", cwd=dest))
 
 
+def _mac_defaults_functions() -> str:
+    """The Mac installer's built-in-model functions (read_answer lives there)
+    and its new-defaults functions."""
+    text = _MAC.read_text(encoding="utf-8").replace("\r\n", "\n")
+    parts = []
+    for name in ("BUILT-IN MODEL FUNCTIONS", "NEW DEFAULTS FUNCTIONS"):
+        start = text.index("# >>> " + name)
+        parts.append(text[start:text.index("# <<< " + name, start)])
+    return "\n".join(parts)
+
+
+@unittest.skipUnless(_BASH and _GIT, "bash + git needed")
+class MacNewDefaultsTests(_FakeRelease):
+    """The Mac installer's question after A/B (confirm_new_defaults) + step 3
+    (apply_new_defaults) - the same cases as WindowsNewDefaultsTests."""
+
+    MY_VOICE = "MY OWN voice rules\n"
+
+    def script(self, dest: Path, body: str) -> str:
+        defs = self.tmp / "mac_defaults_defs.sh"
+        defs.write_bytes(_mac_defaults_functions().encode("utf-8"))
+        script = self.tmp / "mac_defaults.sh"
+        script.write_bytes((
+            "set -uo pipefail\n"
+            f"TMP='{self.tmp.as_posix()}'\nINSTALL_DIR='{(self.tmp / 'inst').as_posix()}'\nINSTALL_LOG=''\n"
+            "tee_to() { cat; }\nlog() { echo \"$*\"; }\ndie() { echo \"DIE: $*\"; exit 1; }\n"
+            f"PROJ='{dest.as_posix()}'\nBRANCH=main\nLEGACY_BRANCH=feature/character-memory-spike\n"
+            f". '{defs.as_posix()}'\n" + body).encode("utf-8"))
+        out = subprocess.run([_BASH, str(script)], capture_output=True, input=b"")
+        return (out.stdout + out.stderr).decode("utf-8", "replace")
+
+    def run_installer(self, dest: Path, answer: str, publish_new: bool = True) -> str:
+        _git("branch", "-q", "-f", "main", self.new if publish_new else self.old, cwd=self.fork)
+        body = ("confirm_new_defaults < '" + (self.tmp / "answer.txt").as_posix() + "'\n"
+                "if [ -n \"$DEFAULTS_OFFER\" ]; then echo ASKED=True; else echo ASKED=False; fi\n"
+                + _mac_update_block() + "echo RESULT=OK\n")
+        (self.tmp / "answer.txt").write_bytes((answer + "\n").encode("utf-8"))
+        return self.script(dest, body)
+
+    def backups(self, dest: Path) -> list:
+        root = dest / "backups"
+        return sorted(root.iterdir()) if root.is_dir() else []
+
+    # The Mac installer makes full clones (no --depth).
+    def test_yes_saves_then_puts_the_new_defaults_in_place(self):
+        dest = self.make_install(shallow=False, voice=self.MY_VOICE)
+        out = self.run_installer(dest, "Y")
+        self.assertIn("ASKED=True", out, out)
+        self.assertIn("her personality and her voice rules", out)
+        self.assertIn("RESULT=OK", out, out)
+        self.assertEqual(_git("rev-parse", "HEAD", cwd=dest), self.new)
+        self.assertEqual(_read(dest, PERSONALITY), "new default personality\n")
+        self.assertFalse((dest / VOICE).exists())                  # the app rebuilds it from the new default
+        [folder] = self.backups(dest)
+        self.assertEqual((folder / "personality.txt").read_bytes().decode("utf-8"), "MY OWN personality\n")
+        self.assertEqual((folder / "voice_ja.txt").read_bytes().decode("utf-8"), self.MY_VOICE)
+        self.assertIn("To go back to your version", (folder / "README.txt").read_text(encoding="utf-8"))
+        # Her saved connection is not part of it.
+        self.assertEqual(_read(dest, SERVER), "http://127.0.0.1:8080/v1\n")
+        self.assertEqual(_read(dest, MODEL), "my-model\n")
+        # The real project keeps the backups folder out of git.
+        repo = Path(__file__).resolve().parents[2]
+        self.assertIn("/backups/", (repo / ".gitignore").read_text(encoding="utf-8").splitlines())
+
+    def test_no_keeps_everything(self):
+        dest = self.make_install(shallow=False, voice=self.MY_VOICE)
+        out = self.run_installer(dest, "N")
+        self.assertIn("ASKED=True", out, out)
+        self.assertIn("RESULT=OK", out, out)
+        self.check_updated(dest)                                    # updated, own personality kept
+        self.assertEqual(_read(dest, VOICE), self.MY_VOICE)
+        self.assertEqual(self.backups(dest), [])
+
+    def test_untouched_old_defaults_are_offered_too(self):
+        dest = self.make_install(shallow=False, edited=False, voice=OLD_VOICE.strip())
+        out = self.run_installer(dest, "Y")
+        self.assertIn("ASKED=True", out, out)
+        self.assertEqual(_read(dest, PERSONALITY), "new default personality\n")
+        self.assertFalse((dest / VOICE).exists())
+
+    def test_only_the_file_that_differs_is_named(self):
+        dest = self.make_install(shallow=False, edited=False, voice=self.MY_VOICE)
+        _write(dest, PERSONALITY, "new default personality\n")   # already the new one
+        out = self.run_installer(dest, "N")
+        self.assertIn("new versions of her voice rules\n", out, out)
+
+    def test_nothing_new_means_no_question(self):
+        dest = self.make_install(shallow=False, voice=self.MY_VOICE)
+        out = self.run_installer(dest, "Y", publish_new=False)    # GitHub still has her version
+        self.assertIn("ASKED=False", out, out)
+        self.assertEqual(_read(dest, PERSONALITY), "MY OWN personality\n")
+        self.assertEqual(_read(dest, VOICE), self.MY_VOICE)
+        self.assertEqual(self.backups(dest), [])
+
+    def test_already_the_new_defaults_means_no_question(self):
+        dest = self.make_install(shallow=False, edited=False, voice=NEW_VOICE.strip() + "\r\n")
+        _write(dest, PERSONALITY, "new default personality  \r\n\r\n")   # line ends / spaces do not count
+        out = self.run_installer(dest, "Y")
+        self.assertIn("ASKED=False", out, out)
+        self.assertEqual(self.backups(dest), [])
+
+    def test_a_failed_update_replaces_nothing(self):
+        dest = self.make_install(shallow=False, voice=self.MY_VOICE)
+        # A commit of someone's own: the copy can't be moved automatically.
+        _write(dest, "backend/main.py", "# someone's own change\n")
+        _git("-c", "user.name=Someone Else", "-c", "user.email=else@example.invalid",
+             "commit", "-q", "-m", "own change", "--", "backend/main.py", cwd=dest)
+        own = _git("rev-parse", "HEAD", cwd=dest)
+        out = self.run_installer(dest, "Y")
+        self.assertIn("ASKED=True", out, out)
+        self.assertIn("were NOT replaced", out, out)
+        self.assertIn("DIE: Your existing Amadeus copy has diverged", out, out)
+        self.assertEqual(_git("rev-parse", "HEAD", cwd=dest), own)
+        self.assertEqual(_read(dest, PERSONALITY), "MY OWN personality\n")
+        self.assertEqual(_read(dest, VOICE), self.MY_VOICE)
+        self.assertEqual(self.backups(dest), [])
+
+    def test_offline_means_no_question(self):
+        dest = self.make_install(shallow=False, voice=self.MY_VOICE)
+        _git("remote", "set-url", "origin", (self.tmp / "no-such-fork").as_posix(), cwd=dest)
+        out = self.script(dest, "confirm_new_defaults </dev/null\necho \"OFFER=[$DEFAULTS_OFFER]\"\n")
+        self.assertIn("OFFER=[]", out, out)
+
+    def test_fresh_install_is_not_asked(self):
+        out = self.script(self.tmp / "nothing-here",
+                          "confirm_new_defaults </dev/null\necho \"OFFER=[$DEFAULTS_OFFER] R=$REPLACE_DEFAULTS\"\n")
+        self.assertIn("OFFER=[] R=0", out, out)
+
+    def test_reads_the_real_defaults_like_the_app(self):
+        """The installer's reading of THIS repo's defaults = the app's own."""
+        import sys
+        backend = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(backend))
+        import ja_voice
+        import defaults_refresh
+        repo = backend.parent
+        out_v, out_p = self.tmp / "v.txt", self.tmp / "p.txt"
+        self.script(repo, f"new_default_text HEAD voice | normal_text > '{out_v.as_posix()}'\n"
+                          f"new_default_text HEAD personality | normal_text > '{out_p.as_posix()}'\n")
+        voice = out_v.read_bytes().decode("utf-8").rstrip("\n")
+        personality = out_p.read_bytes().decode("utf-8").rstrip("\n")
+        self.assertEqual(voice, defaults_refresh.normalize(ja_voice.DEFAULT_VOICE_BLOCK))
+        committed = subprocess.run(["git", "show", "HEAD:backend/data/personality.default.txt"], cwd=repo,
+                                   capture_output=True).stdout.decode("utf-8")
+        self.assertEqual(personality, defaults_refresh.normalize(committed))
+        self.assertTrue(len(voice) > 500 and "Amadeus" in voice)
+
+    def test_normalizing_matches_the_app(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import defaults_refresh
+        sample = "\r\n\n  first line  \r\nmiddle\t \n\n\nlast 　\n\n"
+        (self.tmp / "sample.txt").write_bytes(sample.encode("utf-8"))
+        (self.tmp / "norm.txt").write_bytes(b"")
+        self.script(self.tmp, f"normal_text < '{(self.tmp / 'sample.txt').as_posix()}' > "
+                              f"'{(self.tmp / 'norm.txt').as_posix()}'\n")
+        got = (self.tmp / "norm.txt").read_bytes().decode("utf-8").rstrip("\n")
+        # The app also trims the full-width space at the very end; the
+        # installer keeps it (it then only asks once more) - everything
+        # else must be the same.
+        self.assertEqual(got.rstrip("\u3000 "), defaults_refresh.normalize(sample).rstrip("\u3000 "))
+
+
 class SameRuleTests(unittest.TestCase):
     def test_both_installers_keep_the_same_personal_files(self):
         win = re.search(r'\$personal = "([^"]+)"', _WIN.read_text(encoding="utf-8")).group(1)

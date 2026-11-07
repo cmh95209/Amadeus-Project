@@ -50,6 +50,11 @@
 #   - Step 1 now prints the actual chip name (the first version had a typo).
 #
 #  WHAT'S NEW IN v1.6 (November 2026, app v3.0):
+#   - On an update that brings new versions of her personality and voice
+#     rules (and yours differ from them), a second question: Y replaces
+#     them with the new defaults after saving yours in
+#     Amadeus-Project/backups/<date_time>/; N keeps yours (Settings still
+#     offers the new default with one click). The same as on Windows.
 #   - Her own built-in model on Macs with an Apple chip (M1 or newer, 16 GB
 #     of memory or more), the same as on Windows: the first question is
 #     how she should think - A) her own local model, set up automatically
@@ -895,6 +900,145 @@ install_local_llm() {
 }
 # <<< BUILT-IN MODEL FUNCTIONS
 
+# >>> NEW DEFAULTS FUNCTIONS (tests/test_installer_update.py runs them)
+# ---------- new default personality + voice rules (v3.0) ----------
+# The same as the Windows installer (Confirm-NewDefaults / Apply-NewDefaults).
+# On an update, right after the A/B question: when a NEWER version is coming
+# (this copy's commit differs from the newest one) and her personality or
+# voice rules differ from that version's defaults, the user is asked whether
+# to replace them (Y: the current ones go to Amadeus-Project/backups/ first;
+# N: kept - Settings still offers the new default with one click). Applied in
+# step 3, only after the update really happened. The texts are compared like
+# the app does (backend/defaults_refresh.py normalize: line ends, trailing
+# spaces, outer blank lines).
+REPLACE_DEFAULTS=0
+DEFAULTS_OFFER=""
+
+# stdin -> stdout, normalized like defaults_refresh.normalize.
+normal_text() {
+    tr -d '\r' | awk '
+        { sub(/[[:space:]]+$/, ""); line[NR] = $0 }
+        END {
+            first = 0; last = 0
+            for (i = 1; i <= NR; i++) if (line[i] != "") { if (!first) first = i; last = i }
+            if (!first) exit
+            sub(/^[[:space:]]+/, "", line[first])
+            for (i = first; i <= last; i++) print line[i]
+        }'
+}
+
+# The new version's default for one file ($1 = commit, $2 = personality /
+# voice): the personality's default file, and the voice rules'
+# DEFAULT_VOICE_BLOCK inside ja_voice.py. Fails when there is none.
+new_default_text() {
+    if [ "$2" = "personality" ]; then
+        git -C "$PROJ" show "$1:backend/data/personality.default.txt" 2>/dev/null
+        return
+    fi
+    git -C "$PROJ" show "$1:backend/ja_voice.py" 2>/dev/null | awk '
+        BEGIN { q = "\"\"\""; mark = "DEFAULT_VOICE_BLOCK = r" q }
+        done { next }
+        !on {
+            i = index($0, mark)
+            if (!i) next
+            on = 1
+            $0 = substr($0, i + length(mark))
+        }
+        {
+            j = index($0, q)
+            if (j) { printf "%s\n", substr($0, 1, j - 1); done = 1; next }
+            print
+        }
+        END { exit !done }'
+}
+
+# Which files a coming update would change (DEFAULTS_OFFER: "" or e.g. "her
+# personality and her voice rules"). "" when there is no install yet, it is
+# already the newest version, the check failed (offline), or nothing differs.
+defaults_to_offer() {
+    local head newest f user label tmp
+    DEFAULTS_OFFER=""
+    [ -d "$PROJ/.git" ] || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    git -C "$PROJ" fetch --quiet origin "$BRANCH" >/dev/null 2>&1 || return 0
+    head="$(git -C "$PROJ" rev-parse HEAD 2>/dev/null || true)"
+    newest="$(git -C "$PROJ" rev-parse --verify --quiet "origin/$BRANCH" 2>/dev/null || true)"
+    if [ -z "$newest" ] || [ "$head" = "$newest" ]; then return 0; fi
+    tmp="${TMP:-/tmp}/amadeus_defaults_$$"
+    for f in personality voice; do
+        if [ "$f" = "personality" ]; then user="$PROJ/backend/data/personality.txt"; label="her personality"
+        else user="$PROJ/backend/data/voice_ja.txt"; label="her voice rules"; fi
+        [ -f "$user" ] || continue
+        new_default_text "$newest" "$f" > "$tmp.new" || continue
+        normal_text < "$tmp.new" > "$tmp.a"
+        normal_text < "$user" > "$tmp.b"
+        if ! cmp -s "$tmp.a" "$tmp.b"; then DEFAULTS_OFFER="${DEFAULTS_OFFER:+$DEFAULTS_OFFER and }$label"; fi
+    done
+    rm -f "$tmp.new" "$tmp.a" "$tmp.b"
+}
+
+notice() { printf '%s%s%s\n' "${C_BOLD:-}${C_BLU:-}" "$1" "${C_RESET:-}" | tee_to; }
+
+# The question (after the A/B one). Sets REPLACE_DEFAULTS=1 for "Y".
+confirm_new_defaults() {
+    REPLACE_DEFAULTS=0
+    defaults_to_offer
+    [ -n "$DEFAULTS_OFFER" ] || return 0
+    log ""
+    notice "  ============================================================"
+    notice "   IMPORTANT: this update brings new versions of $DEFAULTS_OFFER"
+    notice "   with lots of improvements."
+    notice ""
+    notice "   If you choose Y, your current versions are REPLACED by the"
+    notice "   new defaults. They are saved first in a new folder inside"
+    notice "     $PROJ/backups"
+    notice "   (copy anything you want back from there)."
+    notice ""
+    notice "   Choose N to keep your own versions. You can still switch to"
+    notice "   the new defaults later in Settings, with one click."
+    notice "  ============================================================"
+    read_answer "Replace them with the new defaults? Type Y (yes) or N (no, keep mine)" Y N
+    if [ "$ANSWER" = "Y" ]; then REPLACE_DEFAULTS=1; fi
+}
+
+# Step 3, after the update: save the current files, then put the new
+# defaults in place (the voice rules are removed - the app rebuilds them
+# from its new default, closeness levels included, when she starts).
+apply_new_defaults() {
+    local dir saved="" f
+    dir="$PROJ/backups/$(date '+%Y-%m-%d_%H%M%S')"
+    mkdir -p "$dir"
+    for f in personality.txt voice_ja.txt; do
+        if [ -f "$PROJ/backend/data/$f" ]; then
+            cp -p "$PROJ/backend/data/$f" "$dir/$f"
+            saved="${saved:+$saved, }$f"
+        fi
+    done
+    cat > "$dir/README.txt" <<EOF
+Saved by the Amadeus installer on $(date) before her new defaults were put in place.
+
+  personality.txt -> backend/data/personality.txt  (her personality)
+  voice_ja.txt    -> backend/data/voice_ja.txt     (her voice rules)
+
+To go back to your version: close Amadeus, copy the file back to that place, start Amadeus again.
+(Or copy just the parts you want into her Settings - Personality and mood.)
+EOF
+    if [ -f "$PROJ/backend/data/personality.default.txt" ]; then
+        cp -f "$PROJ/backend/data/personality.default.txt" "$PROJ/backend/data/personality.txt"
+    fi
+    rm -f "$PROJ/backend/data/voice_ja.txt"
+    log "  Her new default personality and voice rules are in place. Your previous versions ($saved) are in: $dir"
+}
+
+# Step 3 could not update this copy: a "Y" from the start is NOT applied.
+defaults_not_replaced() {
+    if [ "${REPLACE_DEFAULTS:-0}" = 1 ]; then
+        log "  Her personality and voice rules were NOT replaced: this copy could not be updated (see above)."
+    fi
+    return 0
+}
+# <<< NEW DEFAULTS FUNCTIONS
+
 # Test: only look at this Mac and say which model it would get (installs
 # nothing, creates no folder).
 if [ "$HARDWARE_CHECK_ONLY" = 1 ]; then
@@ -947,6 +1091,11 @@ if [ "$LLM_SCREENS_ONLY" = 1 ]; then
     log "TEST: --llm-screens-only - stopping here (nothing else was installed)."
     exit 0
 fi
+# The second question: new default personality + voice rules (only on an
+# update that brings a newer version and when they differ from it). Only
+# with Apple's developer tools in place: without them "git" is just a stub
+# that opens an install dialog (an existing install always has them).
+if xcode-select -p >/dev/null 2>&1; then confirm_new_defaults; fi
 log ""
 log "Everything else installs now. It downloads several gigabytes, so give it time."
 read -r -p "Press Enter to begin " _ || true
@@ -1320,7 +1469,7 @@ if [ -d "$PROJ/.git" ]; then
         stashed=""
     }
     git -C "$PROJ" fetch --quiet origin \
-        || { restore_personal; die "Could not reach the project repository." \
+        || { restore_personal; defaults_not_replaced; die "Could not reach the project repository." \
                "Check your internet connection, then re-run the installer."; }
     # Move onto origin/$BRANCH ONLY when this copy holds nothing of the user's
     # own: every commit the target lacks was published by this project, and
@@ -1340,6 +1489,7 @@ if [ -d "$PROJ/.git" ]; then
             log "  (moved this copy from the old feature branch to main)"
         else
             restore_personal
+            defaults_not_replaced
             die "Your existing Amadeus copy has changes of its own and cannot be updated automatically." \
                 "Easiest fix: delete the folder $PROJ and re-run this installer (a fresh copy is created)."
         fi
@@ -1352,12 +1502,22 @@ if [ -d "$PROJ/.git" ]; then
                 log "  (the project's history was cleaned up - moved this copy onto it)"
             else
                 restore_personal
+                defaults_not_replaced
                 die "Your existing Amadeus copy has diverged and cannot be updated automatically." \
                     "Easiest fix: delete the folder $PROJ and re-run this installer (a fresh copy is created)."
             fi
         fi
     fi
     restore_personal
+    # Her new defaults (the answer from the start): only when the update
+    # above really brought the newest version.
+    if [ "${REPLACE_DEFAULTS:-0}" = 1 ]; then
+        if [ "$(git -C "$PROJ" rev-parse HEAD 2>/dev/null)" = "$(git -C "$PROJ" rev-parse "origin/$BRANCH" 2>/dev/null)" ]; then
+            apply_new_defaults
+        else
+            defaults_not_replaced
+        fi
+    fi
     log "  Updated to the latest version on the $BRANCH branch."
 else
     log "  Downloading the project (a few dozen MB)..."
