@@ -205,6 +205,7 @@ Better animations/Live2D      planned
 Better web and harness tools  planned
 Agentic workflows             planned
 AR Glasses support            planned (prototype in development)
+```
 
 ---
 
