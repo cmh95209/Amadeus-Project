@@ -221,6 +221,9 @@ export default function App() {
   const [modelBusy, setModelBusy] = useState(false);
   const [brainSwitching, setBrainSwitching] = useState(false);
   const builtinMode = brain?.mode === "builtin";
+  // A Mac with an Apple chip: her model shares the Mac's memory (no
+  // graphics card) - Settings words it that way.
+  const onMac = brain?.shared_memory === true;
   // The built-in model's cap on the history budget (null = no cap).
   const [builtinBudgetCap, setBuiltinBudgetCap] = useState<number | null>(null);
   const [defaultBudget, setDefaultBudget] = useState<number>(40000);
@@ -2783,13 +2786,13 @@ export default function App() {
                     </div>
                   )}
                   <p className="settings-help">
-                    Unload frees her graphics memory (for a game, for example); she
+                    Unload frees {onMac ? "the memory her model uses" : "her graphics memory"} (for a game, for example); she
                     can't answer until you load her model again. To use your own GGUF
                     model, put the file in{" "}
                     <span className="settings-path">{builtinModel?.folder || "her models folder"}</span>{" "}
-                    and press Refresh list. Your own model runs with this PC's
+                    and press Refresh list. Your own model runs with this {onMac ? "Mac" : "PC"}'s
                     settings{brain?.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
-                    a model too big for your graphics card will not load.
+                    a model too big for your {onMac ? "Mac's memory" : "graphics card"} will not load.
                   </p>
                   {builtinModel && builtinModel.catalog.length > 0 && (
                     <details className="model-catalog">
@@ -2801,9 +2804,11 @@ export default function App() {
                               <span className="model-catalog-name">{m.label}</span>
                               <span className="model-catalog-note">
                                 {m.gb.toLocaleString("en-US")} GB
-                                {m.fit === "recommended" && " - recommended for this PC"}
+                                {m.fit === "recommended" && (onMac ? " - recommended for this Mac" : " - recommended for this PC")}
                                 {m.fit === "smaller" && " - smaller: faster, less capable"}
-                                {m.fit === "bigger" && " - bigger than this PC's recommended model: may be slow or not fit your graphics card"}
+                                {m.fit === "bigger" && (onMac
+                                  ? " - bigger than this Mac's recommended model: may be slow or not fit its memory"
+                                  : " - bigger than this PC's recommended model: may be slow or not fit your graphics card")}
                               </span>
                             </div>
                             {m.installed ? (
@@ -2892,7 +2897,8 @@ export default function App() {
                       ? `Pictures: yes - she can see pictures you attach${
                         builtinModel.picturesWhere === "processor"
                           ? " (read on the processor, to keep room on the graphics card)"
-                          : builtinModel.picturesWhere === "card" ? " (read on the graphics card)" : ""}.`
+                          : builtinModel.picturesWhere === "card"
+                            ? (onMac ? " (read on the Apple chip)" : " (read on the graphics card)") : ""}.`
                       : `Pictures: no - ${builtinModel.picturesNote || "she can't see pictures with this model"}.`}
                   </p>
                 )}
@@ -2956,8 +2962,8 @@ export default function App() {
                 and her reply. We recommend at least 12,000.
                 {builtinBudgetCap !== null ? (
                   <>
-                    {" "}Default on this PC: {defaultBudget.toLocaleString("en-US")}{" "}
-                    (lower if your graphics card has less memory). Her built-in
+                    {" "}Default on this {onMac ? "Mac" : "PC"}: {defaultBudget.toLocaleString("en-US")}{" "}
+                    ({onMac ? "lower on Macs with less memory" : "lower if your graphics card has less memory"}). Her built-in
                     model has room for up to {builtinBudgetCap.toLocaleString("en-US")}.
                   </>
                 ) : (
@@ -3002,7 +3008,7 @@ export default function App() {
                 <p className="settings-help" id="reasoning-help">
                   Lets her think before she answers: better thought-through,
                   but slower (on cloud models a few seconds more per level; on
-                  the built-in model much more on smaller graphics cards), and
+                  the built-in model much more on {onMac ? "Macs with less memory" : "smaller graphics cards"}), and
                   cloud services charge for the thinking too. "Her replies"
                   also covers greetings and deciding whether to search the
                   web; "translations" covers the English line and what her

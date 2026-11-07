@@ -279,6 +279,13 @@ def builtin_files_ready(cfg: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def is_shared_memory(cfg: dict | None) -> bool:
+    """Her model runs on a Mac's Apple chip (the Metal llama.cpp build):
+    one memory shared by processor and graphics - no graphics-card memory
+    to check or report (the same rule as backend/builtin_llm.py)."""
+    return bool(cfg) and str(cfg.get("build") or "").startswith("metal")
+
+
 def builtin_vram_need_gb(cfg: dict) -> float | None:
     """Graphics memory her model needs (the tier's estimate, which includes
     her voice when it runs on the card), adjusted for a GGUF picked in
@@ -381,15 +388,22 @@ def apply_simulated_vram(cfg: dict, vram_gb: int) -> dict | None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import llm_tiers
     table = llm_tiers.load_table()
-    vendor = "nvidia" if str(cfg.get("build", "")).startswith("cuda") else "amd"
-    choice = llm_tiers.choose(table, vendor, vram_gb, -1, "999")
+    if is_shared_memory(cfg):
+        # A Mac: the number is the Mac's (shared) memory, the Mac tiers.
+        choice = llm_tiers.choose_mac(table, True, vram_gb)
+    else:
+        vendor = "nvidia" if str(cfg.get("build", "")).startswith("cuda") else "amd"
+        choice = llm_tiers.choose(table, vendor, vram_gb, -1, "999")
     if not choice["offered"]:
         return None
     model = table["models"][choice["model"]]
+    label = model["label"]
+    if is_shared_memory(cfg):
+        label = table["mac"].get("labels", {}).get(choice["model"], label)
     models_dir = Path(str(cfg.get("model_file") or "")).parent
     out = dict(cfg)
     out.update({
-        "model": choice["model"], "model_label": model["label"], "tier": choice["tier"],
+        "model": choice["model"], "model_label": label, "tier": choice["tier"],
         "context": choice["context"], "kv_cache": choice["kv_cache"],
         "voice_device": choice["voice_device"],
         "history_default": choice["history_default"],
@@ -433,6 +447,16 @@ def physical_cores() -> int:
         pass
     logical = os.cpu_count() or 4
     return max(1, logical // 2) if logical >= 4 else logical
+
+
+def voice_place(cfg: dict | None) -> str:
+    """Where her voice runs, for the launcher's notes."""
+    device = (cfg or {}).get("voice_device")
+    if device == "cpu":
+        return "processor"
+    if device == "mps":
+        return "Apple chip's accelerator"
+    return "graphics card"
 
 
 def voice_on_processor(cfg: dict | None) -> bool:
@@ -1490,7 +1514,7 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
         ready, why = builtin_files_ready(builtin)
         note(f"Built-in model: {Path(selected_model_file(builtin)).name}, "
              f"{builtin.get('context')} context, {builtin.get('kv_cache')} memory, "
-             f"voice on the {'processor' if builtin.get('voice_device') == 'cpu' else 'graphics card'}.")
+             f"voice on the {voice_place(builtin)}.")
         if no_model:
             say("  Her built-in model will not be loaded (load it in Settings -> Connection).")
         elif not ready:
@@ -1503,7 +1527,13 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
                     "Settings -> Connection (or run the installer again and choose A).")
         else:
             need = builtin_vram_need_gb(builtin)
-            load_model = ask_about_graphics_memory(need) if need else True
+            if is_shared_memory(builtin):
+                # A Mac: macOS shares and manages one memory itself - there
+                # is no separate graphics memory to check (only logged).
+                note(f"Mac (shared memory): her model needs about {need} GB of it.")
+                load_model = True
+            else:
+                load_model = ask_about_graphics_memory(need) if need else True
             if not load_model:
                 say("  Starting without her model (load it in Settings -> Connection).")
     # AMADEUS_LAUNCHER_DIR: where Settings' Restart leaves its request (and

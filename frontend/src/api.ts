@@ -887,6 +887,8 @@ export type BrainMode = {
   /** llama.cpp itself is missing (not only a model file). */
   runner_missing: boolean;
   context: number | null;
+  /** A Mac with an Apple chip: one shared memory, no graphics card. */
+  shared_memory: boolean;
   /** Only after a switch: the change fully applies after a restart. */
   restart_needed?: boolean;
 };
@@ -899,6 +901,7 @@ function toBrainMode(data: Record<string, unknown>): BrainMode {
     model_missing: data.model_missing === true,
     runner_missing: data.runner_missing === true,
     context: typeof data.context === "number" ? data.context : null,
+    shared_memory: data.shared_memory === true,
     restart_needed: data.restart_needed === true,
   };
 }

@@ -45,8 +45,25 @@
         "files": [
           {"name": "llama-b11400-bin-win-vulkan-x64.zip", "bytes": 33307867, "sha256": "77a5b9ad8f3ab34c9f600e60a04136574e5510ac7f93912e6600d616bbaf8ac1"}
         ]
+      },
+      "metal-arm64": {
+        "files": [
+          {"name": "llama-b11400-bin-macos-arm64.tar.gz", "bytes": 11920419, "sha256": "91effd009b38c8f3feb60c2256ff10e8b560f0b40915e104ad23d3daa469e9b1"}
+        ]
       }
     }
+  },
+  "mac": {
+    "about": "Macs with an Apple chip (2026-11-07, MH: 16 GB and up). The chip shares ONE memory between processor and graphics (macOS lets graphics use about two thirds of it), so the tier follows the Mac's memory. Her voice runs on the chip's accelerator (mps) in the same memory; memory_need_gb = model + conversation memory + pictures + her voice, for the logs. Intel Macs and Macs under 16 GB get option B. scripts/install_macos.sh carries an exact copy (between its MAC TIER TABLE markers); tests/test_llm_tiers.py keeps the two equal.",
+    "build": "metal-arm64",
+    "labels": {"12B-Q3": "Gemma 4 12B (3-bit)"},
+    "min_ram_gb": 16,
+    "tiers": [
+      {"id": "mac-16", "min_ram_gb": 16, "model": "12B-Q3", "context": 16384, "kv_cache": "q4_0", "history_default": 6000,  "memory_need_gb": 8.5},
+      {"id": "mac-24", "min_ram_gb": 24, "model": "12B",    "context": 24576, "kv_cache": "q8_0", "history_default": 14000, "memory_need_gb": 11.6},
+      {"id": "mac-32", "min_ram_gb": 32, "model": "12B",    "context": 32768, "kv_cache": "f16",  "history_default": 22000, "memory_need_gb": 13.0},
+      {"id": "mac-48", "min_ram_gb": 48, "model": "12B",    "context": 49152, "kv_cache": "f16",  "history_default": 32000, "memory_need_gb": 13.5}
+    ]
   },
   "tiers": [
     {"id": "6-7",      "min_vram_gb": 6,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 4.6,  "warning": true},

@@ -6,11 +6,13 @@ The biggest change since the first build: she can run entirely on your own PC,
 see your pictures, read your documents and watch your videos, and you can open
 her from your phone.
 
-**Her own built-in model (Windows).** No account or API key needed: the Windows installer's first
-question is how she should think - A) her own local model, set up automatically,
-or B) your own model server or a cloud service, as before. For A it looks at
-your graphics card and memory, picks the Gemma 4 model that fits, and downloads
-it (and llama.cpp, which runs it) in the background. In Settings -> Connection
+**Her own built-in model (Windows and Apple-chip Macs).** No account or API key needed: the
+installer's first question is how she should think - A) her own local model,
+set up automatically, or B) your own model server or a cloud service, as
+before. For A it looks at your graphics card (Windows) or your Mac's memory
+(a Mac with an Apple chip and 16 GB or more), picks the Gemma 4 model that
+fits, and downloads it (and llama.cpp, which runs it - on a Mac its Metal
+build) in the background. Intel Macs use option B. In Settings -> Connection
 you can switch, unload or load her model, and add a GGUF model of your own.
 Settings -> Reasoning replaces the old "Deep thinking" switch.
 
@@ -46,10 +48,11 @@ lookup memory per chat, "what is on now" answers, varied hold-on lines while
 she searches, guards against wrong years, seasons and made-up flight numbers,
 weather for several places at once.
 
-**Installers (Windows v4.13, macOS v1.5).** No administrator needed on Windows,
+**Installers (Windows v4.13, macOS v1.6).** No administrator needed on Windows,
 `Install Amadeus.bat` to double-click, big downloads in the background, her
 voice downloads only the files it uses, her memory and the video speech model
-are set up during the install, FFmpeg for videos on the Mac.
+are set up during the install, FFmpeg for videos on the Mac, and the Mac
+installer asks the same A/B question as Windows (her built-in model).
 
 To update, download the new installer and run it once more (your settings and
 conversations stay).

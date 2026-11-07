@@ -53,6 +53,40 @@ def download_bytes(table: dict, model_key: str, build: str) -> int:
     return model["bytes"] + vision + sum(f["bytes"] for f in files)
 
 
+def choose_mac(table: dict, apple_chip: bool, ram_gb: int) -> dict:
+    """The Mac installer's decision (scripts/install_macos.sh mac_choose
+    follows the same rules; the tests run both on the same inputs).
+
+    apple_chip: an Apple chip (M1 and later); an Intel Mac gets option B
+    (llama.cpp has no graphics acceleration there - far too slow for her).
+    ram_gb: the Mac's memory in whole GB, shared by processor and graphics
+    (negative = unknown: not offered, the memory decides everything here).
+    Returns the same keys as choose(); vram_need_gb = memory_need_gb.
+    """
+    mac = table["mac"]
+    if not apple_chip:
+        return {"offered": False, "reason": "intel_mac"}
+    tier = None
+    for candidate in sorted(mac["tiers"], key=lambda t: t["min_ram_gb"]):
+        if ram_gb >= candidate["min_ram_gb"]:
+            tier = candidate
+    if tier is None:
+        return {"offered": False, "reason": "low_ram"}
+    return {
+        "offered": True,
+        "reason": "",
+        "tier": tier["id"],
+        "model": tier["model"],
+        "context": tier["context"],
+        "kv_cache": tier["kv_cache"],
+        "voice_device": "mps",
+        "history_default": int(tier["history_default"]),
+        "vram_need_gb": float(tier["memory_need_gb"]),
+        "warning": False,
+        "build": mac["build"],
+    }
+
+
 def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
            driver: str = "") -> dict:
     """The installer's decision for this hardware.

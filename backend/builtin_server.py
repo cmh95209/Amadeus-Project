@@ -110,6 +110,10 @@ def vision_on_card(cfg: dict, memory=None, model_file=None) -> tuple[bool, str]:
     """(on the card?, why) for her vision part, from the free card memory
     right now. memory = (used GB, total GB) (default: measured)."""
     tier = str(cfg.get("tier") or "")
+    if builtin_llm.shared_memory(cfg):
+        # A Mac's Apple chip: one memory for processor and graphics - the
+        # graphics side reads pictures, nothing to measure.
+        return True, "Apple chip (shared memory)"
     if tier in VISION_ON_PROCESSOR_TIERS:
         return False, "part of her model already runs on the processor"
     mem = memory if memory is not None else timing.gpu_memory()
@@ -126,6 +130,13 @@ def vision_on_card(cfg: dict, memory=None, model_file=None) -> tuple[bool, str]:
     on = free >= need + VISION_CARD_GB
     return on, (f"{free:.1f} GB free on the card, her model needs about {need:.1f} GB "
                 f"+ {VISION_CARD_GB} GB for pictures")
+
+
+def _place(cfg: dict, on_card: bool) -> str:
+    """Where her pictures are read, in words."""
+    if not on_card:
+        return "processor"
+    return "Apple chip" if builtin_llm.shared_memory(cfg) else "graphics card"
 
 
 def server_command(cfg: dict, model_file: str, safe: bool = False,
@@ -207,7 +218,8 @@ def _poll() -> None:
         _proc = None
         if _state["state"] in ("loading", "loaded"):
             _set("failed", _state["file"],
-                 f"her model stopped (exit {code}) - often not enough graphics memory. "
+                 f"her model stopped (exit {code}) - often not enough "
+                 f"{'memory' if builtin_llm.shared_memory() else 'graphics memory'}. "
                  f"Details: {LOG_FILE}\n" + _log_tail())
 
 
@@ -290,7 +302,7 @@ def load(file: str | None = None) -> dict:
         vision_path = builtin_llm.vision_file(target)
         on_card, why = vision_on_card(cfg, memory_before, target) if vision_path else (False, "")
         if vision_path:
-            print(f"[Amadeus] her pictures are read on the {'graphics card' if on_card else 'processor'} "
+            print(f"[Amadeus] her pictures are read on the {_place(cfg, on_card)} "
                   f"({why}).")
         try:
             _proc = subprocess.Popen(server_command(cfg, target, vision_on_card=on_card), **kwargs)
@@ -371,7 +383,8 @@ def _watch_loading(proc, target, port, log, started=None, memory_before=None,
                         _proc = None
                         _set("failed", target,
                              f"her model could not load (exit {proc.returncode}) - often "
-                             f"not enough graphics memory. Details: {LOG_FILE}\n" + _log_tail())
+                             f"not enough {'memory' if builtin_llm.shared_memory() else 'graphics memory'}. "
+                             f"Details: {LOG_FILE}\n" + _log_tail())
                 return
             if _health(port) == 200:
                 with _lock:

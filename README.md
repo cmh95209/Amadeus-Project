@@ -91,8 +91,13 @@ to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
    curl -fsSL https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_macos.sh -o install_macos.sh && bash install_macos.sh
    ```
 
-3. Wait (a fresh Mac downloads several gigabytes of models), then double-click
+3. Answer its first question (how Amadeus should think): **A** sets up her
+   own built-in model on a Mac with an Apple chip and 16 GB of memory or
+   more; **B** is for a cloud service or your own model server.
+4. Wait (a fresh Mac downloads several gigabytes of models), then double-click
    `start_macos.command` in the Amadeus folder (by default `~/Amadeus`).
+   To start her without her model (when another program needs the memory),
+   double-click `start_macos_no_model.command` instead.
 
 Prefer to download the installer by hand? The Windows and macOS installer script is
 attached to the [v2.1 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v2.1).
@@ -183,10 +188,12 @@ What can run remotely:
 
 - **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
 
-Since v3.0 the Windows installer can also set up **her own built-in local model**
-(Gemma 4 through llama.cpp, picked to fit your graphics card) - choose option
-A at the start of the install. Or run a model with a server of your choice and
-point Amadeus at it (on a Mac, this is the way).
+Since v3.0 the installers can also set up **her own built-in local model**
+(Gemma 4 through llama.cpp) - choose option A at the start of the install. On
+Windows it is picked to fit your graphics card; on a Mac with an Apple chip
+(M1 or newer, 16 GB of memory or more) it is picked to fit the Mac's memory
+and runs on the chip's graphics (Metal). Or run a model with a server of your
+choice and point Amadeus at it (on an Intel Mac, this is the way).
 
 ---
 
@@ -214,7 +221,7 @@ One-shot installers (Win/Mac) ✓
 Show her Japanese line        ✓
 Japanese-way voice (v2.1)     ✓ numbers, your name, English words
 About you (v2.1)              ✓ pronouns, what she calls you
-Built-in local model (v3.0)   ✓ Windows, no account needed
+Built-in local model (v3.0)   ✓ Windows + Apple-chip Macs, no account needed
 Pictures, documents, videos   ✓ v3.0
 Closeness levels + feelings   ✓ v3.0
 Remote access (Tailscale)     ✓ v3.0, your own devices only

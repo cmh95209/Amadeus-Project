@@ -9,7 +9,10 @@ Covers:
   3. the Python rules (scripts/llm_tiers.py, used by the launcher);
   4. the installer's PowerShell rules give the SAME answer as the Python
      ones for a grid of pretend hardware (Windows only - runs the real
-     installer with -HardwareCheckOnly, which installs nothing).
+     installer with -HardwareCheckOnly, which installs nothing);
+  5. Macs (2026-11-07): the Mac installer's copy of the Mac table, the Mac
+     decisions, and the Mac installer's bash rules agree with Python (run
+     with --hardware-check-only: Git Bash on Windows, bash elsewhere).
 """
 import importlib.util
 import json
@@ -22,6 +25,7 @@ from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 _INSTALLER = _SCRIPTS / "install_windows.ps1"
+_MAC_INSTALLER = _SCRIPTS / "install_macos.sh"
 
 
 def _load_tiers():
@@ -196,10 +200,14 @@ class BuildTests(unittest.TestCase):
         self.assertRegex(lc["release"], r"^b\d+$")
         for name, build in lc["builds"].items():
             with self.subTest(build=name):
-                self.assertTrue(any(f["name"].startswith("llama-" + lc["release"] + "-bin-win-")
+                prefix = "-bin-macos-" if name.startswith("metal") else "-bin-win-"
+                self.assertTrue(any(f["name"].startswith("llama-" + lc["release"] + prefix)
                                     for f in build["files"]))
                 for f in build["files"]:
-                    self.assertTrue(f["name"].endswith("-x64.zip"))
+                    if name.startswith("metal"):
+                        self.assertTrue(f["name"].endswith("-arm64.tar.gz"))
+                    else:
+                        self.assertTrue(f["name"].endswith("-x64.zip"))
                     self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")
                     self.assertGreater(f["bytes"], 0)
 
@@ -243,6 +251,153 @@ class PowerShellAgreesTests(unittest.TestCase):
                     self.assertEqual(hw["choice"]["history_default"], expected["history_default"])
                     self.assertEqual(hw["choice"]["vram_need_gb"], expected["vram_need_gb"])
                     self.assertEqual(hw["model"], TABLE["models"][expected["model"]])
+
+
+# ---------------------------------------------------------------------------
+# Macs
+# ---------------------------------------------------------------------------
+def _mac_text() -> str:
+    return _MAC_INSTALLER.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def _mac_shell_table() -> dict:
+    """The MAC TIER TABLE block of install_macos.sh, read back into Python."""
+    m = re.search(r"# >>> MAC TIER TABLE.*?\n(.*?)# <<< MAC TIER TABLE", _mac_text(), re.S)
+    if not m:
+        raise AssertionError("MAC TIER TABLE block not found in install_macos.sh")
+    values = dict(re.findall(r'^([A-Z_]+)="(.*?)"$', m.group(1), re.S | re.M))
+    values.update(re.findall(r'^([A-Z_]+)=(\d+)$', m.group(1), re.M))
+    return values
+
+
+class MacTableCopyTests(unittest.TestCase):
+    def setUp(self):
+        self.sh = _mac_shell_table()
+        self.mac = TABLE["mac"]
+
+    def test_release_build_and_limits(self):
+        self.assertEqual(self.sh["LLAMA_RELEASE"], TABLE["llama_cpp"]["release"])
+        self.assertEqual(self.sh["MAC_BUILD"], self.mac["build"])
+        self.assertEqual(int(self.sh["MAC_MIN_RAM_GB"]), self.mac["min_ram_gb"])
+        self.assertEqual(int(self.sh["DISK_HEADROOM_GB"]), TABLE["disk_headroom_gb"])
+
+    def test_build_files(self):
+        files = [line.split() for line in self.sh["MAC_BUILD_FILES"].splitlines()]
+        expected = [[f["name"], str(f["bytes"]), f["sha256"]]
+                    for f in TABLE["llama_cpp"]["builds"][self.mac["build"]]["files"]]
+        self.assertEqual(files, expected)
+
+    def test_tiers(self):
+        rows = [line.split() for line in self.sh["MAC_TIERS"].splitlines()]
+        expected = [[t["id"], str(t["min_ram_gb"]), t["model"], str(t["context"]), t["kv_cache"],
+                     str(t["history_default"]), str(t["memory_need_gb"])] for t in self.mac["tiers"]]
+        self.assertEqual(rows, expected)
+
+    def test_models(self):
+        labels = self.mac.get("labels", {})
+        rows = {line.split("|")[0]: line.split("|") for line in self.sh["MAC_MODELS"].splitlines()}
+        self.assertEqual(set(rows), set(TABLE["models"]))
+        for key, m in TABLE["models"].items():
+            with self.subTest(model=key):
+                v = m["mmproj"]
+                self.assertEqual(rows[key], [key, labels.get(key, m["label"]), m["repo"], m["revision"],
+                                             m["file"], str(m["bytes"]), m["sha256"], v["file"],
+                                             v["save_as"], str(v["bytes"]), v["sha256"]])
+
+
+class MacDecisionTests(unittest.TestCase):
+    """MH's decision 2026-11-07 (plan D1 a): Apple chip and 16 GB or more."""
+
+    def test_tiers(self):
+        mac = TABLE["mac"]
+        self.assertEqual(mac["min_ram_gb"], 16)
+        self.assertEqual([(t["id"], t["min_ram_gb"], t["model"]) for t in mac["tiers"]],
+                         [("mac-16", 16, "12B-Q3"), ("mac-24", 24, "12B"),
+                          ("mac-32", 32, "12B"), ("mac-48", 48, "12B")])
+        for t in mac["tiers"]:
+            with self.subTest(tier=t["id"]):
+                self.assertLessEqual(t["history_default"] + 6000 + 4096, t["context"])
+                self.assertIn(t["kv_cache"], ("q4_0", "q8_0", "f16"))
+                self.assertIn(t["model"], TABLE["models"])
+                # About two thirds of a Mac's memory may go to graphics.
+                self.assertLessEqual(t["memory_need_gb"], t["min_ram_gb"] * 2 / 3)
+
+    def test_build_is_pinned(self):
+        files = TABLE["llama_cpp"]["builds"]["metal-arm64"]["files"]
+        self.assertEqual([f["name"] for f in files], ["llama-b11400-bin-macos-arm64.tar.gz"])
+        self.assertRegex(files[0]["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_windows_never_picks_the_mac_build(self):
+        for vendor in ("nvidia", "amd", "intel", "nvidia-unverified", None):
+            self.assertNotEqual(tiers.pick_build(TABLE, vendor, "610.88"), "metal-arm64")
+
+
+MAC_GRID = [   # (apple chip, memory GB) -> expected
+    (False, 64, (False, "intel_mac")),
+    (False, 16, (False, "intel_mac")),
+    (True, -1, (False, "low_ram")),
+    (True, 8, (False, "low_ram")),
+    (True, 15, (False, "low_ram")),
+    (True, 16, (True, "12B-Q3", "mps", "metal-arm64", False)),
+    (True, 18, (True, "12B-Q3", "mps", "metal-arm64", False)),
+    (True, 24, (True, "12B", "mps", "metal-arm64", False)),
+    (True, 36, (True, "12B", "mps", "metal-arm64", False)),
+    (True, 48, (True, "12B", "mps", "metal-arm64", False)),
+    (True, 128, (True, "12B", "mps", "metal-arm64", False)),
+]
+
+
+class MacPythonRuleTests(unittest.TestCase):
+    def test_grid(self):
+        for apple, ram, expected in MAC_GRID:
+            with self.subTest(apple=apple, ram=ram):
+                self.assertEqual(_summary(tiers.choose_mac(TABLE, apple, ram)), expected)
+
+    def test_offered_choice_carries_tier_settings(self):
+        c = tiers.choose_mac(TABLE, True, 36)
+        self.assertEqual((c["tier"], c["context"], c["kv_cache"], c["history_default"], c["vram_need_gb"]),
+                         ("mac-32", 32768, "f16", 22000, 13.0))
+
+
+def _bash():
+    git = shutil.which("git")
+    if git and os.name == "nt":
+        # git.exe is in Git\cmd (or Git\mingw64in): bash.exe is in Gitin.
+        for up in (1, 2):
+            candidate = Path(git).resolve().parents[up] / "bin" / "bash.exe"
+            if candidate.exists():
+                return str(candidate)
+        return None
+    return shutil.which("bash")
+
+
+_BASH = _bash()
+
+
+@unittest.skipUnless(_BASH, "bash not available")
+class MacShellAgreesTests(unittest.TestCase):
+    """The Mac installer, run for real with pretend Macs, agrees with Python."""
+
+    def test_grid_matches_python(self):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="amadeus_mac_hw_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        script = tmp / "install_macos.sh"
+        script.write_bytes(_MAC_INSTALLER.read_bytes().replace(b"\r\n", b"\n"))
+        for apple, ram, _ in MAC_GRID:
+            with self.subTest(apple=apple, ram=ram):
+                out = subprocess.run(
+                    [_BASH, str(script), str(tmp / "inst"), "--hardware-check-only", "--json",
+                     "--simulate-chip", "apple" if apple else "intel", "--simulate-ram-gb", str(ram)],
+                    capture_output=True, text=True, timeout=60)
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                hw = json.loads(out.stdout.strip().splitlines()[-1])
+                expected = tiers.choose_mac(TABLE, apple, ram)
+                self.assertEqual(hw["choice"], expected)
+                self.assertFalse((tmp / "inst").exists())      # installs nothing
+                if expected["offered"]:
+                    gb = tiers.download_bytes(TABLE, expected["model"], "metal-arm64") / 2 ** 30
+                    self.assertAlmostEqual(hw["download_gb"], gb, delta=0.11)
 
 
 if __name__ == "__main__":

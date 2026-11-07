@@ -24,13 +24,20 @@ separate memory configuration.
 
 You can change all of these at any time without reinstalling anything.
 
-### Her Built-in Model (Windows)
+### Her Built-in Model (Windows and Mac)
 
-When the Windows installer set up her own model (option A), she needs no
-server address or key: **Settings → Connection** shows it as **Built-in**,
-and can unload, load or switch it (for example when a game needs the
-graphics memory - or start her with `Start Amadeus without her model.bat`).
-You can switch to a cloud service or your own server there at any time.
+When the installer set up her own model (option A), she needs no server
+address or key: **Settings → Connection** shows it as **Built-in**, and can
+unload, load or switch it (for example when a game needs the graphics
+memory - or start her with `Start Amadeus without her model.bat` on Windows,
+`start_macos_no_model.command` on a Mac). You can switch to a cloud service
+or your own server there at any time.
+
+On a Mac (Apple chip, M1 or newer, 16 GB of memory or more) her model runs on
+the chip's graphics (Metal) and shares the Mac's memory with everything else:
+close memory-hungry programs for the best speed. Macs with 16-23 GB get the
+3-bit Gemma 4 12B, Macs with 24 GB or more the 12B QAT with a longer
+conversation memory. Intel Macs and Macs with less memory use option B.
 
 ### Reasoning
 

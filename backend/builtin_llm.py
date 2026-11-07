@@ -53,6 +53,15 @@ def load_config():
     return _cache["data"]
 
 
+def shared_memory(cfg=None) -> bool:
+    """Her model runs on a Mac's Apple chip (the installer's Metal build of
+    llama.cpp): processor and graphics share one memory, so there is no
+    graphics card to measure or mention (scripts/launcher.py has the same
+    rule)."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    return str(cfg.get("build") or "").startswith("metal")
+
+
 def active() -> bool:
     cfg = load_config()
     return bool(cfg) and cfg.get("mode") == "builtin"
@@ -113,6 +122,11 @@ MODEL_CATALOG = [
 ]
 
 
+# On a Mac the 3-bit model is not "for 8 GB cards" (scripts/local_llm_tiers.json
+# "mac" -> "labels"; a test keeps them equal).
+MAC_LABELS = {"12B-Q3": "Gemma 4 12B (3-bit)"}
+
+
 def catalog(cfg=None) -> list:
     """The "Get more models" list for Settings: each model's size, its
     official download link, whether it is already in the models folder, and
@@ -132,7 +146,9 @@ def catalog(cfg=None) -> list:
         else:
             fit = "smaller" if m["bytes"] < tier_bytes else "bigger"
         out.append({
-            "key": m["key"], "label": m["label"], "file": m["file"],
+            "key": m["key"],
+            "label": MAC_LABELS.get(m["key"], m["label"]) if shared_memory(cfg) else m["label"],
+            "file": m["file"],
             "gb": round(m["bytes"] / 1024 ** 3, 1),
             "url": (f"https://huggingface.co/{m['repo']}/resolve/{m['revision']}/"
                     f"{m['file']}?download=true"),
@@ -282,6 +298,8 @@ def describe() -> dict:
         # Her vision file next to the model she loads (pictures, Phase 3).
         "vision_file": os.path.basename(vision_file(selected_file(cfg))) if available else "",
         "context": (cfg or {}).get("context") if available else None,
+        # A Mac with an Apple chip: Settings says "memory", not "graphics card".
+        "shared_memory": available and shared_memory(cfg),
     }
 
 

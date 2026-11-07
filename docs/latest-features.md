@@ -6,7 +6,8 @@ Everything Amadeus can do today.
 The current version (v3.0) includes:
 
 - **Her own built-in local model** (v3.0): Gemma 4 through llama.cpp, set up by
-  the Windows installer to fit your graphics card - no account or API key needed
+  the installer to fit your graphics card (Windows) or your Mac's memory (Apple
+  chip, 16 GB or more) - no account or API key needed
 - **Pictures, documents and videos** (v3.0): she looks at pictures, reads PDF /
   Word / text documents (long ones with reading notes) and watches videos
   (still frames + what is said)
@@ -30,7 +31,7 @@ The current version (v3.0) includes:
   "Let her decide" by trust)
 - **First-meeting ceremony**: she wakes up on her own line and is honest
   about what she can't do yet; the model is configured in Settings
-- **One-shot installers**: Windows (v4.13) and macOS (v1.5) — both
+- **One-shot installers**: Windows (v4.13) and macOS (v1.6) — both
   cross-platform launcher support included
 - Persistent SQLite conversation history
 - Runtime LLM model switching
