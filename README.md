@@ -1,73 +1,48 @@
 # Amadeus-L
 
-Amadeus-L is a Steins;Gate 0-inspired AI character assistant designed to
-replicate the Amadeus AI assistant. This project recreates that in-story
-character as a real, usable companion: she thinks and speaks Japanese
-natively with English translation shown on screen.
+Amadeus-L is a Steins;Gate 0-inspired AI assistant designed to
+replicate the Amadeus AI assistant as seen in the anime!
 
-The project combines configurable LLMs, long-term memory, persistent
-conversation history, customizable character behavior, Japanese-first
-bilingual dialogue, neural voice synthesis, and Live2D character rendering
-in a single interactive system.
+Amadeus-L can run on her own built-in local
+model after installation， 
+sees your pictures, 
+reads your documents，watches your videos, 
+grows closer to you over time...
 
-Amadeus-L is a fork of the original project by @reflectors02, adapting it
-and adding experimental features such as local LLM support and other
-bleeding edge features such as web search.
+She also has long-term memory, 
+voice-first native-Japanese
+dialogue, web search and weather, and installers for Windows and Mac. 
 
-The project is still actively evolving. It is not intended to be a finished
-product; it is an ongoing attempt to explore what happens when an AI character
-is given personality, voice, visual presence, and continuity over time.
-
-**As of v3.0 (November 2026)**, Amadeus-L can run on her own built-in local
-model (no account needed), sees your pictures, reads your documents and watches
-your videos, grows closer to you over time, and can be opened from your phone
-through Tailscale. She also has long-term memory, voice-first native-Japanese
-dialogue, web search and weather, and installers for Windows and Mac. See the
-[Changelog](docs/changelog.md).
-
-![Amadeus Preview](docs/images/mainmenu.png)
-
-![Amadeus Preview](docs/images/settings.png)
 
 ---
 
 # Quick Start
 
-The fastest way to run Amadeus is a single copy-paste command. It installs
-everything (Python environments, the voice engine, her voice models, the web
-interface) and then you just start the app.
-
-Note: To use Amadeus as a companion and AI assistant, you will require either
-a local LLM or a cloud LLM model to connect with the app.
-
 ## Windows
 
-**The easy way: double-click to install.** No administrator rights are
-needed - everything installs for your own user account.
+**The easy way: double-click to install.** 
 
 1. Download [`Install Amadeus.bat`](https://github.com/cmh95209/Amadeus-Project/blob/main/Install%20Amadeus.bat)
-   (on that page, click the **Download raw file** button at the top right).
+   (right click the link and save it, or click the **Download raw file** button at the top right of the link).
 2. Double-click it. Windows may first say **"Windows protected your PC"**,
    because the file is not signed by a company: click **More info**, then
    **Run anyway**.
 3. A window opens, downloads the latest installer and runs it. Answer its
    first question (how Amadeus should think), then wait - see step 3 below.
 
-**Or with PowerShell** (the same installer):
+Note: If your antivirus blocks the installer, please add it to exclusion list or use the manual powershell method below:
 
-1. Press the Windows key, type **PowerShell** and open it. No administrator
-   rights are needed: everything installs for your own user account.
+**Manual installation with PowerShell**:
+
+1. Press the Windows key, type **PowerShell** and open it. 
 2. Paste this one line and press Enter:
 
    ```powershell
    Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_windows.ps1" -OutFile "$HOME\Downloads\install_windows.ps1"; & "$HOME\Downloads\install_windows.ps1"
    ```
 
-3. Wait. On a fresh PC the download-heavy steps (the voice engine and its
-   models) take a while; on a machine that has run the installer before, most
-   steps are skipped. The installer is safe to re-run if it ever stops
-   partway — it resumes where it left off — and it writes a log to
-   `install_log.txt` in the folder it installed into.
+3. Accept all the prompts when needed. The installer is safe to re-run if it ever stops
+   partway.
 4. When it prints **ALL DONE**, double-click `start_windows.bat` in the
    Amadeus folder (by default your `C:\Users\YOURUSERNAME\Amadeus` folder).
 
@@ -104,29 +79,21 @@ to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
 
 ## Your first meeting
 
-The first time you start the app, Amadeus wakes up with her own line — and
-she is honest about what she still can't do. Before she can talk you through
-anything, you have to give her a brain:
+If you chose to install the built-in model, the app will start without issues and you just need to insert your name into the settings menu. Amadeus will guide you through it.
+
+For other users who use cloud model or their custom model server, 
 
 1. Open **Settings → Connection** in the app.
 2. Point her at a language model — **any** of these work:
-   - a local server on your own GPU (Unsloth Desktop, Ollama, LM Studio,
-     llama.cpp, vLLM, or any OpenAI-compatible server) — leave the address
-     field empty and she auto-detects the usual local ports (8888, 8000);
-   - or a cloud model through **OpenRouter** (or any OpenAI-compatible
-     endpoint) with your API key.
+   - a local server on your own GPU (llama.cpp, vLLM, or any OpenAI-compatible server)
+   - or a cloud model through any OpenAI-compatible
+     endpoint with your API key.
 3. Pick the model name (the server's real model list appears as clickable
    chips, and "Test connection" verifies it before you commit).
 4. Save. She speaks her real wake-up line, and the conversation begins.
 
-Amadeus does **not** bundle or automatically install a local LLM — run the
-model with a server of your choice and point Amadeus at it. The installer
-handles everything *except* the model server.
-
-Prefer to install it by hand? The collapsible **Manual Installation**
-section further down lists every step the installer scripts do for you, in
-case you prefer to do it yourself or run into something the scripts cannot
-handle.
+Prefer to install EVERYTHING manually? Visit the **Manual Installation**
+section further down which lists every step the installer scripts do for you.
 
 ---
 
@@ -160,10 +127,13 @@ You type a message
 
 ### Does Amadeus run a local LLM?
 
-**Yes — or it can.** The conversational LLM can run **on your own GPU**
-(Unsloth Desktop, Ollama, LM Studio, llama.cpp, vLLM, or any
-OpenAI-compatible server) **or** remotely through **OpenRouter** with your
-own API key.
+**Yes it can.** The conversational LLM can run **on your own GPU**
+with its built-in model **or** remotely through **OpenRouter** with your
+own API key, **or** your own custom server for advanced users.
+
+For built-in users, it is a plug and play experience. Install the app and you can use it immediately.
+
+For manual local server and cloud servers,
 
 Point Amadeus at your model server in Settings → Connection ("Model server
 address"). Leave the field empty and Amadeus auto-detects the usual local
@@ -226,9 +196,11 @@ Pictures, documents, videos   ✓ v3.0
 Closeness levels + feelings   ✓ v3.0
 Remote access (Tailscale)     ✓ v3.0, your own devices only
 Display-language dropdown     planned (her voice stays Japanese)
+English voice                 planned
 Better animations/Live2D      planned
 Better web and harness tools  planned
 Agentic workflows             planned
+AR Glasses support            planned (prototype in development)
 
 ---
 
@@ -265,5 +237,5 @@ MIT; her long-term memory engine (CharacterMemory) is GPL-3.0 and runs only
 inside the sidecar's own process. Full notes and credits:
 [docs/license.md](docs/license.md).
 
-The voice sample is a copyright of the original IP holders (MAGES inc and relevant parties), and is only used for entertainment and personal purposes.
-Do not distribute or sell the voice sample without permission of the original IP holders.
+The voice sample and concept of Amadeus is a copyright of the original IP holders (MAGES inc and relevant parties), and is only used for entertainment and personal purposes.
+Do not attempt to sell or commercialize the app and/or voice sample without permission of the original IP holders.
