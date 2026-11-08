@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { SpeechPlayer } from "../audio/SpeechPlayer";
+import type { VoicePlayback } from "../audio/voicePacing";
 import { KurisuController } from "../live2d/KurisuController";
 
 import type { PlayMotionResult } from "../live2d/MotionPlayer";
@@ -27,10 +28,22 @@ export type Live2DCharacterHandle = {
 const REDRAW_LIMIT = 3;
 const REDRAW_WINDOW_MS = 60_000;
 
-const Live2DCharacter = forwardRef<Live2DCharacterHandle, { onSpeechError?: (message: string) => void }>(
-  function Live2DCharacter({ onSpeechError }, ref) {
+type Live2DCharacterProps = {
+  onSpeechError?: (message: string) => void;
+  /** Settings -> Preferences -> Voice playback. */
+  voicePlayback?: VoicePlayback;
+  /** 0..1 while her voice is prepared before it plays; null when not waiting. */
+  onVoicePreparing?: (progress: number | null) => void;
+};
+
+const Live2DCharacter = forwardRef<Live2DCharacterHandle, Live2DCharacterProps>(
+  function Live2DCharacter({ onSpeechError, voicePlayback = "smooth", onVoicePreparing }, ref) {
     const onErrorRef = useRef(onSpeechError);
     onErrorRef.current = onSpeechError;
+    const onPreparingRef = useRef(onVoicePreparing);
+    onPreparingRef.current = onVoicePreparing;
+    const playbackRef = useRef(voicePlayback);
+    playbackRef.current = voicePlayback;
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const controllerRef = useRef<KurisuController | null>(null);
     const speechPlayerRef = useRef<SpeechPlayer | null>(null);
@@ -68,13 +81,19 @@ const Live2DCharacter = forwardRef<Live2DCharacterHandle, { onSpeechError?: (mes
         onSpeakingChange: (speaking) => controllerRef.current?.setSpeaking(speaking),
         onAmplitude: (value) => controllerRef.current?.setLipSyncValue(value),
         onError: (message) => onErrorRef.current?.(message),
+        onPreparing: (progress) => onPreparingRef.current?.(progress),
       });
+      speechPlayer.setPlayback(playbackRef.current);
       speechPlayerRef.current = speechPlayer;
       return () => {
         speechPlayerRef.current = null;
         speechPlayer.destroy();
       };
     }, []);
+
+    useEffect(() => {
+      speechPlayerRef.current?.setPlayback(voicePlayback);
+    }, [voicePlayback]);
 
     useEffect(() => {
       const canvas = canvasRef.current;

@@ -149,6 +149,7 @@ export type StreamHooks = {
 
 export async function sendMessage(
   userInput: string, hooks: StreamHooks = {}, attachmentIds: number[] = [],
+  voiceEarly = false,
 ): Promise<MessageTurn> {
   const response = await fetch(`${API_BASE}/`, {
     method: "POST",
@@ -159,6 +160,10 @@ export async function sendMessage(
       user_input: userInput,
       // The pictures sent with this message (uploaded when attached).
       ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
+      // Her voice starts before the English line (Voice playback: Early /
+      // Right away): on a processor voice the backend then writes the
+      // English line after she has spoken, so the two never share the PC.
+      ...(voiceEarly ? { voice_early: true } : {}),
     }),
   });
 

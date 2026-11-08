@@ -278,6 +278,45 @@ button {
   .status-dot.pulse { animation: none; }
 }
 
+/* Her voice is being prepared before it plays (Voice playback: Smooth,
+   Early, When fully ready - a slower PC). */
+.voice-preparing {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.voice-preparing-label {
+  white-space: nowrap;
+}
+
+.voice-preparing-track {
+  width: 110px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.voice-preparing-fill {
+  display: block;
+  height: 100%;
+  background: #79a889;
+  border-radius: 2px;
+  transition: width 0.25s ease-out;
+}
+
+@media (max-width: 520px) {
+  .voice-preparing-track { width: 64px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-preparing-fill { transition: none; }
+}
+
 .settings-help { color: #99a5b7; font-size: 12px; line-height: 1.5; margin: 8px 0 20px; }
 .settings-error { color: #e3b5b5; font-size: 13px; }
 

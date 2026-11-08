@@ -38,6 +38,13 @@ import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from 
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
 import {
+  VOICE_PLAYBACK_CHOICES,
+  loadVoicePlayback,
+  saveVoicePlayback,
+  voiceStartsEarly,
+} from "./audio/voicePacing";
+import type { VoicePlayback } from "./audio/voicePacing";
+import {
   API_BASE,
   getCurrentModel,
   getPersonality,
@@ -184,17 +191,16 @@ export default function App() {
       return false;
     }
   });
-  // Off (default): her voice and the bubble wait for the English line, so
-  // text and voice arrive together. On: she starts speaking as soon as her
-  // Japanese line is written; her Japanese line is then always shown, so the
-  // bubble is never blank while the English is being written.
-  const [voiceEarly, setVoiceEarly] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem("amadeusVoiceEarly") === "1";
-    } catch {
-      return false;
-    }
-  });
+  // Settings -> Preferences -> Voice playback (audio/voicePacing.ts).
+  // Smooth / When fully ready: her voice and the bubble wait for the English
+  // line, so text and voice arrive together. Early / Right away: she starts
+  // speaking as soon as her Japanese line is written; her Japanese line is
+  // then always shown, so the bubble is never blank while the English is
+  // being written. (Replaces the "Start her voice early" switch, 2026-11-08.)
+  const [voicePlayback, setVoicePlayback] = useState<VoicePlayback>(() => loadVoicePlayback());
+  const voiceEarly = voiceStartsEarly(voicePlayback);
+  // 0..1 while her voice is being prepared before it plays (footer bar).
+  const [voicePreparing, setVoicePreparing] = useState<number | null>(null);
   const japaneseShown = showJapanese || voiceEarly;
   const [editSaving, setEditSaving] = useState(false);
   const [voiceRetention, setVoiceRetentionState] = useState<number>(100);
@@ -530,12 +536,14 @@ export default function App() {
   }, [showJapanese]);
 
   useEffect(() => {
+    saveVoicePlayback(voicePlayback);
     try {
+      // The old switch, kept in step for an older build on this browser.
       localStorage.setItem("amadeusVoiceEarly", voiceEarly ? "1" : "0");
     } catch {
-      // Storage blocked: the switch still works for this visit.
+      // Storage blocked: the choice still works for this visit.
     }
-  }, [voiceEarly]);
+  }, [voicePlayback, voiceEarly]);
 
   // Chat replies arrive with her Japanese line, but greetings and touch
   // reactions are added locally without it. While the Japanese line is
@@ -1178,7 +1186,7 @@ export default function App() {
             });
           }
         },
-      }, sent.ids);
+      }, sent.ids, voiceEarly);
       characterRef.current?.setLooking(false);
       let reply = turn.reply;
       if (!voiceEarly && !reply.response) {
@@ -2025,7 +2033,12 @@ export default function App() {
           <div className="scanline" />
 
           <div className="character-viewport">
-            <Live2DCharacter ref={characterRef} onSpeechError={setStatus} />
+            <Live2DCharacter
+              ref={characterRef}
+              onSpeechError={setStatus}
+              voicePlayback={voicePlayback}
+              onVoicePreparing={setVoicePreparing}
+            />
 
             {(Object.keys(interactions) as InteractionName[]).map((name) => {
               const interaction = interactions[name];
@@ -2075,6 +2088,17 @@ export default function App() {
           <span>
             {footer.text}
           </span>
+          {voicePreparing !== null && (
+            <span className="voice-preparing" aria-label="Preparing her voice">
+              <span className="voice-preparing-label">Preparing her voice…</span>
+              <span className="voice-preparing-track" aria-hidden="true">
+                <span
+                  className="voice-preparing-fill"
+                  style={{ width: `${Math.round(Math.max(0.04, voicePreparing) * 100)}%` }}
+                />
+              </span>
+            </span>
+          )}
         </footer>
       </section>
 
@@ -3199,7 +3223,7 @@ export default function App() {
                       messages - this is also what she remembers. Editing one of
                       her messages rewrites it to match (her long-term memory may
                       already have learned the old line). Saved in this browser.
-                      {voiceEarly && " Always on while her voice starts early (below)."}
+                      {voiceEarly && " Always on while her voice plays Early or Right away (below)."}
                     </span>
                   </div>
                   <button
@@ -3214,25 +3238,26 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="settings-toggle-row" aria-label="Start her voice early">
-                  <div className="settings-toggle-text">
-                    <span className="settings-toggle-title">Start her voice early</span>
-                    <span className="settings-toggle-desc">
-                      She starts speaking as soon as her Japanese line is written,
-                      and the English appears a moment later. Her Japanese line is
-                      shown meanwhile. Off: her voice and the English text arrive
-                      together, a few seconds later. Saved in this browser.
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    className={`settings-toggle${voiceEarly ? " on" : ""}`}
-                    onClick={() => setVoiceEarly((v) => !v)}
-                    aria-pressed={voiceEarly}
-                  >
-                    <span className="settings-toggle-knob" aria-hidden="true" />
-                    <span>{voiceEarly ? "On" : "Off"}</span>
-                  </button>
+                <div className="settings-reasoning" aria-label="Voice playback">
+                  <label>
+                    Voice playback
+                    <select
+                      value={voicePlayback}
+                      onChange={(event) => setVoicePlayback(event.target.value as VoicePlayback)}
+                      aria-describedby="voice-playback-help"
+                    >
+                      {VOICE_PLAYBACK_CHOICES.map((choice) => (
+                        <option key={choice.value} value={choice.value}>
+                          {choice.title}{choice.value === "smooth" ? " (recommended)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="settings-help" id="voice-playback-help">
+                    {VOICE_PLAYBACK_CHOICES.find((choice) => choice.value === voicePlayback)?.desc}
+                    {" "}While she waits, the bar at the bottom shows her voice being
+                    prepared. Saved in this browser.
+                  </p>
                 </div>
 
                 <div className="settings-reasoning" aria-label="She reacts when you attach something">
