@@ -71,7 +71,12 @@ class EnvSuffixTests(unittest.TestCase):
         for env in (plain, mine):
             (env / rel).parent.mkdir(parents=True, exist_ok=True)
             (env / rel).write_text("", encoding="utf-8")
-        with patch.object(self.launcher, "find_conda", return_value=str(scripts / "conda.exe")):
+        # Keep the lookup inside the pretend folders: since v4.13.3 it also
+        # looks beside the running Python's environment and in ~/.conda/envs
+        # (this PC's real ones may hold an "amadeus-cm-test").
+        with patch.object(self.launcher, "find_conda", return_value=str(scripts / "conda.exe")), \
+             patch.object(self.launcher.sys, "executable", str(self.tmp / "py" / "python.exe")), \
+             patch.object(self.launcher.Path, "home", return_value=self.tmp / "home"):
             self.assertEqual(self.launcher._cm_base_python(), mine / rel)
             # The plain env is never used as a stand-in for a missing own env.
             shutil.rmtree(mine)

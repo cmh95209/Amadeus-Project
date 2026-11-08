@@ -531,18 +531,36 @@ def _cm_base_python() -> Path | None:
     sidecar installs cleanly on EVERY fresh machine. Returns None when no
     such environment is present (falls back to this launcher's interpreter,
     which is fine on machines whose sidecar venv is already installed)."""
-    conda = find_conda()
-    if not conda:
-        return None
-    home = conda_home(conda)
-    if home is None:
-        return None
     name = env_name("amadeus-cm")
-    if os.name == "nt":
-        candidate = home / "envs" / name / "python.exe"
-    else:
-        candidate = home / "envs" / name / "bin" / "python"
-    return candidate if candidate.exists() else None
+    for env_dir in _conda_env_dirs():
+        candidate = env_dir / name / ("python.exe" if os.name == "nt" else "bin/python")
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _conda_env_dirs() -> list[Path]:
+    """Folders that may hold this install's conda environments, best first:
+    the conda installation's envs/; the folder holding the environment this
+    launcher runs in (its sibling environments live there too - also when
+    conda keeps them outside its own folder, e.g. %USERPROFILE%\\.conda\\envs
+    for an all-users C:\\ProgramData\\miniconda3, 2026-11-08 tester report);
+    and ~/.conda/envs."""
+    dirs: list[Path] = []
+    conda = find_conda()
+    home = conda_home(conda) if conda else None
+    if home is not None:
+        dirs.append(home / "envs")
+    exe = Path(sys.executable)
+    own_env = exe.parent if os.name == "nt" else exe.parent.parent
+    if own_env.parent.name == "envs":
+        dirs.append(own_env.parent)
+    dirs.append(Path.home() / ".conda" / "envs")
+    unique: list[Path] = []
+    for d in dirs:
+        if not any(os.path.normcase(str(d)) == os.path.normcase(str(u)) for u in unique):
+            unique.append(d)
+    return unique
 
 
 def conda_home(conda: str) -> Path | None:
@@ -639,7 +657,12 @@ log_handles: list[IO[str]] = []
 
 
 def find_conda() -> str | None:
+    local = os.environ.get("LOCALAPPDATA", "")
+    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
     candidates = [
+        # The conda the installer used (v4.13.3+ records it): her voice
+        # engine's environment was made by that one.
+        _recorded_conda(),
         shutil.which("conda"),
         os.environ.get("CONDA_EXE"),
         str(Path.home() / "anaconda3" / "bin" / "conda"),
@@ -652,6 +675,10 @@ def find_conda() -> str | None:
         r"C:\ProgramData\anaconda3\Scripts\conda.exe",
         str(Path.home() / "anaconda3" / "Scripts" / "conda.exe"),
         str(Path.home() / "miniconda3" / "Scripts" / "conda.exe"),
+        # Every other place the Windows installer accepts a Miniconda.
+        str(Path(program_data) / "miniconda3" / "Scripts" / "conda.exe"),
+        str(Path(local) / "miniconda3" / "Scripts" / "conda.exe") if local else None,
+        str(Path(local) / "Continuum" / "miniconda3" / "Scripts" / "conda.exe") if local else None,
     ]
 
     for candidate in candidates:
@@ -659,6 +686,18 @@ def find_conda() -> str | None:
             return candidate
 
     return None
+
+
+RECORDED_CONDA_FILE = RUNTIME_DIR / "conda_exe.txt"
+
+
+def _recorded_conda() -> str | None:
+    """The conda path the Windows installer wrote down, or None."""
+    try:
+        text = RECORDED_CONDA_FILE.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return None
+    return text or None
 
 
 # Amadeus' own Node.js (Windows installer v4.13+): set up when the PC has no

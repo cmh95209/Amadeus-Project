@@ -1,9 +1,17 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.2  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.3  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.13.3 (November 2026, app v3.0):
+#   - The installer writes down where her Python and conda are
+#     (.runtimepp_python.txt, .runtime\conda_exe.txt), and the start
+#     script, the health check and the launcher use that. They also look in
+#     every place the installer accepts a Miniconda (including an all-users
+#     C:\ProgramData\miniconda3) and in %USERPROFILE%\.conda\envs. (Before,
+#     such PCs got "Amadeus's Python (conda env "amadeus") could not be found".)
 #
 #  WHAT'S NEW IN v4.13.2 (November 2026, app v3.0):
 #   - An NVIDIA card keeps the NVIDIA (CUDA) version of llama.cpp when it
@@ -261,7 +269,7 @@ param(
     # -SkipLlmDownload): no programs, environments or project download.
     [switch]$LlmScreensOnly
 )
-$InstallerVersion = "v4.13.2"
+$InstallerVersion = "v4.13.3"
 # Set in step 2 when the PC's own Node.js could not run her web page and
 # Amadeus' own copy is used instead (step 9 then sets the web page's parts up
 # again with it).
@@ -820,6 +828,37 @@ function Env-Python($name){
     $e = Get-EnvPath $name
     if ($e -and (Test-Path (Join-Path $e "python.exe"))) { return (Join-Path $e "python.exe") }
     return $null
+}
+
+# v4.13.3: write down WHERE this install's Python and conda are, inside the
+# project (.runtime\app_python.txt, .runtime\conda_exe.txt), so
+# start_windows.bat, check_amadeus.bat and the launcher never have to guess.
+# (2026-11-08, a tester: "Amadeus's Python (conda env "amadeus") could not be
+# found" - the installer finds conda in more places, e.g. an all-users
+# C:\ProgramData\miniconda3 whose environments may even land in
+# %USERPROFILE%\.conda\envs, than the start script used to look in.)
+# app_python.txt is read by a .bat file, so it is saved in the console's own
+# code page (OEM) - a user name with accents or Japanese stays readable.
+# conda_exe.txt is read only by the launcher (Python): UTF-8.
+function Save-RuntimePaths($proj, $appPy, $condaExe){
+    $rt = Join-Path $proj ".runtime"
+    try {
+        New-Item -ItemType Directory -Force -Path $rt | Out-Null
+        if ($appPy -and (Test-Path -LiteralPath $appPy)) {
+            # The console code page Windows really uses (the registry value -
+            # 65001 when "Use Unicode UTF-8" is on, which .NET's culture
+            # setting does not show), without a byte-order mark.
+            $cp = 0
+            try { $cp = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage' -ErrorAction Stop).OEMCP } catch {}
+            if ($cp -le 0) { $cp = [Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage }
+            $oem = if ($cp -eq 65001) { New-Object System.Text.UTF8Encoding $false } else { [Text.Encoding]::GetEncoding($cp) }
+            [IO.File]::WriteAllText((Join-Path $rt "app_python.txt"), [string]$appPy, $oem)
+        }
+        if ($condaExe -and (Test-Path -LiteralPath $condaExe)) {
+            [IO.File]::WriteAllText((Join-Path $rt "conda_exe.txt"), [string]$condaExe, (New-Object System.Text.UTF8Encoding $false))
+        }
+        Write-LogOnly ("  recorded for the start script: python=" + $appPy + " conda=" + $condaExe)
+    } catch { Write-LogOnly ("  could not record the Python/conda paths: " + $_) }
 }
 
 # Run pip inside one of the toolboxes. Prefers the toolbox's own Python
@@ -2156,6 +2195,7 @@ try {
     Pop-Location
     if ($smoke -match "SMOKE_OK") { Log "  Backend ready (startup smoke test passed)." "Green" }
     else { Log "  WARNING: the startup smoke test did not pass. If Amadeus fails to start later, send the log." "Yellow"; Log $smoke }
+    Save-RuntimePaths $proj $amPy $conda
 
     # Her memory (the CharacterMemory sidecar: its venv + about 1.3 GB of
     # packages). Set up HERE, not on her first start (v4.13): a first launch

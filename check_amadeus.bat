@@ -22,10 +22,19 @@ set "ENV_SUFFIX="
 if exist "%~dp0.runtime\env_suffix.txt" set /p ENV_SUFFIX=<"%~dp0.runtime\env_suffix.txt"
 set "AMADEUS_ENV=amadeus%ENV_SUFFIX%"
 set "PY="
-if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+rem Where the installer (v4.13.3+) recorded it first, then the same places
+rem start_windows.bat looks in.
+set "RECORDED_PY="
+if exist "%~dp0.runtime\app_python.txt" set /p RECORDED_PY=<"%~dp0.runtime\app_python.txt"
+if defined RECORDED_PY if exist "%RECORDED_PY%" set "PY=%RECORDED_PY%"
+if not defined PY if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined PY if exist "%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined PY if exist "%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined PY if exist "%LOCALAPPDATA%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%LOCALAPPDATA%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined PY if exist "%LOCALAPPDATA%\Continuum\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%LOCALAPPDATA%\Continuum\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined PY if exist "%ProgramData%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%ProgramData%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined PY if exist "%ProgramData%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%ProgramData%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined PY if exist "%USERPROFILE%\.conda\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\.conda\envs\%AMADEUS_ENV%\python.exe"
 if not defined ENV_SUFFIX if not defined PY if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "PY=%CONDA_PREFIX%\python.exe"
 if not defined PY (
   echo [PROBLEM] Could not find a Python environment named "%AMADEUS_ENV%" in the

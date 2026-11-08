@@ -1,5 +1,17 @@
 # Changelog
 
+## Windows installer v4.13.3 — Her Python Is Always Found — November 2026
+
+**"Amadeus's Python (conda env "amadeus") could not be found" on some PCs.**
+The installer accepts a Miniconda that is already on the PC in more places
+(for example one installed for all users in `C:\ProgramData\miniconda3`, whose
+environments can end up in `%USERPROFILE%\.conda\envs`) than the start script
+looked in. Now the installer writes down where her Python and conda are
+(`.runtimepp_python.txt`, `.runtime\conda_exe.txt`), and the start script,
+the health check (`check_amadeus.bat`) and the launcher use that first. They
+also look in all of those places, and the error message says what to do (run
+the installer again; if it comes back, send `install_log.txt`).
+
 ## Windows installer v4.13.2 — NVIDIA Cards Keep the Fast Version — November 2026
 
 **An NVIDIA card no longer ends up with the slower version of her model's helper

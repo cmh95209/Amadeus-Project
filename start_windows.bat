@@ -18,16 +18,29 @@ set "ENV_SUFFIX="
 if exist ".runtime\env_suffix.txt" set /p ENV_SUFFIX=<".runtime\env_suffix.txt"
 set "AMADEUS_ENV=amadeus%ENV_SUFFIX%"
 set "AMADEUS_PY="
-if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+rem 1) Where the installer (v4.13.3+) recorded it - no guessing.
+set "RECORDED_PY="
+if exist ".runtime\app_python.txt" set /p RECORDED_PY=<".runtime\app_python.txt"
+if defined RECORDED_PY if exist "%RECORDED_PY%" set "AMADEUS_PY=%RECORDED_PY%"
+rem 2) Every place the installer accepts a Miniconda/Anaconda, plus the
+rem    per-user folder conda uses when its own folder is not writable
+rem    (an all-users install in C:\ProgramData - 2026-11-08 tester report).
+if not defined AMADEUS_PY if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined AMADEUS_PY if exist "%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\Continuum\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\Continuum\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%ProgramData%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%ProgramData%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%ProgramData%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%ProgramData%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
+if not defined AMADEUS_PY if exist "%USERPROFILE%\.conda\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\.conda\envs\%AMADEUS_ENV%\python.exe"
 if not defined ENV_SUFFIX if not defined AMADEUS_PY if defined CONDA_PREFIX if exist "%CONDA_PREFIX%\python.exe" set "AMADEUS_PY=%CONDA_PREFIX%\python.exe"
 if defined AMADEUS_PY goto :found_python
 
 echo ERROR: Amadeus's Python (conda env "%AMADEUS_ENV%") could not be found.
-echo Install it with scripts\install_windows.ps1 (or: conda env create -f
-echo backend\environment.yml -n amadeus), then try again.
+echo Most often the install did not finish. Run the Amadeus installer again
+echo (Install Amadeus.bat) - it continues where it stopped.
+echo If this message comes back, send your helper the file install_log.txt
+echo from the folder that holds Amadeus-Project.
 pause
 exit /b 1
 :found_python
