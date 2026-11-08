@@ -433,6 +433,32 @@ class LlamaBuildTests(_FunctionBase):
         out = self.run_bash("install_llama_build cuda-13.4 && echo RESULT=OK", setup)
         self.assertIn("Already have llama.cpp", out.stdout)
 
+    def test_missing_libgomp_comes_from_conda_forge(self):
+        # 2026-11-08 WSL test: a minimal Ubuntu lacks libgomp.so.1, which
+        # every llama.cpp Linux build needs.
+        archives = {"llama-b11400-bin-ubuntu-vulkan-x64.tar.gz": _tar({
+            "llama-b11400/llama-server": (_server_program(devices="Vulkan0: stand-in",
+                                                          need_lib="libgomp.so.1"), 0o755)})}
+        fake = self.tmp / "fakebin"
+        fake.mkdir()
+        (fake / "ldd").write_text(
+            '#!/bin/sh\n[ -f "$(dirname "$1")/libgomp.so.1" ] && echo "libgomp.so.1 => found" '
+            '|| echo "\tlibgomp.so.1 => not found"\n', encoding="utf-8")
+        (fake / "conda").write_text(
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = "-p" ] && d="$2"; shift; done\n'
+            'mkdir -p "$d/lib" && echo lib > "$d/lib/libgomp.so.1.0.0"\n', encoding="utf-8")
+        for f in ("ldd", "conda"):
+            (fake / f).chmod(0o755)
+        setup = (self.serve({"vulkan": (0, archives)}) +
+                 f"\nPATH='{_posix(fake)}':\"$PATH\"\nTOOLS_DIR='{_posix(self.tmp / 'tools')}'\n"
+                 f"CONDA='{_posix(fake / 'conda')}'")
+        out = self.run_bash("if install_llama_build vulkan; then echo RESULT=OK; "
+                            "else echo \"RESULT=ERR $VF_ERROR\"; fi", setup)
+        self.assertEqual(self.result(out), "RESULT=OK", out.stdout + out.stderr)
+        self.assertIn("adding the helper library llama.cpp needs (libgomp)", out.stdout)
+        self.assertTrue((self.inst / "models" / "llama.cpp" / "b11400-linux-vulkan" / "llama-b11400"
+                         / "libgomp.so.1").is_file())
+
     def test_a_build_that_cannot_see_the_card_is_refused(self):
         setup = self.serve({"vulkan": (0, self.vulkan_archive(devices="(none)"))})
         out = self.run_bash("if install_llama_build vulkan; then echo RESULT=OK; "

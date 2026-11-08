@@ -755,6 +755,21 @@ expand_tar_safe() {
     tar -xzf "$1" -C "$2" || { VF_ERROR="The llama.cpp download could not be unpacked."; return 1; }
 }
 
+# conda-forge's libgomp (in ~/.amadeus-tools/libs) copied into $1 as
+# libgomp.so.1. Returns 1 when it cannot be had.
+provide_libgomp() {
+    local libs="$TOOLS_DIR/libs" lib
+    lib="$(ls "$libs/lib/"libgomp.so.1* 2>/dev/null | head -1)"
+    if [ -z "$lib" ]; then
+        [ -n "${CONDA:-}" ] || return 1
+        rm -rf "$libs"
+        "$CONDA" create -y -q -p "$libs" -c conda-forge --override-channels libgomp >>"$INSTALL_LOG" 2>&1 || return 1
+        lib="$(ls "$libs/lib/"libgomp.so.1* 2>/dev/null | head -1)"
+        [ -n "$lib" ] || return 1
+    fi
+    cp -L "$lib" "$1/libgomp.so.1"
+}
+
 # Which graphics system a build must see in llama-server --list-devices.
 build_device_word() {
     case "$1" in cuda-*) echo "CUDA" ;; vulkan) echo "Vulkan" ;; *) echo "" ;; esac
@@ -797,6 +812,14 @@ install_llama_build() {
         cp -a "$sub/." "$srv_dir/" && rm -rf "$sub"
     done
     chmod +x "$found" 2>/dev/null || true
+    # llama.cpp's Linux builds need the OpenMP helper library (libgomp.so.1):
+    # part of most desktops, but missing on minimal systems (2026-11-08,
+    # WSL test: "error while loading shared libraries: libgomp.so.1"). Then
+    # conda-forge's copy goes next to llama-server, where it looks first.
+    if command -v ldd >/dev/null 2>&1 && ldd "$found" 2>/dev/null | grep -q 'libgomp\.so\.1 => not found'; then
+        log "  (adding the helper library llama.cpp needs (libgomp) from conda-forge...)"
+        provide_libgomp "$srv_dir" || log "  (could not add it right now - details in the install log)"
+    fi
     # Start test: the program must run (catches a missing library file) ...
     ver="$("$found" --version 2>&1)"; code=$?
     printf '%s\n' "  llama-server --version (exit $code): $ver" >> "$INSTALL_LOG"
