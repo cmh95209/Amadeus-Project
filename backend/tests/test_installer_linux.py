@@ -119,6 +119,13 @@ class ScriptTextTests(unittest.TestCase):
         self.assertEqual(_code_only(_block("NEW DEFAULTS FUNCTIONS")),
                          _code_only(_block("NEW DEFAULTS FUNCTIONS", _MAC)))
 
+    def test_git_lfs_is_switched_on_from_the_home_folder(self):
+        # 2026-11-08 WSL test: started inside another git folder, "git lfs
+        # install" failed silently and the voice models came as placeholders.
+        text = _text()
+        self.assertIn('( cd "$HOME" && git lfs install --skip-repo )', text)
+        self.assertIn("git config --global --get filter.lfs.process", text)
+
     def test_ffmpeg_lands_where_the_app_looks(self):
         text = _text()
         block = text[text.index("# --- 2d. FFmpeg"):text.index("# --- 2e.")]

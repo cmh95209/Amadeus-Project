@@ -1419,7 +1419,15 @@ fi
 log "  git: $(git --version 2>/dev/null | head -1)"
 lfs_probe="$(git lfs version 2>&1 | tail -1)"
 if printf '%s' "$lfs_probe" | grep -q "git-lfs/"; then
-    git lfs install >/dev/null 2>&1 || true
+    # From the home folder: started inside some other git folder, "git lfs
+    # install" works on THAT folder (or fails) and the voice models later
+    # arrive as placeholders (2026-11-08, WSL test). Then proven: the
+    # setting must really be in the user's git settings.
+    ( cd "$HOME" && git lfs install --skip-repo ) >>"$INSTALL_LOG" 2>&1 || true
+    if [ -z "$(git config --global --get filter.lfs.process 2>/dev/null)" ]; then
+        die "Git-LFS is installed but could not be switched on (git lfs install)." \
+            "Re-run the installer; if it fails again, send the install log."
+    fi
     log "  Git-LFS ready."
 else
     log "  (asking Git-LFS to identify itself said: $lfs_probe)"
