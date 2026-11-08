@@ -1,8 +1,8 @@
 # Amadeus-L
 <p align="center">
-  <img width="32%" alt="Amadeus screenshot 1" src="https://github.com/user-attachments/assets/0640a1ec-2cf2-4df8-b62b-5f408a661b04" />
-  <img width="32%" alt="Amadeus screenshot 2" src="https://github.com/user-attachments/assets/26388ca1-ac1c-4e20-bf4e-efcbd61cbe50" />
-  <img width="32%" alt="Amadeus screenshot 3" src="https://github.com/user-attachments/assets/915dbf8c-e8d6-4710-ae73-784d0991b70d" />
+  <a href="docs/images/screenshot-poke.png"><img width="32%" alt="Amadeus answering a poke, with her English and Japanese lines" src="docs/images/screenshot-poke.png" /></a>
+  <a href="docs/images/screenshot-web-search.png"><img width="32%" alt="Amadeus answering a travel question with web search, pictures and videos on her desk" src="docs/images/screenshot-web-search.png" /></a>
+  <a href="docs/images/screenshot-pictures.png"><img width="32%" alt="Amadeus reading a newspaper photo the user sent" src="docs/images/screenshot-pictures.png" /></a>
 </p>
 Amadeus-L is a Steins;Gate 0-inspired AI assistant designed to
 replicate the Amadeus AI assistant as seen in the anime!
