@@ -124,7 +124,8 @@ class InstallerNodeWiringTests(unittest.TestCase):
                 self.assertIn("pyopenjtalk.g2p(", line)
 
     def test_version(self):
-        self.assertIn('$InstallerVersion = "v4.13.1"', self.text)
+        # v4.13.1 brought the Node.js check; later hotfixes keep it.
+        self.assertRegex(self.text, r'\$InstallerVersion = "v4\.13\.\d+"')
 
     def test_step2_uses_own_copy_when_the_pc_node_has_a_problem(self):
         self.assertIn("$sysNodeProblem = Get-NodeProblem $sysNode.Source", self.text)

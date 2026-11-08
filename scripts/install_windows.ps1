@@ -1,9 +1,16 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.2  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.13.2 (November 2026, app v3.0):
+#   - An NVIDIA card keeps the NVIDIA (CUDA) version of llama.cpp when it
+#     only failed to DOWNLOAD (for example while GitHub is down): no more
+#     switch to the slower general (Vulkan) version. Run the installer again
+#     later and it fetches the right one. Vulkan is still the fallback when
+#     the CUDA version is downloaded but cannot start on the PC.
 #
 #  WHAT'S NEW IN v4.13.1 (November 2026, app v3.0):
 #   - A Node.js already on the PC that cannot run her web page (older than
@@ -254,7 +261,7 @@ param(
     # -SkipLlmDownload): no programs, environments or project download.
     [switch]$LlmScreensOnly
 )
-$InstallerVersion = "v4.13.1"
+$InstallerVersion = "v4.13.2"
 # Set in step 2 when the PC's own Node.js could not run her web page and
 # Amadeus' own copy is used instead (step 9 then sets the web page's parts up
 # again with it).
@@ -1356,7 +1363,15 @@ function Install-LlamaBuild($build){
     }
     $dl = Join-Path $ModelsDir "downloads"
     foreach ($f in $TierTable.llama_cpp.builds.$build.files) {
-        Get-VerifiedFile ("https://github.com/ggml-org/llama.cpp/releases/download/" + $rel + "/" + $f.name) (Join-Path $dl $f.name) $f.bytes $f.sha256 ("llama.cpp " + $f.name)
+        # v4.13.2: a failed DOWNLOAD is marked as such, so the caller keeps
+        # this build instead of switching to Vulkan (Install-LlamaWithFallback).
+        try {
+            Get-VerifiedFile ("https://github.com/ggml-org/llama.cpp/releases/download/" + $rel + "/" + $f.name) (Join-Path $dl $f.name) $f.bytes $f.sha256 ("llama.cpp " + $f.name)
+        } catch {
+            $e = New-Object System.Exception($_.Exception.Message)
+            $e.Data["amadeus_kind"] = "download"
+            throw $e
+        }
     }
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -1418,10 +1433,20 @@ function Write-LocalLlmConfig($proj, $choice, $exe, $serverOk, $modelPath, $mode
 # llama.cpp for this PC's build, falling back to the general Vulkan build
 # when the CUDA one cannot be installed or started. Returns the path to
 # llama-server.exe, or "" (the reason is logged); $choice.build is updated.
+# v4.13.2: NOT when the CUDA build only failed to DOWNLOAD (2026-11-08, a
+# tester with an RTX 3080 Ti during a GitHub outage: every download said
+# 504, and the installer went on to Vulkan - had GitHub come back between
+# the two, an NVIDIA card would have quietly got the slower Vulkan build).
+# The choice stays CUDA; running the installer again fetches it (the build
+# is decided from the graphics card on every run, never from a fallback).
 function Install-LlamaWithFallback($choice){
     try { return (Install-LlamaBuild $choice.build) }
     catch {
         Log ("  " + $_.Exception.Message) "Yellow"
+        if ($_.Exception.Data["amadeus_kind"] -eq "download") {
+            Log ("  The " + $choice.build + " version of llama.cpp (the right one for this PC) could not be downloaded right now. Run the installer again later - it continues where it stopped.") "Yellow"
+            return ""
+        }
         if ($choice.build -ne "vulkan") {
             Log "  Trying the general (Vulkan) version of llama.cpp instead..." "Yellow"
             try { $exe = Install-LlamaBuild "vulkan"; $choice.build = "vulkan"; return $exe } catch { Log ("  " + $_.Exception.Message) "Red" }

@@ -1,5 +1,15 @@
 # Changelog
 
+## Windows installer v4.13.2 — NVIDIA Cards Keep the Fast Version — November 2026
+
+**An NVIDIA card no longer ends up with the slower version of her model's helper
+program after a download problem.** When the NVIDIA (CUDA) version of llama.cpp
+could not be downloaded (for example while GitHub was down), the installer
+switched to the general (Vulkan) version, which also runs on NVIDIA cards but
+more slowly. Now it keeps the NVIDIA version as the choice and says to run the
+installer again later; the re-run fetches it. The general version is still used
+when the NVIDIA version is downloaded but cannot start on the PC.
+
 ## Windows installer v4.13.1 — An Old Node.js No Longer Stops Her — November 2026
 
 **The app stopped with "WebUI did not become ready" on a PC with an old
