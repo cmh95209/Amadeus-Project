@@ -18,6 +18,7 @@ import concerns
 import feelings
 import stats
 import timing
+import voice_gate
 import ja_voice
 import speech_text
 import webdates
@@ -5402,6 +5403,26 @@ class VoiceFirstTurn:
         self.conv_id = conv_id
         self._en_event = threading.Event()
         self._en_text = ""
+        # Set by the route once her line has a speech id (see hold_english).
+        self._voice_event = threading.Event()
+        self._voice_key = None
+
+    def voice_ready(self, speech_id=None, hold_english: bool = False) -> None:
+        """The route handed her line to the browser. With hold_english (the
+        page starts her voice early) and her voice on the processor, the
+        English line waits until she has finished speaking: the two would
+        otherwise share the processor and her voice would stutter."""
+        self._voice_key = speech_id if hold_english else None
+        self._voice_event.set()
+
+    def _wait_for_voice(self) -> None:
+        if not voice_gate.on_processor():
+            return
+        # The route calls voice_ready() a moment after this turn is returned.
+        self._voice_event.wait(5.0)
+        if self._voice_key and not voice_gate.wait_for(self._voice_key):
+            print("[Amadeus] Voice-first: her voice is still going after "
+                  f"{voice_gate.QUIET_TIMEOUT_S:.0f} s - writing the English line anyway.")
 
     def wait_en(self, timeout: float = 120.0) -> str:
         self._en_event.wait(timeout)
@@ -5538,6 +5559,8 @@ def _backfill_english(turn: "VoiceFirstTurn", llm, context_lines) -> None:
     real words, just untranslated - so a slow or down model never holds her
     voice hostage."""
     jps = (turn.pack.assistant_reply_JPS or "").strip()
+    # Voice on the processor + voice started early: let her finish first.
+    turn._wait_for_voice()
     started = timing.now()
     timing.start_reports()
     try:
@@ -5837,6 +5860,8 @@ def run_trust_rescore() -> None:
     snapping to whatever the last few messages happen to look like. The same call
     reports small changes to her short-term feelings (feelings.py).
     """
+    # Voice on the processor: not while she is speaking (voice_gate).
+    voice_gate.wait_quiet()
     try:
         recent = store.load_memory_raw()[-16:]
         if len(recent) < 2:

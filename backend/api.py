@@ -38,6 +38,7 @@ import restart_control
 import speech_text
 import stats
 import timing
+import voice_gate
 
 from tts import streamVoiceChunks, renderVoiceToPath
 import tts as tts_module
@@ -315,6 +316,7 @@ def _register_speech(speech_id, jps_text, assistant_id) -> None:
         _speech_requests[speech_id] = (now, jps_text, assistant_id)
         while len(_speech_requests) > 20:
             _speech_requests.pop(next(iter(_speech_requests)))
+    voice_gate.expect(speech_id)
 
 
 # pre:
@@ -776,6 +778,12 @@ def request_message():
 
     speech_id = uuid.uuid4().hex
     _register_speech(speech_id, turn.pack.assistant_reply_JPS, turn.assistant_id)
+    # The page says whether it starts her voice before the English line
+    # ("Voice playback: Early / Right away"); then, with her voice on the
+    # processor, the English line waits until she has finished speaking.
+    voice_ready = getattr(turn, "voice_ready", None)
+    if voice_ready is not None:
+        voice_ready(speech_id, hold_english=bool(content.get("voice_early")))
 
     def generate():
         yield "data: " + json.dumps(
@@ -785,8 +793,10 @@ def request_message():
              "doc_reads": memory.load_message_doc_reads(turn.assistant_id)},
             ensure_ascii=False) + "\n\n"
         # Wait (bounded) for the background English backfill; her voice is
-        # already playing by the time this line runs.
-        english = turn.wait_en(timeout=120.0)
+        # already playing by the time this line runs. Longer than the voice
+        # gate's cap (90 s): in "early" mode on a processor voice the English
+        # line is written only after she finished speaking.
+        english = turn.wait_en(timeout=180.0)
         yield "data: " + json.dumps(
             {"phase": "text", "assistant_id": turn.assistant_id, "response": english},
             ensure_ascii=False) + "\n\n"
@@ -809,6 +819,7 @@ def speech(speech_id):
     save_path = None
     if assistant_id:
         save_path = Path(__file__).resolve().parent / "generated" / f"voice_{assistant_id}.wav"
+    voice_gate.started(speech_id)
     watch = timing.VoiceWatch(assistant_id)
     chunks = streamVoiceChunks(jps_text, save_path=save_path)
     try:
@@ -816,6 +827,7 @@ def speech(speech_id):
     except Exception:
         chunks.close()
         watch.finish()
+        voice_gate.finished(speech_id)
         return jsonify({"message": "Speech generation failed"}), 502
 
     def generate():
@@ -826,6 +838,7 @@ def speech(speech_id):
         finally:
             chunks.close()
             watch.finish()
+            voice_gate.finished(speech_id)
             # Keep the line for replay only if it was actually generated.
             if assistant_id and save_path is not None and save_path.exists():
                 memory.set_message_audio(assistant_id, f"generated/voice_{assistant_id}.wav")
@@ -837,7 +850,14 @@ def speech(speech_id):
 
     response = Response(generate(), mimetype="audio/wav")
     response.headers["Cache-Control"] = "no-store"
-    response.call_on_close(chunks.close)
+    # How long her line is (characters): the page estimates the clip's
+    # length from it (smooth start + the "preparing her voice" bar).
+    response.headers["X-Amadeus-Voice-Chars"] = str(len((jps_text or "").strip()))
+    response.headers["Access-Control-Expose-Headers"] = "X-Amadeus-Voice-Chars"
+    def closed():
+        chunks.close()
+        voice_gate.finished(speech_id)
+    response.call_on_close(closed)
     return response
 
 
@@ -1161,6 +1181,7 @@ def regenerate():
             speech_id = uuid.uuid4().hex
             with _speech_requests_lock:
                 _speech_requests[speech_id] = (time.monotonic(), pack.assistant_reply_JPS, new_id)
+            voice_gate.expect(speech_id)
             return {"phase": "reply", "response": pack.assistant_reply_ENG,
                     "japanese": pack.assistant_reply_JPS, "speech_id": speech_id,
                     "assistant_id": new_id,
@@ -1177,6 +1198,7 @@ def regenerate():
     speech_id = uuid.uuid4().hex
     with _speech_requests_lock:
         _speech_requests[speech_id] = (time.monotonic(), pack.assistant_reply_JPS, new_id)
+    voice_gate.expect(speech_id)
 
     return jsonify({
         "response": pack.assistant_reply_ENG,
@@ -1811,6 +1833,7 @@ def _mint_speech_id_text(ja_text, assistant_id) -> str:
         _speech_requests[speech_id] = (now, ja_text, assistant_id)
         while len(_speech_requests) > 20:
             _speech_requests.pop(next(iter(_speech_requests)))
+    voice_gate.expect(speech_id)
     return speech_id
 
 

@@ -1667,6 +1667,9 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
                    "AMADEUS_LAUNCHER_DIR": str(RUNTIME_DIR),
                    "AMADEUS_LAUNCHER_SHUTDOWN": "1"}
     voice_extra = voice_speed_env(builtin)
+    if voice_on_processor(builtin):
+        # Background model work waits while she speaks (backend/voice_gate.py).
+        backend_env["AMADEUS_VOICE_ON_CPU"] = "1"
     if builtin and builtin.get("simulated"):
         import json
         backend_env["AMADEUS_BUILTIN_OVERRIDE"] = json.dumps(builtin)

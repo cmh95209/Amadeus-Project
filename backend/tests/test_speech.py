@@ -109,7 +109,12 @@ class SpeechTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('speech_timing_test', ROOT / 'timing.py')
         timing = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(timing)
+        # The voice gate (backend/voice_gate.py) has no heavy imports either.
+        spec = importlib.util.spec_from_file_location('speech_gate_test', ROOT / 'voice_gate.py')
+        voice_gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(voice_gate)
         scope = dict(request=SimpleNamespace(method='GET'), _speech_requests=tickets, timing=timing,
+                     voice_gate=voice_gate,
                      _speech_requests_lock=threading.Lock(), time=time, chain=chain,
                      jsonify=lambda data: data, Response=Response,
                      streamVoiceChunks=lambda text, save_path=None: (chunk for chunk in (b'header', b'pcm')))

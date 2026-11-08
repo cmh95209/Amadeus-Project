@@ -2438,6 +2438,9 @@ def _roll_worker_loop() -> None:
                     continue
                 return
         try:
+            # Voice on the processor: not while she is speaking (voice_gate).
+            import voice_gate
+            voice_gate.wait_quiet()
             _fold_one_turn(conv, turn)
         except Exception as e:
             # Even a DB failure must not strand the turn: re-queue it once at
