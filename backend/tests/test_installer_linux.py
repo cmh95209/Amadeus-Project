@@ -124,7 +124,22 @@ class ScriptTextTests(unittest.TestCase):
         # install" failed silently and the voice models came as placeholders.
         text = _text()
         self.assertIn('( cd "$HOME" && git lfs install --skip-repo )', text)
-        self.assertIn("git config --global --get filter.lfs.process", text)
+        self.assertIn('cd "$HOME" && git config --global --get filter.lfs.process', text)
+        # ... and the whole installer works from the home folder.
+        top = text[:text.index("# >>> BUILT-IN MODEL FUNCTIONS")]
+        self.assertIn('cd "$HOME" 2>/dev/null || cd /', top)
+
+    def test_relative_install_folder_is_made_absolute(self):
+        if not _BASH:
+            self.skipTest("bash not available")
+        tmp = Path(tempfile.mkdtemp(prefix="amadeus_linux_rel_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        script = tmp / "install_linux.sh"
+        script.write_bytes(_text().encode("utf-8"))
+        out = subprocess.run([_BASH, str(script), "rel-folder", "--llm-screens-only", "--simulate-gpu", "none"],
+                             cwd=tmp, input="B\n", capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue((tmp / "rel-folder" / "models" / "local_llm_choice.json").is_file())
 
     def test_ffmpeg_lands_where_the_app_looks(self):
         text = _text()

@@ -180,6 +180,12 @@ case "$SIM_GPU" in ''|nvidia|nvidia-nodriver|amd|intel|none) ;; *) printf 'Inval
 case "$SIM_DRIVER" in ''|[0-9]*) ;; *) printf 'Invalid --simulate-driver: %s\n' "$SIM_DRIVER"; exit 2 ;; esac
 case "$SIM_DRIVER" in *[!0-9.]*) printf 'Invalid --simulate-driver: %s\n' "$SIM_DRIVER"; exit 2 ;; esac
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Amadeus}"
+case "$INSTALL_DIR" in /*) ;; *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;; esac
+# Everything below works from the home folder: started inside some git
+# folder, git (and "git lfs install") would act on THAT folder - or stop
+# when it cannot read it (2026-11-08, WSL test: voice models arrived as
+# Git-LFS placeholders).
+cd "$HOME" 2>/dev/null || cd /
 PROJ="$INSTALL_DIR/Amadeus-Project"
 INSTALL_LOG="$INSTALL_DIR/install_linux.log"
 
@@ -1419,12 +1425,10 @@ fi
 log "  git: $(git --version 2>/dev/null | head -1)"
 lfs_probe="$(git lfs version 2>&1 | tail -1)"
 if printf '%s' "$lfs_probe" | grep -q "git-lfs/"; then
-    # From the home folder: started inside some other git folder, "git lfs
-    # install" works on THAT folder (or fails) and the voice models later
-    # arrive as placeholders (2026-11-08, WSL test). Then proven: the
+    # From the home folder (see the "cd" at the top), then proven: the
     # setting must really be in the user's git settings.
     ( cd "$HOME" && git lfs install --skip-repo ) >>"$INSTALL_LOG" 2>&1 || true
-    if [ -z "$(git config --global --get filter.lfs.process 2>/dev/null)" ]; then
+    if [ -z "$(cd "$HOME" && git config --global --get filter.lfs.process 2>/dev/null)" ]; then
         die "Git-LFS is installed but could not be switched on (git lfs install)." \
             "Re-run the installer; if it fails again, send the install log."
     fi
