@@ -23,8 +23,13 @@ served as WAV through Python audio libraries and never invokes FFmpeg; sending
 her a video does. The installers put a copy in `~/.amadeus-tools/ffmpeg/bin`
 when the system has none; one on your `PATH` works too.
 
-An OpenAI-compatible LLM server (local or cloud) is needed to actually chat;
-it is configured in the app after installation, not during it.
+To actually chat she needs a language model: either an OpenAI-compatible
+server (local or cloud), configured in the app after installation, or her
+own built-in model (see [step 10](#10-optional-her-built-in-local-model)).
+
+**Linux** is not officially supported and has not been tested, but this
+guide works there in principle: wherever a step shows a macOS command, use
+the same one on Linux.
 
 ## 1. Clone Amadeus
 
@@ -37,6 +42,13 @@ Clone GPT-SoVITS (the voice engine) into the project directory:
 
 ```bash
 git clone https://github.com/RVC-Boss/GPT-SoVITS.git
+```
+
+Then switch it to the version Amadeus is tested with (the installers do the
+same). The newest GPT-SoVITS may have changes that break her voice:
+
+```bash
+git -C GPT-SoVITS checkout 48b1a0169a28582a8984402f82cf438d3bfa6aca
 ```
 
 Your local directory will then contain both:
@@ -122,7 +134,7 @@ cache directory so the very first speech line can never stall:
 mkdir GPT_SoVITS\pretrained_models\fast_langdetect
 ```
 
-#### macOS
+#### macOS / Linux
 
 ```bash
 mkdir -p GPT_SoVITS/pretrained_models/fast_langdetect
@@ -182,7 +194,7 @@ instant:
 cd GPT_SoVITS/pretrained_models/fast_langdetect
 # Windows:
 curl -L -o lid.176.bin https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
-# macOS:
+# macOS / Linux:
 curl -L -O https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
 cd ../../..
 ```
@@ -200,9 +212,9 @@ cd ..
 (Skip this and the voice engine will fetch what it needs on first use,
 which is slower and can stall on flaky connections.)
 
-Amadeus is paired with the upstream GPT-SoVITS project (validated as of v2.0
-against upstream commit `9bbd80a`, plus the voice patches from step 2). Do
-not update it ahead of Amadeus (see [Updating Amadeus](using-amadeus.md#updating-amadeus)).
+Amadeus is paired with the upstream GPT-SoVITS project (tested as of v3.0
+against upstream commit `48b1a01`, the version from step 1, plus the voice
+patches from step 2). Do not update it ahead of Amadeus (see [Updating Amadeus](using-amadeus.md#updating-amadeus)).
 
 ## 8. Install Frontend Dependencies
 
@@ -218,3 +230,107 @@ Start the app the normal way ([Launching Amadeus](using-amadeus.md#launching-ama
 follow the [first-meeting steps](../README.md#your-first-meeting) above: open
 Settings → Connection, point her at your model, pick the model, save — and
 she speaks.
+
+Two things download by themselves the first time they are needed, so the
+first time can take a little longer: her Japanese pronunciation dictionary
+(her first voice line) and the speech model for videos (about 0.5 GB, the
+first video you send her).
+
+## 10. Optional: her built-in local model
+
+The installers can set up her own model (Gemma 4, run by llama.cpp on your
+graphics card) so she needs no server of yours and no cloud account. By
+hand there are two ways. Both need a graphics card with **8 GB** or more
+(6-7 GB works, slowly).
+
+These values match installer **v4.13** (Windows) / **v1.6** (Mac). On a
+Mac with an Apple chip, the Mac installer is the easier route.
+
+### Download the files
+
+**llama.cpp**, release **`b11400`**, from
+<https://github.com/ggml-org/llama.cpp/releases/tag/b11400>. Pick the build
+for your system: the CUDA build for an NVIDIA card (on Windows also its
+`cudart-…` file, unzipped into the same folder), otherwise the Vulkan build.
+Unpack it into a `models/llama.cpp/` folder next to `Amadeus-Project/`.
+
+**Her model**, one of these two, plus its vision file (so she can see
+pictures). Put both in the `models/` folder:
+
+| Your graphics card | Model file | Vision file (save it under this name) |
+|---|---|---|
+| 12 GB or more | [gemma-4-12B-it-qat-UD-Q4_K_XL.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-qat-GGUF/resolve/980b060c40a8539ac159e0501a3e0f66a6365af3/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf?download=true) (6.7 GB) | [mmproj-F16.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-qat-GGUF/resolve/980b060c40a8539ac159e0501a3e0f66a6365af3/mmproj-F16.gguf?download=true) → `gemma-4-12B-it-qat-mmproj-F16.gguf` |
+| 6-11 GB | [gemma-4-12b-it-Q3_K_M.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/gemma-4-12b-it-Q3_K_M.gguf?download=true) (5.7 GB) | [mmproj-F16.gguf](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/mmproj-F16.gguf?download=true) → `gemma-4-12b-it-mmproj-F16.gguf` |
+
+The two vision files have the same download name but are different files:
+rename each one as shown, or her model can't find it.
+
+You should end up with:
+
+```text
+Amadeus/                 # any folder name
+├── Amadeus-Project/
+└── models/
+    ├── gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
+    ├── gemma-4-12B-it-qat-mmproj-F16.gguf
+    └── llama.cpp/       # llama-server(.exe) is somewhere inside
+```
+
+### Way 1: run it yourself (simplest)
+
+Start llama.cpp's server yourself, then connect her to it like any other
+server (Settings → Connection, address `http://127.0.0.1:8080/v1`):
+
+```bash
+llama-server -m models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --mmproj models/gemma-4-12B-it-qat-mmproj-F16.gguf -c 24576 -ngl 999 --jinja --port 8080
+```
+
+(For the 6-11 GB file use `-c 16384`.) You start and stop it yourself.
+
+### Way 2: let Amadeus run it (like the installers do)
+
+Create the file `Amadeus-Project/backend/data/local_llm.json`. The app then
+starts and stops her model by itself, and Settings → Connection shows it as
+**Built-in** (with load/unload and model switching). Replace the two paths
+with the real ones on your PC (forward slashes `/` work on Windows too):
+
+```json
+{
+  "mode": "builtin",
+  "model": "12B",
+  "model_label": "Gemma 4 12B (QAT)",
+  "model_file": "C:/Users/YOU/Amadeus/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+  "model_ok": true,
+  "server_exe": "C:/Users/YOU/Amadeus/models/llama.cpp/llama-server.exe",
+  "server_ok": true,
+  "llama_release": "b11400",
+  "build": "cuda-12.4",
+  "tier": "12-15",
+  "context": 24576,
+  "kv_cache": "q8_0",
+  "voice_device": "cuda",
+  "gpu_layers": 999,
+  "port": 8091,
+  "history_default": 14000,
+  "vram_need_gb": 9.6
+}
+```
+
+Then change these values to match your graphics card (the same table the
+installer uses):
+
+| Card | `model` | `model_label` | `tier` | `context` | `kv_cache` | `voice_device` | `history_default` | `vram_need_gb` |
+|---|---|---|---|---|---|---|---|---|
+| 6-7 GB | `12B-Q3` | Gemma 4 12B (3-bit, for 8 GB cards) | `6-7` | 16384 | `q4_0` | `cpu` | 6000 | 4.6 |
+| 8-11 GB | `12B-Q3` | Gemma 4 12B (3-bit, for 8 GB cards) | `8-11` | 16384 | `q4_0` | `cpu` | 6000 | 6.5 |
+| 12-15 GB | `12B` | Gemma 4 12B (QAT) | `12-15` | 24576 | `q8_0` | `cuda` | 14000 | 9.6 |
+| 16-23 GB | `12B` | Gemma 4 12B (QAT) | `16-23` | 32768 | `f16` | `cuda` | 22000 | 11.0 |
+| 24 GB+ | `12B` | Gemma 4 12B (QAT) | `24-plus` | 49152 | `f16` | `cuda` | 32000 | 11.5 |
+
+- `build`: `cuda-12.4` (or `cuda-13.4`) for an NVIDIA card, `vulkan` otherwise.
+- `voice_device`: `cpu` runs her voice on the processor, leaving the graphics
+  card to her model. Without an NVIDIA card, always use `cpu`.
+- To go back to your own server or a cloud model, set `"mode": "custom"`.
+
+Start Amadeus the normal way. The first start loads her model, which can take
+a minute.
