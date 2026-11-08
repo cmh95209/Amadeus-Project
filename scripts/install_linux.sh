@@ -1658,6 +1658,18 @@ else
     log "  Project files ready."
 fi
 chmod +x "$PROJ/start_linux.sh" "$PROJ/start_linux_no_model.sh" 2>/dev/null || true
+# Her reference voice (and the project's other Git-LFS files) must be real
+# files, not Git-LFS placeholders - a copy made before Git-LFS was set up
+# has placeholders, and her voice then fails on every line (2026-11-08 test).
+REF_WAV="$PROJ/backend/assets/reference_audio/kurisu10s.wav"
+if [ -f "$REF_WAV" ] && head -c 100 "$REF_WAV" | grep -q "git-lfs"; then
+    log "  (her voice files arrived as Git-LFS placeholders - fetching the real files...)"
+    git -C "$PROJ" lfs pull >>"$INSTALL_LOG" 2>&1 || true
+fi
+if [ -f "$REF_WAV" ] && head -c 100 "$REF_WAV" | grep -q "git-lfs"; then
+    die "Her voice files could not be downloaded (Git-LFS)." \
+        "Check your internet connection, then re-run the installer."
+fi
 
 # ----------------------------------------------------------------------------
 #  STEP 4: the voice engine (GPT-SoVITS) + her voice patches

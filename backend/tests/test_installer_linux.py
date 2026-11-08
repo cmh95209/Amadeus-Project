@@ -141,6 +141,16 @@ class ScriptTextTests(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertTrue((tmp / "rel-folder" / "models" / "local_llm_choice.json").is_file())
 
+    def test_voice_file_placeholders_are_replaced(self):
+        # 2026-11-08 test: a project copy holding Git-LFS placeholders left
+        # her voice failing on every line.
+        text = _text()
+        step3 = text[text.index('step 3 "'):text.index('step 4 "')]
+        ref = "backend/assets/reference_audio/kurisu10s.wav"
+        self.assertIn(ref, step3)
+        self.assertTrue((_ROOT / ref).exists())
+        self.assertIn('git -C "$PROJ" lfs pull', step3)
+
     def test_ffmpeg_lands_where_the_app_looks(self):
         text = _text()
         block = text[text.index("# --- 2d. FFmpeg"):text.index("# --- 2e.")]
