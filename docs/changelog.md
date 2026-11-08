@@ -1,5 +1,25 @@
 # Changelog
 
+## Linux installer v1.0 — Amadeus on Linux — November 2026
+
+**A one-shot installer for Linux** (`scripts/install_linux.sh`), made for
+Ubuntu 22.04 / 24.04 and Debian 12 and the Linux versions based on them. It
+asks the same questions and runs the same steps as the Mac installer, and
+needs no sudo password: everything lands in your home folder. Whatever basic
+tool the PC lacks (git, curl, Git-LFS, FFmpeg) comes from conda-forge.
+
+**Her built-in model on Linux PCs with a graphics card**, chosen by the card's
+memory exactly as on Windows: NVIDIA cards (with NVIDIA's driver) run her
+model with llama.cpp's CUDA build and her voice on the card; AMD and Intel
+cards run her model with the Vulkan build and her voice on the processor. An
+NVIDIA card without its driver gets a plain explanation and option B for now.
+
+**"Amadeus" in your app menu**, plus `start_linux.sh` and
+`start_linux_no_model.sh` in the project folder.
+
+**The launcher finds her voice toolbox on Linux** however it is spelled
+(`GPTSoVITS` or `GPTSoVits`): Linux tells upper and lower case apart.
+
 ## Windows installer v4.13.4 — An Old Miniconda No Longer Gets in the Way — November 2026
 
 **A Miniconda already on the PC is checked first.** Like an old Node.js

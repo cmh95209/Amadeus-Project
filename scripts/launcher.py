@@ -674,6 +674,11 @@ def find_conda() -> str | None:
         str(Path.home() / "opt" / "anaconda3" / "bin" / "conda"),
         "/opt/anaconda3/bin/conda",
         "/opt/anaconda3/condabin/conda",
+        # Linux (install_linux.sh reuses these when present).
+        str(Path.home() / "mambaforge" / "bin" / "conda"),
+        "/opt/conda/bin/conda",
+        "/opt/miniforge3/bin/conda",
+        "/opt/miniconda3/bin/conda",
         "/opt/homebrew/Caskroom/miniconda/base/bin/conda",
         r"C:\ProgramData\anaconda3\Scripts\conda.exe",
         str(Path.home() / "anaconda3" / "Scripts" / "conda.exe"),
@@ -1419,13 +1424,28 @@ def _open_browser(url: str) -> None:
             return
     webbrowser.open(url)
 
+def voice_env_name(conda: str) -> str:
+    """The voice engine's conda environment. The installers name it
+    "GPTSoVits" (Windows, Mac) or "GPTSoVITS" (Linux); Windows and Macs
+    ignore upper/lower case, but Linux does not, so on Linux the spelling
+    that really exists is used (a manual install that followed the guide's
+    "GPTSoVits" would otherwise never start her voice)."""
+    wanted = env_name("GPTSoVITS")
+    home = conda_home(conda) if conda else None
+    if home is not None and not (home / "envs" / wanted).is_dir():
+        other = env_name("GPTSoVits")
+        if (home / "envs" / other).is_dir():
+            return other
+    return wanted
+
+
 def gptsovits_command(conda: str) -> list[str]:
     """The voice engine runs in its own conda environment."""
     return [
         conda,
         "run",
         "-n",
-        env_name("GPTSoVITS"),
+        voice_env_name(conda),
         "--no-capture-output",
         "python",
         str(BACKEND_DIR / "start_gptsovits.py"),

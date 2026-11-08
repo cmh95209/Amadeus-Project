@@ -12,7 +12,10 @@ Covers:
      installer with -HardwareCheckOnly, which installs nothing);
   5. Macs (2026-11-07): the Mac installer's copy of the Mac table, the Mac
      decisions, and the Mac installer's bash rules agree with Python (run
-     with --hardware-check-only: Git Bash on Windows, bash elsewhere).
+     with --hardware-check-only: Git Bash on Windows, bash elsewhere);
+  6. Linux (2026-11-08): the Linux installer's copy of the PC tiers, models
+     and Linux builds, the Linux decisions, and its bash rules agree with
+     Python.
 """
 import importlib.util
 import json
@@ -26,6 +29,7 @@ from pathlib import Path
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 _INSTALLER = _SCRIPTS / "install_windows.ps1"
 _MAC_INSTALLER = _SCRIPTS / "install_macos.sh"
+_LINUX_INSTALLER = _SCRIPTS / "install_linux.sh"
 
 
 def _load_tiers():
@@ -397,6 +401,147 @@ class MacShellAgreesTests(unittest.TestCase):
                 self.assertFalse((tmp / "inst").exists())      # installs nothing
                 if expected["offered"]:
                     gb = tiers.download_bytes(TABLE, expected["model"], "metal-arm64") / 2 ** 30
+                    self.assertAlmostEqual(hw["download_gb"], gb, delta=0.11)
+
+
+# ---------------------------------------------------------------------------
+# Linux
+# ---------------------------------------------------------------------------
+def _linux_shell_table() -> dict:
+    """The LINUX TIER TABLE block of install_linux.sh, read back into Python."""
+    text = _LINUX_INSTALLER.read_text(encoding="utf-8").replace("\r\n", "\n")
+    m = re.search(r"# >>> LINUX TIER TABLE.*?\n(.*?)# <<< LINUX TIER TABLE", text, re.S)
+    if not m:
+        raise AssertionError("LINUX TIER TABLE block not found in install_linux.sh")
+    values = dict(re.findall(r'^([A-Z_]+)="(.*?)"$', m.group(1), re.S | re.M))
+    values.update(re.findall(r'^([A-Z_]+)=(\d+)$', m.group(1), re.M))
+    return values
+
+
+class LinuxTableCopyTests(unittest.TestCase):
+    def setUp(self):
+        self.sh = _linux_shell_table()
+
+    def test_release_and_limits(self):
+        self.assertEqual(self.sh["LLAMA_RELEASE"], TABLE["llama_cpp"]["release"])
+        self.assertEqual(int(self.sh["DEDICATED_CARD_MIN_GB"]), TABLE["dedicated_card_min_gb"])
+        self.assertEqual(int(self.sh["VOICE_ON_CPU_MIN_RAM_GB"]), TABLE["voice_on_cpu_min_ram_gb"])
+        self.assertEqual(int(self.sh["DISK_HEADROOM_GB"]), TABLE["disk_headroom_gb"])
+
+    def test_builds(self):
+        rows = [line.split() for line in self.sh["LINUX_BUILDS"].splitlines()]
+        expected = []
+        for name, b in TABLE["linux"]["builds"].items():
+            row = [name, str(b.get("min_nvidia_driver", 0))]
+            for f in b["files"]:
+                row += [f["name"], str(f["bytes"]), f["sha256"]]
+            expected.append(row)
+        self.assertEqual(rows, expected)
+
+    def test_tiers(self):
+        rows = [line.split() for line in self.sh["PC_TIERS"].splitlines()]
+        expected = [[t["id"], str(t["min_vram_gb"]), t["model"], str(t["context"]), t["kv_cache"],
+                     t["voice_device"], str(t["history_default"]), str(t["vram_need_gb"]),
+                     "1" if t["warning"] else "0"] for t in TABLE["tiers"]]
+        self.assertEqual(rows, expected)
+
+    def test_models(self):
+        rows = {line.split("|")[0]: line.split("|") for line in self.sh["PC_MODELS"].splitlines()}
+        self.assertEqual(set(rows), set(TABLE["models"]))
+        for key, m in TABLE["models"].items():
+            with self.subTest(model=key):
+                v = m["mmproj"]
+                self.assertEqual(rows[key], [key, m["label"], m["repo"], m["revision"], m["file"],
+                                             str(m["bytes"]), m["sha256"], v["file"], v["save_as"],
+                                             str(v["bytes"]), v["sha256"]])
+
+
+class LinuxDecisionTests(unittest.TestCase):
+    """MH's picks 2026-11-08 (plan 3a): the Windows tiers, Linux builds."""
+
+    def test_builds_are_pinned_linux_files(self):
+        builds = TABLE["linux"]["builds"]
+        self.assertEqual(list(builds), ["cuda-13.4", "cuda-12.8", "vulkan"])
+        self.assertEqual((builds["cuda-13.4"]["min_nvidia_driver"], builds["cuda-12.8"]["min_nvidia_driver"]),
+                         (580, 570))
+        for name, b in builds.items():
+            for f in b["files"]:
+                with self.subTest(file=f["name"]):
+                    self.assertIn("-b11400-bin-ubuntu-", f["name"])
+                    self.assertTrue(f["name"].endswith("-x64.tar.gz"))
+                    self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")
+            # An NVIDIA build = llama.cpp + NVIDIA's runtime files.
+            self.assertEqual(len(b["files"]), 2 if name.startswith("cuda") else 1)
+
+    def test_windows_never_picks_a_linux_build(self):
+        # The Linux builds share names with Windows ones on purpose (the app
+        # reads "cuda-..." / "vulkan" the same way), but live in their own list.
+        win_files = [g["name"] for b in TABLE["llama_cpp"]["builds"].values() for g in b["files"]]
+        for b in TABLE["linux"]["builds"].values():
+            for f in b["files"]:
+                self.assertNotIn(f["name"], win_files)
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "575.64"), "cuda-12.4")   # Windows unchanged
+
+
+LINUX_GRID = [   # (vendor, vram, ram, driver, x64) -> summary
+    (None, 0, 32, "", True, (False, "no_card")),
+    ("nvidia-nodriver", 0, 32, "", True, (False, "nvidia_no_driver")),
+    ("nvidia", 16, 32, "610.88", False, (False, "not_x64")),
+    ("nvidia", 5, 32, "610.88", True, (False, "small_card")),
+    ("nvidia", 6, 32, "610.88", True, (True, "12B-Q3", "cpu", "cuda-13.4", True)),
+    ("nvidia", 8, 8, "610.88", True, (False, "low_ram")),
+    ("nvidia", 12, 8, "575.64", True, (True, "12B", "cuda", "cuda-12.8", False)),
+    ("nvidia", 16, 32, "570.0", True, (True, "12B", "cuda", "cuda-12.8", False)),
+    ("nvidia", 24, 32, "550.120", True, (True, "12B", "cuda", "vulkan", False)),
+    ("nvidia", 32, 64, "580.10", True, (True, "12B", "cuda", "cuda-13.4", False)),
+    ("amd", 16, 8, "", True, (False, "low_ram")),
+    ("amd", 16, 32, "", True, (True, "12B", "cpu", "vulkan", False)),
+    ("intel", 12, 16, "", True, (True, "12B", "cpu", "vulkan", False)),
+    ("amd", 8, -1, "", True, (True, "12B-Q3", "cpu", "vulkan", False)),   # memory unknown
+]
+
+
+class LinuxPythonRuleTests(unittest.TestCase):
+    def test_grid(self):
+        for vendor, vram, ram, driver, x64, expected in LINUX_GRID:
+            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver):
+                self.assertEqual(_summary(tiers.choose_linux(TABLE, vendor, vram, ram, driver, x64)), expected)
+
+    def test_download_counts_both_nvidia_archives(self):
+        b = TABLE["linux"]["builds"]["cuda-13.4"]
+        self.assertEqual(tiers.download_bytes(TABLE, "12B", "cuda-13.4", TABLE["linux"]["builds"]),
+                         TABLE["models"]["12B"]["bytes"] + TABLE["models"]["12B"]["mmproj"]["bytes"]
+                         + sum(f["bytes"] for f in b["files"]))
+
+
+@unittest.skipUnless(_BASH, "bash not available")
+class LinuxShellAgreesTests(unittest.TestCase):
+    """The Linux installer, run for real with pretend PCs, agrees with Python."""
+
+    def test_grid_matches_python(self):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="amadeus_linux_hw_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        script = tmp / "install_linux.sh"
+        script.write_bytes(_LINUX_INSTALLER.read_bytes().replace(b"\r\n", b"\n"))
+        for vendor, vram, ram, driver, x64, _ in LINUX_GRID:
+            if not x64:
+                continue        # the processor type is read from the PC (not pretendable)
+            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver):
+                args = [_BASH, str(script), str(tmp / "inst"), "--hardware-check-only", "--json",
+                        "--simulate-gpu", vendor or "none", "--simulate-vram-gb", str(vram),
+                        "--simulate-ram-gb", str(ram)]
+                if driver:
+                    args += ["--simulate-driver", driver]
+                out = subprocess.run(args, capture_output=True, text=True, timeout=60)
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                hw = json.loads(out.stdout.strip().splitlines()[-1])
+                expected = tiers.choose_linux(TABLE, vendor, vram, ram, driver, True)
+                self.assertEqual(hw["choice"], expected)
+                self.assertFalse((tmp / "inst").exists())      # installs nothing
+                if expected["offered"]:
+                    gb = tiers.download_bytes(TABLE, expected["model"], expected["build"],
+                                              TABLE["linux"]["builds"]) / 2 ** 30
                     self.assertAlmostEqual(hw["download_gb"], gb, delta=0.11)
 
 

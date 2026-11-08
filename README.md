@@ -15,7 +15,7 @@ grows closer to you over time...
 
 She also has long-term memory, 
 voice-first native-Japanese
-dialogue, web search and weather, and installers for Windows and Mac. 
+dialogue, web search and weather, and installers for Windows, Mac and Linux. 
 
 
 ---
@@ -80,6 +80,32 @@ to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
 
 Prefer to download the installer by hand? Both installer scripts are attached
 to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v3.0).
+
+## Linux (new)
+
+Made for Ubuntu 22.04 / 24.04 and Debian 12 (and Linux versions based on
+them, like Linux Mint and Pop!_OS) on a 64-bit Intel/AMD PC. Other Linux
+versions should work, but are not tested yet - if something fails, please
+send the install log (`~/Amadeus/install_linux.log`).
+
+1. Open a **terminal** (the installer never asks for your sudo password:
+   everything lands in your home folder).
+2. Paste this one line and press Enter:
+
+   ```bash
+   wget -O install_linux.sh https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_linux.sh && bash install_linux.sh
+   ```
+
+   (`curl -fsSL <the same address> -o install_linux.sh` works too.)
+3. Answer its first question (how Amadeus should think): **A** sets up her
+   own built-in model when your PC has a graphics card with 6 GB or more
+   (NVIDIA cards need NVIDIA's own driver installed first; AMD and Intel
+   cards work with the usual Mesa drivers); **B** is for a cloud service or
+   your own model server.
+4. Wait (several gigabytes of downloads), then choose **Amadeus** in your
+   app menu, or run `~/Amadeus/Amadeus-Project/start_linux.sh`.
+   To start her without her model (when another program needs the graphics
+   card), choose **Amadeus (without her model)** instead.
 
 ## Your first meeting
 
@@ -164,7 +190,7 @@ What can run remotely:
 
 Since v3.0 the installers can also set up **her own built-in local model**
 (Gemma 4 through llama.cpp) - choose option A at the start of the install. On
-Windows it is picked to fit your graphics card; on a Mac with an Apple chip
+Windows and Linux it is picked to fit your graphics card; on a Mac with an Apple chip
 (M1 or newer, 16 GB of memory or more) it is picked to fit the Mac's memory
 and runs on the chip's graphics (Metal). Or run a model with a server of your
 choice and point Amadeus at it (on an Intel Mac, this is the way).
@@ -191,11 +217,11 @@ Live weather & air quality    ✓
 Voice retention               ✓
 First-meeting ceremony        ✓
 Long-term memory (v2.0)       ✓
-One-shot installers (Win/Mac) ✓
+One-shot installers           ✓ Windows, Mac, Linux (new)
 Show her Japanese line        ✓
 Japanese-way voice (v2.1)     ✓ numbers, your name, English words
 About you (v2.1)              ✓ pronouns, what she calls you
-Built-in local model (v3.0)   ✓ Windows + Apple-chip Macs, no account needed
+Built-in local model (v3.0)   ✓ Windows, Linux + Apple-chip Macs, no account needed
 Pictures, documents, videos   ✓ v3.0
 Closeness levels + feelings   ✓ v3.0
 Remote access (Tailscale)     ✓ v3.0, your own devices only

@@ -10,13 +10,19 @@ Before installing Amadeus, make sure you have:
 - **Git** and **Git LFS** (the voice models are stored via LFS)
 - **Miniconda or Anaconda** (three Python environments are created: `amadeus`
   on Python 3.10, `amadeus-cm` on Python 3.13 for the memory sidecar, and
-  `GPTSoVits` on Python 3.10)
+  `GPTSoVits` on Python 3.10 - on Linux name it `GPTSoVITS`, exactly the way
+  the launcher spells it, because Linux tells upper and lower case apart)
 - **Node.js (LTS) + npm** for the web interface
 - **macOS**: the Xcode Command Line Tools (`xcode-select --install` in a
   terminal if you don't have them)
 - **Windows**: nothing else — the voice patches shipped with this project
   remove the old C-compiler requirement. (An NVIDIA GPU is strongly
   recommended for faster voice synthesis; CPU operation is possible.)
+- **Linux**: nothing else on most desktops. If a voice package has to be
+  built on your PC, a C compiler is needed (`sudo apt install build-essential`
+  on Ubuntu/Debian, or `conda install -c conda-forge c-compiler cxx-compiler`
+  inside the `GPTSoVITS` environment). For an NVIDIA card, install NVIDIA's
+  own driver first.
 
 Note: **FFmpeg (with `ffprobe`) is needed only for videos.** Her voice is
 served as WAV through Python audio libraries and never invokes FFmpeg; sending
@@ -27,9 +33,10 @@ To actually chat she needs a language model: either an OpenAI-compatible
 server (local or cloud), configured in the app after installation, or her
 own built-in model (see [step 10](#10-optional-her-built-in-local-model)).
 
-**Linux** is not officially supported and has not been tested, but this
-guide works there in principle: wherever a step shows a macOS command, use
-the same one on Linux.
+**Linux** has its own one-shot installer since November 2026
+(`scripts/install_linux.sh`, see the README), made for Ubuntu 22.04 / 24.04
+and Debian 12. By hand, this guide works on Linux too: wherever a step shows
+a macOS command, use the same one on Linux.
 
 ## 1. Clone Amadeus
 
@@ -243,16 +250,20 @@ graphics card) so she needs no server of yours and no cloud account. By
 hand there are two ways. Both need a graphics card with **8 GB** or more
 (6-7 GB works, slowly).
 
-These values match installer **v4.13** (Windows) / **v1.6** (Mac). On a
-Mac with an Apple chip, the Mac installer is the easier route.
+These values match installer **v4.13** (Windows) / **v1.6** (Mac) /
+**v1.0** (Linux). On a Mac with an Apple chip, the Mac installer is the
+easier route.
 
 ### Download the files
 
 **llama.cpp**, release **`b11400`**, from
 <https://github.com/ggml-org/llama.cpp/releases/tag/b11400>. Pick the build
-for your system: the CUDA build for an NVIDIA card (on Windows also its
-`cudart-…` file, unzipped into the same folder), otherwise the Vulkan build.
-Unpack it into a `models/llama.cpp/` folder next to `Amadeus-Project/`.
+for your system: the CUDA build for an NVIDIA card (also its `cudart-…`
+file, unpacked into the same folder as `llama-server` - on Linux copy the
+files out of the `cudart-…` folder next to `llama-server`), otherwise the
+Vulkan build. Linux uses the `…-bin-ubuntu-…` files (CUDA 13.4 needs NVIDIA
+driver 580 or newer, CUDA 12.8 needs 570 or newer). Unpack it into a
+`models/llama.cpp/` folder next to `Amadeus-Project/`.
 
 **Her model**, one of these two, plus its vision file (so she can see
 pictures). Put both in the `models/` folder:
@@ -327,7 +338,8 @@ installer uses):
 | 16-23 GB | `12B` | Gemma 4 12B (QAT) | `16-23` | 32768 | `f16` | `cuda` | 22000 | 11.0 |
 | 24 GB+ | `12B` | Gemma 4 12B (QAT) | `24-plus` | 49152 | `f16` | `cuda` | 32000 | 11.5 |
 
-- `build`: `cuda-12.4` (or `cuda-13.4`) for an NVIDIA card, `vulkan` otherwise.
+- `build`: `cuda-12.4` (or `cuda-13.4`) for an NVIDIA card - on Linux
+  `cuda-12.8` or `cuda-13.4` - and `vulkan` otherwise.
 - `voice_device`: `cpu` runs her voice on the processor, leaving the graphics
   card to her model. Without an NVIDIA card, always use `cpu`.
 - To go back to your own server or a cloud model, set `"mode": "custom"`.

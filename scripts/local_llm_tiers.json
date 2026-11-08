@@ -65,6 +65,30 @@
       {"id": "mac-48", "min_ram_gb": 48, "model": "12B",    "context": 49152, "kv_cache": "f16",  "history_default": 32000, "memory_need_gb": 13.5}
     ]
   },
+  "linux": {
+    "about": "Linux PCs (2026-11-08, MH: install_linux.sh v1.0). The PC tiers above apply (the same rules as Windows: chosen by the graphics card's memory; her voice on NVIDIA cards only). Only llama.cpp's builds differ: the Linux (ubuntu) builds of the same release, the newest CUDA build the NVIDIA driver can run (CUDA 13.x needs driver 580+, 12.8 needs 570+), else Vulkan (AMD / Intel / older NVIDIA drivers). An NVIDIA build is two archives: llama.cpp + NVIDIA's runtime files, unpacked into one folder. scripts/install_linux.sh carries an exact copy (between its LINUX TIER TABLE markers); tests/test_llm_tiers.py keeps the two equal.",
+    "builds": {
+      "cuda-13.4": {
+        "min_nvidia_driver": 580,
+        "files": [
+          {"name": "llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz", "bytes": 152449896, "sha256": "2e297621e5def65c0f19aa8ee6967b98ee83b359bad7ca000ae3c7908507c81d"},
+          {"name": "cudart-llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz", "bytes": 440236489, "sha256": "9d040ad50388ca51b4c43dedf6410b5a37ed01634e14ca9a6cc7131749807b39"}
+        ]
+      },
+      "cuda-12.8": {
+        "min_nvidia_driver": 570,
+        "files": [
+          {"name": "llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz", "bytes": 171555633, "sha256": "7cc6d9ae0ff51ab91f2ca5a0d57bd79f018258c5c2892947548dc2dc146be101"},
+          {"name": "cudart-llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz", "bytes": 594377603, "sha256": "efd4bd1e61d0100e837e129ece19fc0953bd519fde77702ca31a6d54f6afd63a"}
+        ]
+      },
+      "vulkan": {
+        "files": [
+          {"name": "llama-b11400-bin-ubuntu-vulkan-x64.tar.gz", "bytes": 31617783, "sha256": "5912d3ac7eb6ac4a46503309c701213c2a162a71e57a137c6c7f1d295f08a7c4"}
+        ]
+      }
+    }
+  },
   "tiers": [
     {"id": "6-7",      "min_vram_gb": 6,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 4.6,  "warning": true},
     {"id": "8-11",     "min_vram_gb": 8,  "model": "12B-Q3",  "context": 16384, "kv_cache": "q4_0", "voice_device": "cpu",  "history_default": 6000,  "vram_need_gb": 6.5,  "warning": false},

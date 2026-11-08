@@ -31,13 +31,17 @@ def driver_major(driver: str) -> int:
     return int(head) if head.isdigit() else 0
 
 
-def pick_build(table: dict, vendor: str | None, driver: str = "") -> str:
+def pick_build(table: dict, vendor: str | None, driver: str = "",
+               builds: dict | None = None) -> str:
     """Which llama.cpp build: the newest CUDA build the NVIDIA driver can
-    run, else Vulkan (AMD / Intel / old or unreadable NVIDIA driver)."""
+    run, else Vulkan (AMD / Intel / old or unreadable NVIDIA driver).
+    builds: another build list (Linux: table["linux"]["builds"])."""
+    if builds is None:
+        builds = table["llama_cpp"]["builds"]
     if vendor == "nvidia":
         major = driver_major(driver)
         cuda = [(b["min_nvidia_driver"], name)
-                for name, b in table["llama_cpp"]["builds"].items()
+                for name, b in builds.items()
                 if "min_nvidia_driver" in b]
         for need, name in sorted(cuda, reverse=True):
             if major >= need:
@@ -45,10 +49,11 @@ def pick_build(table: dict, vendor: str | None, driver: str = "") -> str:
     return "vulkan"
 
 
-def download_bytes(table: dict, model_key: str, build: str) -> int:
+def download_bytes(table: dict, model_key: str, build: str,
+                   builds: dict | None = None) -> int:
     """Everything option A downloads: model + its vision file + llama.cpp files."""
     model = table["models"][model_key]
-    files = table["llama_cpp"]["builds"][build]["files"]
+    files = (builds if builds is not None else table["llama_cpp"]["builds"])[build]["files"]
     vision = (model.get("mmproj") or {}).get("bytes", 0)
     return model["bytes"] + vision + sum(f["bytes"] for f in files)
 
@@ -129,3 +134,23 @@ def choose(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
         "warning": bool(tier["warning"]),
         "build": pick_build(table, vendor, driver),
     }
+
+
+def choose_linux(table: dict, vendor: str | None, vram_gb: int, ram_gb: int,
+                 driver: str = "", x64: bool = True) -> dict:
+    """The Linux installer's decision (scripts/install_linux.sh pc_choose
+    follows the same rules; the tests run both on the same inputs).
+
+    The Windows rules (choose) with Linux's llama.cpp builds, plus two Linux
+    cases: "nvidia-nodriver" (the kernel lists an NVIDIA card but NVIDIA's
+    driver is missing, so nothing can use it yet) and a processor that is
+    not 64-bit Intel/AMD (x64 False: no llama.cpp graphics builds).
+    """
+    if not x64:
+        return {"offered": False, "reason": "not_x64"}
+    if vendor == "nvidia-nodriver":
+        return {"offered": False, "reason": "nvidia_no_driver"}
+    choice = choose(table, vendor, vram_gb, ram_gb, driver)
+    if choice["offered"]:
+        choice["build"] = pick_build(table, vendor, driver, table["linux"]["builds"])
+    return choice
