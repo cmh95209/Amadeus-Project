@@ -102,6 +102,12 @@ export type PacingInput = {
   ended: boolean;
   /** Speed learned on earlier lines (seconds of audio per second), or null. */
   priorRate: number | null;
+  /**
+   * Head start learned on earlier lines: seconds to wait after the first
+   * sound so that no sentence break runs dry (null = nothing learned, or
+   * not used - e.g. after a dry spell mid-line).
+   */
+  lead?: number | null;
 };
 
 export type PacingDecision = {
@@ -126,6 +132,32 @@ export function currentRate(received: number, elapsed: number, priorRate: number
 }
 
 export function decide(input: PacingInput): PacingDecision {
+  const byRate = decideByRate(input);
+  const lead = input.lead ?? 0;
+  if (input.ended || input.mode === "instant" || input.mode === "whole" || lead <= 0) return byRate;
+  // The engine makes her voice sentence by sentence, with a pause before
+  // each new one: a steady speed can look fine while a sentence break still
+  // runs dry. Earlier lines tell how long a head start that takes.
+  const byLead = Math.min(1, input.elapsed / lead);
+  return { go: byRate.go && byLead >= 1, progress: Math.min(byRate.progress, byLead * 0.97) };
+}
+
+/**
+ * The head start (seconds after the first sound) that would have played a
+ * finished line without a single gap: for every piece, playing from the
+ * start must not have reached the end of what had arrived before it.
+ * `arrivals` = [seconds since the first sound, seconds of audio received so
+ * far] after each piece, in order.
+ */
+export function neededLead(arrivals: [number, number][]): number {
+  let lead = 0;
+  for (let i = 1; i < arrivals.length; i++) {
+    lead = Math.max(lead, arrivals[i][0] - arrivals[i - 1][1]);
+  }
+  return lead;
+}
+
+function decideByRate(input: PacingInput): PacingDecision {
   const { mode, received, ahead, elapsed, ended, priorRate } = input;
   if (ended) return { go: ahead > 0 || received > 0, progress: 1 };
   if (received <= 0) return { go: false, progress: 0 };

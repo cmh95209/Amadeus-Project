@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   decide,
+  neededLead,
   loadVoicePlayback,
   voiceStartsEarly,
   type PacingInput,
@@ -50,4 +51,18 @@ assert.equal(loadVoicePlayback(null), "smooth");
 assert.deepEqual(["smooth", "early", "instant", "whole"].map(m => voiceStartsEarly(m as never)),
   [false, true, true, false]);
 
-console.log("PASS: voice pacing - fast PCs start at once, slow PCs wait just enough, saved choice + old switch");
+// Sentence by sentence: a fast first sentence, then a 3 s pause before the
+// next. The head start that avoids every gap = the worst "arrived later than
+// it would have been played" moment.
+assert.equal(neededLead([[0, 2], [0.5, 4], [7, 6], [7.5, 8]]), 3);
+assert.equal(neededLead([[0, 1], [0.3, 2], [0.6, 3]]), 0, "always ahead: no head start");
+assert.equal(neededLead([]), 0);
+// A learned head start holds a fast-looking start back until it has passed.
+const quick = { ...base, priorRate: 2, received: 2, ahead: 2, elapsed: 1, lead: 3.4 };
+assert.equal(decide(quick).go, false, "fast start, but sentence breaks need 3.4 s");
+assert.ok(decide(quick).progress > 0.2 && decide(quick).progress < 0.4);
+assert.equal(decide({ ...quick, elapsed: 3.5, received: 7, ahead: 7 }).go, true);
+assert.equal(decide({ ...quick, mode: "instant" }).go, true, "Right away ignores it");
+assert.equal(decide({ ...quick, lead: null }).go, true);
+
+console.log("PASS: voice pacing - fast PCs start at once, slow PCs wait just enough, sentence-break head start, saved choice + old switch");

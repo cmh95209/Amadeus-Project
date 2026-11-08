@@ -1,7 +1,9 @@
 import {
   DEFAULT_SECONDS_PER_CHAR,
+  MARGIN_S,
   blend,
   decide,
+  neededLead,
   type VoicePlayback,
 } from "./voicePacing";
 
@@ -18,6 +20,9 @@ const PLAYBACK_FAILED = "Speech playback failed. Check the TTS server and try ag
 // character of her Japanese line takes to say.
 const RATE_KEY = "amadeusVoiceRate";
 const SECONDS_PER_CHAR_KEY = "amadeusVoiceSecPerChar";
+// Head start a line needed (seconds after the first sound, per second of
+// audio) so no sentence break ran dry - see voicePacing.neededLead.
+const LEAD_KEY = "amadeusVoiceLead";
 // A wait shorter than this shows no "preparing" bar (no flicker on a fast PC).
 const SHOW_PREPARING_MS = 400;
 // Scheduling slack when (re)starting: the first piece plays this far ahead.
@@ -44,6 +49,8 @@ type Line = {
   started: boolean;
   /** Ran dry at least once: the length guess was too short. */
   ranDry: boolean;
+  /** [seconds since the first sound, seconds received] after each piece. */
+  arrivals: [number, number][];
   ended: boolean;
   waitingSince: number;
   preparingShown: boolean;
@@ -161,6 +168,7 @@ export class SpeechPlayer {
         playing: false,
         started: false,
         ranDry: false,
+        arrivals: [],
         ended: false,
         waitingSince: performance.now(),
         preparingShown: false,
@@ -286,6 +294,7 @@ export class SpeechPlayer {
     const now = performance.now();
     if (line.firstAt === null) line.firstAt = now;
     line.lastAt = now;
+    line.arrivals.push([(now - line.firstAt) / 1000, line.receivedFrames / format.sampleRate]);
   }
 
   /** Start, carry on, or keep waiting - and keep the "preparing" bar current. */
@@ -297,14 +306,19 @@ export class SpeechPlayer {
     }
     const rate = line.format.sampleRate;
     const ahead = Math.max(0, this.nextTime - this.context.currentTime) + line.pendingFrames / rate;
+    const total = this.estimateTotal(line);
+    const leadRatio = readNumber(LEAD_KEY);
     const decision = decide({
       mode: this.mode,
       received: line.receivedFrames / rate,
       ahead,
       elapsed: line.firstAt === null ? 0 : (performance.now() - line.firstAt) / 1000,
-      total: this.estimateTotal(line),
+      total,
       ended: line.ended,
       priorRate: readNumber(RATE_KEY),
+      // Only at the start of a line (a dry spell mid-line uses the speed).
+      // A fast PC needs (almost) none: no wait at all below 0.15 s.
+      lead: !line.ranDry ? leadFor(leadRatio, total ?? line.receivedFrames / rate) : null,
     });
     if (decision.go) {
       this.showPreparing(line, null);
@@ -422,6 +436,15 @@ export class SpeechPlayer {
     if (seconds >= 1 && line.chars) {
       writeNumber(SECONDS_PER_CHAR_KEY, blend(readNumber(SECONDS_PER_CHAR_KEY), seconds / line.chars));
     }
+    if (seconds >= 1.5) {
+      // Careful on purpose: a bigger head start wins at once, a smaller one
+      // only half way (one lucky line must not bring the gaps back).
+      const ratio = neededLead(line.arrivals) / seconds;
+      const before = readNumber(LEAD_KEY);
+      const next = before === null ? ratio : Math.max(ratio, blend(before, ratio, 0.5));
+      // 0 is never stored (readNumber ignores it): keep a tiny value instead.
+      writeNumber(LEAD_KEY, Math.max(next, 0.0001));
+    }
   }
 
   private showPreparing(line: Line, progress: number | null): void {
@@ -522,6 +545,13 @@ export class SpeechPlayer {
       this.context = null;
     }
   }
+}
+
+/** Seconds to wait after the first sound for a line of `total` seconds. */
+function leadFor(ratio: number | null, total: number): number | null {
+  if (ratio === null) return null;
+  const lead = ratio * total;
+  return lead < 0.15 ? null : lead + MARGIN_S;
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
