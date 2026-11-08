@@ -111,7 +111,7 @@ class SaveRuntimePathsTests(unittest.TestCase):
     def test_installer_calls_it_after_the_smoke_test(self):
         text = _INSTALLER.read_text(encoding="utf-8")
         self.assertIn("Save-RuntimePaths $proj $amPy $conda", text)
-        self.assertRegex(text, r'\$InstallerVersion = "v4\.13\.3"')
+        self.assertRegex(text, r'\$InstallerVersion = "v4\.13\.\d+"')
 
 
 @unittest.skipUnless(_WINDOWS, "Windows only")

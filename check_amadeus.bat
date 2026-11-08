@@ -27,6 +27,7 @@ rem start_windows.bat looks in.
 set "RECORDED_PY="
 if exist "%~dp0.runtime\app_python.txt" set /p RECORDED_PY=<"%~dp0.runtime\app_python.txt"
 if defined RECORDED_PY if exist "%RECORDED_PY%" set "PY=%RECORDED_PY%"
+if not defined PY if exist "%USERPROFILE%\.amadeus-tools\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\.amadeus-tools\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined PY if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined PY if exist "%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined PY if exist "%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "PY=%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe"

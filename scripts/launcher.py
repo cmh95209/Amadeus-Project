@@ -663,6 +663,9 @@ def find_conda() -> str | None:
         # The conda the installer used (v4.13.3+ records it): her voice
         # engine's environment was made by that one.
         _recorded_conda(),
+        # Amadeus' own Miniconda (Windows installer v4.13.4+, set up when the
+        # PC's was too old): when it is there, it is the one in use.
+        str(Path.home() / ".amadeus-tools" / "miniconda3" / "Scripts" / "conda.exe") if os.name == "nt" else None,
         shutil.which("conda"),
         os.environ.get("CONDA_EXE"),
         str(Path.home() / "anaconda3" / "bin" / "conda"),

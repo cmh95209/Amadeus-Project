@@ -1,13 +1,21 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.3  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.4  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
 #
+#  WHAT'S NEW IN v4.13.4 (November 2026, app v3.0):
+#   - A Miniconda already on the PC that is too old (before 23.10 for a new
+#     install; before 4.9 always) is no longer used: Amadeus gets her own
+#     copy (%USERPROFILE%\.amadeus-tools\miniconda3) and yours stays as it
+#     is. The conda version is now in install_log.txt.
+#   - The fallback Miniconda download installs correctly (its target folder
+#     was passed in quotes, which the silent installer does not accept).
+#
 #  WHAT'S NEW IN v4.13.3 (November 2026, app v3.0):
 #   - The installer writes down where her Python and conda are
-#     (.runtimepp_python.txt, .runtime\conda_exe.txt), and the start
+#     (.runtime\app_python.txt, .runtime\conda_exe.txt), and the start
 #     script, the health check and the launcher use that. They also look in
 #     every place the installer accepts a Miniconda (including an all-users
 #     C:\ProgramData\miniconda3) and in %USERPROFILE%\.conda\envs. (Before,
@@ -269,11 +277,13 @@ param(
     # -SkipLlmDownload): no programs, environments or project download.
     [switch]$LlmScreensOnly
 )
-$InstallerVersion = "v4.13.3"
+$InstallerVersion = "v4.13.4"
 # Set in step 2 when the PC's own Node.js could not run her web page and
 # Amadeus' own copy is used instead (step 9 then sets the web page's parts up
 # again with it).
 $NodeSwitched = $false
+# Set in step 2 when Amadeus' own Miniconda is the one in use (v4.13.4).
+$OwnConda = $false
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faster
@@ -520,6 +530,66 @@ function Get-NodeId($nodeExe){
     return $null
 }
 
+# v4.13.4: an existing Miniconda must be new enough. Below 4.9 conda has no
+# `conda run --no-capture-output`, which starts her voice engine - it never
+# worked with Amadeus. Below 23.10 (the first with the fast "libmamba" solver
+# as standard) it is used only by an install that already has its Python
+# environments there and works; a NEW install gets Amadeus' own copy, the
+# same way as an old Node.js (Get-NodeProblem).
+$CondaMinWorking = [version]"4.9"
+$CondaMinNew     = [version]"23.10"
+
+# "conda 24.11.3" -> [version] 24.11, or $null when it does not run.
+function Get-CondaVersion($condaExe){
+    $out = ""
+    try { $out = (& $condaExe --version 2>&1 | Out-String).Trim() } catch { $out = "" }
+    if ($out -match 'conda\s+(\d+)\.(\d+)') { return [version]($Matches[1] + "." + $Matches[2]) }
+    return $null
+}
+
+# $null when that conda can be used, else a short reason for the log.
+function Get-CondaProblem($ver, [bool]$hasAmadeusEnvs){
+    if (-not $ver) { return "it does not run" }
+    if ($ver -lt $CondaMinWorking) { return ("its version " + [string]$ver + " is too old (" + [string]$CondaMinNew + " or newer is needed)") }
+    if ($ver -lt $CondaMinNew -and -not $hasAmadeusEnvs) { return ("its version " + [string]$ver + " is too old for a new install (" + [string]$CondaMinNew + " or newer is needed)") }
+    return $null
+}
+
+# Does that conda already hold Amadeus' Python environments (an earlier,
+# working install)? Its own envs folder, or the per-user one conda uses when
+# its folder is not writable.
+function Test-CondaHasAmadeusEnvs($condaRoot){
+    foreach ($dir in @((Join-Path $condaRoot "envs"), (Join-Path $env:USERPROFILE ".conda\envs"))) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($e in @(Get-ChildItem -LiteralPath $dir -Directory -Filter "amadeus*" -ErrorAction SilentlyContinue)) {
+            if (Test-Path (Join-Path $e.FullName "python.exe")) { return $true }
+        }
+    }
+    return $false
+}
+
+# Install Miniconda (Anaconda's official "-latest" download) into $dest, for
+# this user only, without touching PATH or the PC's default Python. The
+# silent installer wants /D= LAST and WITHOUT quotes (also with spaces).
+# Returns $true when $dest\Scripts\conda.exe is there afterwards.
+function Get-MinicondaArgs($dest){ return ("/InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S /D=" + $dest) }
+function Install-MinicondaDirect($dest){
+    $mcUrl = "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+    $mcExe = Join-Path $env:TEMP "Miniconda3-latest-Windows-x86_64.exe"
+    try {
+        Log "  Downloading Miniconda from Anaconda (about 125 MB, can take a few minutes)..."
+        Log ("  from: " + $mcUrl)
+        Invoke-WebRequest $mcUrl -OutFile $mcExe -UseBasicParsing -TimeoutSec 3600
+        Log ("  Installing Miniconda into " + $dest + " ...")
+        Start-Process -Wait $mcExe -ArgumentList (Get-MinicondaArgs $dest)
+    } catch {
+        Log ("  Miniconda download/install failed: " + $_.Exception.Message) "Red"
+    } finally {
+        Remove-Item $mcExe -Force -ErrorAction SilentlyContinue
+    }
+    return (Test-Path (Join-Path $dest "Scripts\conda.exe"))
+}
+
 # Prove a folder is a COMPLETE clone by checking that these files exist inside it.
 function Test-Complete($dest, $markers){
     foreach ($m in $markers) { if (-not (Test-Path (Join-Path $dest $m))) { return $false } }
@@ -760,6 +830,13 @@ function Invoke-CondaCreate($name, $py){
 # but which blocks the next create ("prefix already exists").
 function Ensure-Env($name, $py="3.10"){
     $path = Get-EnvPath $name
+    # v4.13.4: with Amadeus' own Miniconda, an environment of the same name
+    # that belongs to the PC's other (too old) conda is not reused: her voice
+    # engine is started by NAME through this conda, which only finds its own.
+    if ($script:OwnConda -and $path -and -not ([string]$path).StartsWith(([string]$condaHome).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        Write-LogOnly ("  ignoring '" + $name + "' at " + $path + " (another conda's) - Amadeus' own Miniconda gets its own")
+        $path = $null
+    }
     $left = Join-Path $condaHome ("envs\" + $name)
     if (-not $path -and (Test-Path $left)) { $path = $left }
     if ($path) {
@@ -1914,15 +1991,40 @@ try {
     }
 
     $condaHome = Join-Path $env:USERPROFILE "miniconda3"
+    $OwnCondaDir = Join-Path $ToolsDir "miniconda3"
     function Find-CondaHome {
         # The first location that actually contains a working conda, or $null.
-        $spots = @((Join-Path $env:USERPROFILE "miniconda3"),
+        # Amadeus' own copy (v4.13.4) first: once set up, it is the one in use.
+        $spots = @($OwnCondaDir,
+                   (Join-Path $env:USERPROFILE "miniconda3"),
                    (Join-Path $env:LOCALAPPDATA "Continuum\miniconda3"),
                    "C:\ProgramData\miniconda3")
         foreach ($a in $spots) { if (Test-Path (Join-Path $a "Scripts\conda.exe")) { return $a } }
         return $null
     }
-    if ($found = Find-CondaHome) { Log "  Miniconda already present." "Green"; $condaHome = $found }
+    # v4.13.4: a Miniconda the PC already has is used only when it is new
+    # enough (Get-CondaProblem); otherwise Amadeus gets her own copy in
+    # %USERPROFILE%\.amadeus-tools\miniconda3 and the PC's own stays as it is.
+    $found = Find-CondaHome
+    if ($found -and ($found -ne $OwnCondaDir)) {
+        $foundExe = Join-Path $found "Scripts\conda.exe"
+        $foundVer = Get-CondaVersion $foundExe
+        Write-LogOnly ("  existing conda: " + $foundExe + " version " + $(if ($foundVer) { [string]$foundVer } else { "unknown" }))
+        $condaProblem = Get-CondaProblem $foundVer (Test-CondaHasAmadeusEnvs $found)
+        if ($condaProblem) {
+            Log ("  The Miniconda on this PC (" + $found + ") cannot be used for Amadeus: " + $condaProblem + ". Amadeus gets her own copy instead - yours stays as it is.") "Yellow"
+            if (-not (Install-MinicondaDirect $OwnCondaDir) -or -not (Test-Path (Join-Path $OwnCondaDir "Scripts\conda.exe"))) {
+                Die "Could not set up Amadeus' own Miniconda. Look at this window and the log."
+            }
+            $found = $OwnCondaDir
+        }
+    }
+    if ($found) {
+        $condaHome = $found
+        $script:OwnConda = ($found -eq $OwnCondaDir)
+        $useVer = Get-CondaVersion (Join-Path $found "Scripts\conda.exe")
+        Log ("  Miniconda already present" + $(if ($script:OwnConda) { " (Amadeus' own copy)" } else { "" }) + $(if ($useVer) { ", conda " + [string]$useVer } else { "" }) + ".") "Green"
+    }
     else {
         # Anaconda renamed the winget package in 2026: current catalogs know
         # "Anaconda.Miniconda3", older ones only "ContinuumAnalytics.Miniconda3"
@@ -1936,18 +2038,7 @@ try {
             # the permanent "-latest" file, always the current version, a
             # link that never disappears. Same program, fully automatic.
             Log "  winget could not install Miniconda here - falling back to Anaconda's official download (the same program, just a different door)." "Yellow"
-            $mcUrl = "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
-            $mcExe = Join-Path $env:TEMP "Miniconda3-latest-Windows-x86_64.exe"
-            try {
-                Log "  Downloading Miniconda from Anaconda (about 125 MB, can take a few minutes)..."
-                Log ("  from: " + $mcUrl)
-                Invoke-WebRequest $mcUrl -OutFile $mcExe -UseBasicParsing -TimeoutSec 3600
-                Start-Process -Wait $mcExe -ArgumentList ("/S /D=`"" + $condaHome + "`"")
-            } catch {
-                Log ("  Miniconda download/install failed: " + $_.Exception.Message) "Red"
-            } finally {
-                Remove-Item $mcExe -Force -ErrorAction SilentlyContinue
-            }
+            [void](Install-MinicondaDirect $condaHome)
         }
         if (-not ($condaHome = Find-CondaHome)) { Die "Could not find Miniconda after installing it. Look at this window and the log." }
     }

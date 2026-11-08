@@ -25,6 +25,7 @@ if defined RECORDED_PY if exist "%RECORDED_PY%" set "AMADEUS_PY=%RECORDED_PY%"
 rem 2) Every place the installer accepts a Miniconda/Anaconda, plus the
 rem    per-user folder conda uses when its own folder is not writable
 rem    (an all-users install in C:\ProgramData - 2026-11-08 tester report).
+if not defined AMADEUS_PY if exist "%USERPROFILE%\.amadeus-tools\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\.amadeus-tools\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined AMADEUS_PY if exist "%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\miniconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined AMADEUS_PY if exist "%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%USERPROFILE%\anaconda3\envs\%AMADEUS_ENV%\python.exe"
 if not defined AMADEUS_PY if exist "%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe" set "AMADEUS_PY=%LOCALAPPDATA%\miniconda3\envs\%AMADEUS_ENV%\python.exe"

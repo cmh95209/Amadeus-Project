@@ -1,5 +1,18 @@
 # Changelog
 
+## Windows installer v4.13.4 — An Old Miniconda No Longer Gets in the Way — November 2026
+
+**A Miniconda already on the PC is checked first.** Like an old Node.js
+(v4.13.1), a Miniconda that is too old is no longer used: older than 4.9 it
+cannot start her voice engine at all, and older than 23.10 it is used only by
+an earlier install that already works with it. Otherwise Amadeus gets her own
+Miniconda (`%USERPROFILE%\.amadeus-tools\miniconda3`) and yours stays as it is.
+The conda version is now written in `install_log.txt`.
+
+**The fallback Miniconda download works.** When winget cannot install
+Miniconda, the installer downloads it from Anaconda itself; it passed the
+target folder in quotes, which Miniconda's silent installer does not accept.
+
 ## Windows installer v4.13.3 — Her Python Is Always Found — November 2026
 
 **"Amadeus's Python (conda env "amadeus") could not be found" on some PCs.**
@@ -7,7 +20,7 @@ The installer accepts a Miniconda that is already on the PC in more places
 (for example one installed for all users in `C:\ProgramData\miniconda3`, whose
 environments can end up in `%USERPROFILE%\.conda\envs`) than the start script
 looked in. Now the installer writes down where her Python and conda are
-(`.runtimepp_python.txt`, `.runtime\conda_exe.txt`), and the start script,
+(`.runtime\app_python.txt`, `.runtime\conda_exe.txt`), and the start script,
 the health check (`check_amadeus.bat`) and the launcher use that first. They
 also look in all of those places, and the error message says what to do (run
 the installer again; if it comes back, send `install_log.txt`).
