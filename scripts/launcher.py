@@ -661,6 +661,62 @@ def find_conda() -> str | None:
     return None
 
 
+# Amadeus' own Node.js (Windows installer v4.13+): set up when the PC has no
+# Node.js, or (v4.13.1) one that cannot run her web page - too old or the
+# 32-bit build. When it is there it is the one to use.
+OWN_NODE_DIR = Path.home() / ".amadeus-tools" / "node"
+# Vite 6 (her web page) runs on Node.js 18 or newer. An older one cannot
+# start it at all; its npm 6 even opens a bare command prompt instead
+# (2026-11-08, a tester's PC: "WebUI did not become ready" on every start).
+MIN_NODE_MAJOR = 18
+
+
+def use_own_node() -> None:
+    """Windows: put Amadeus' own Node.js first on PATH when it exists, so
+    npm, her web page and everything they start use it - not an older
+    Node.js the PC may also have. Nothing changes when there is none."""
+    if os.name != "nt" or not (OWN_NODE_DIR / "node.exe").is_file():
+        return
+    path = os.environ.get("PATH", "")
+    own = str(OWN_NODE_DIR)
+    first = path.split(os.pathsep, 1)[0] if path else ""
+    if os.path.normcase(first.rstrip("\\/")) != os.path.normcase(own):
+        os.environ["PATH"] = own + (os.pathsep + path if path else "")
+
+
+def node_version(npm: str) -> tuple[str, str] | None:
+    """(node.exe path, version like "14.21.3") of the Node.js next to `npm`
+    (or the first on PATH); None when it cannot be told."""
+    exe_name = "node.exe" if os.name == "nt" else "node"
+    beside = Path(npm).with_name(exe_name)
+    node = str(beside) if beside.is_file() else shutil.which("node")
+    if not node:
+        return None
+    try:
+        out = subprocess.run([node, "-p", "process.versions.node"],
+                             capture_output=True, text=True, timeout=20,
+                             check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out or not out.split(".", 1)[0].isdigit():
+        return None
+    return node, out
+
+
+def node_problem(found: tuple[str, str] | None) -> str | None:
+    """A plain-language stop message when that Node.js is too old to start
+    her web page; None when it is fine or could not be checked."""
+    if not found:
+        return None
+    node, version = found
+    if int(version.split(".", 1)[0]) >= MIN_NODE_MAJOR:
+        return None
+    return (f"The Node.js on this PC ({node}, version {version}) is too old "
+            f"to start her web page - it needs version {MIN_NODE_MAJOR} or "
+            "newer. Run the Amadeus installer again: it sets up Amadeus' own "
+            "copy of Node.js and leaves yours as it is.")
+
+
 def find_npm() -> str | None:
     names = ("npm.cmd", "npm") if os.name == "nt" else ("npm",)
 
@@ -1113,7 +1169,12 @@ def preflight(conda: str, npm: str) -> None:
     note(f"  Project : {PROJECT_ROOT}")
     note(f"  Conda   : {conda}")
     note(f"  npm     : {npm}")
+    found = node_version(npm)
+    note(f"  Node.js : {found[1] + ' (' + found[0] + ')' if found else 'version unknown'}")
     note(f"  Python  : {sys.executable}")
+    problem = node_problem(found)
+    if problem:
+        raise RuntimeError(problem)
     if env_suffix():
         note(f"  Envs    : this install's own (suffix '{env_suffix()}')")
 
@@ -1469,6 +1530,7 @@ def restart_services(parts: dict, starters: dict, *, status_path: Path | None = 
 def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
         no_model: bool = False) -> None:
     conda = find_conda()
+    use_own_node()
     npm = find_npm()
     builtin = load_builtin_config()
     say(f"Amadeus is starting. (Details: {LAUNCHER_LOG})")

@@ -1,5 +1,19 @@
 # Changelog
 
+## Windows installer v4.13.1 — An Old Node.js No Longer Stops Her — November 2026
+
+**The app stopped with "WebUI did not become ready" on a PC with an old
+Node.js.** The installer used any Node.js it found; an old one (here version 14,
+the 32-bit build) cannot start her web page. Now a Node.js older than version 20,
+or the 32-bit build, is left alone and Amadeus gets her own copy
+(`%USERPROFILE%\.amadeus-tools\node`), which the launcher then always uses. Her
+web page's parts are set up again once when the Node.js changes. If the launcher
+still finds only a Node.js that is too old, it stops with a plain message saying
+to run the installer again.
+
+To update, download the new installer and run it once more (your settings and
+conversations stay).
+
 ## v3.0 — Her Own Mind, Eyes and Ears — November 2026
 
 The biggest change since the first build: she can run entirely on your own PC,

@@ -1,9 +1,17 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.1  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.13.1 (November 2026, app v3.0):
+#   - A Node.js already on the PC that cannot run her web page (older than
+#     version 20, or the 32-bit build) is no longer used: Amadeus gets her
+#     own copy (%USERPROFILE%\.amadeus-tools\node) and yours stays as it is.
+#     Her web page's parts are set up again once when the Node.js changes.
+#     (Before, an old Node.js made the app stop with "WebUI did not become
+#     ready" on every start.)
 #
 #  WHAT'S NEW IN v4.13 (November 2026, app v3.0):
 #   - The speech model for videos is downloaded during the install.
@@ -246,7 +254,11 @@ param(
     # -SkipLlmDownload): no programs, environments or project download.
     [switch]$LlmScreensOnly
 )
-$InstallerVersion = "v4.13"
+$InstallerVersion = "v4.13.1"
+# Set in step 2 when the PC's own Node.js could not run her web page and
+# Amadeus' own copy is used instead (step 9 then sets the web page's parts up
+# again with it).
+$NodeSwitched = $false
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference    = "SilentlyContinue"   # makes downloads noticeably faster
@@ -462,6 +474,35 @@ function Refresh-Path {
         $dir = Join-Path $tools $sub
         if (Test-Path $dir) { $env:Path = $dir + ";" + $env:Path }
     }
+}
+
+# v4.13.1: a Node.js found on the PC is used only when it can run her web
+# page - version 20 or newer and not the 32-bit build. Returns $null when it
+# is fine, else a short reason for the log. (2026-11-08, a tester: an old
+# 32-bit Node.js in "Program Files (x86)" was accepted; its npm 6 opened a
+# bare command prompt instead of starting the web page, so every start
+# ended with "WebUI did not become ready".)
+function Get-NodeProblem($nodeExe){
+    if (-not $nodeExe) { return "it was not found" }
+    $out = ""
+    try { $out = (& $nodeExe -p "process.versions.node + ' ' + process.arch" 2>$null | Out-String).Trim() } catch { $out = "" }
+    if ($out -notmatch '^(\d+)\.\d+\.\d+ (\S+)$') { return "it does not run" }
+    $major = [int]$Matches[1]
+    $arch = $Matches[2]
+    if ($major -lt 20) { return ("its version " + ($out -split ' ')[0] + " is too old (20 or newer is needed)") }
+    if ($arch -eq "ia32") { return "it is the 32-bit version" }
+    return $null
+}
+
+# Which Node.js her web page's parts (frontend\node_modules) were set up
+# with: main version + processor type, e.g. "node24 x64". Some of those
+# parts are made for one exact Node.js type, so a change means setting them
+# up again. $null when node does not run.
+function Get-NodeId($nodeExe){
+    $out = ""
+    try { $out = (& $nodeExe -p "'node' + process.versions.node.split('.')[0] + ' ' + process.arch" 2>$null | Out-String).Trim() } catch { $out = "" }
+    if ($out -match '^node\d+ \S+$') { return $out }
+    return $null
 }
 
 # Prove a folder is a COMPLETE clone by checking that these files exist inside it.
@@ -1861,13 +1902,27 @@ try {
     & $conda config --set notify_outdated_conda false 2>$null | Out-Null
 
     # Node.js (her web page): winget only offers it for the whole PC.
-    if (Get-Command node -ErrorAction SilentlyContinue) { Log "  Node.js already present." "Green" }
+    # v4.13.1: a Node.js the PC already has is used only when it can run her
+    # web page (Get-NodeProblem); otherwise Amadeus gets her own copy, which
+    # goes first on PATH (Refresh-Path; the launcher does the same). The
+    # PC's own Node.js is left exactly as it is.
+    $sysNode = Get-Command node -ErrorAction SilentlyContinue
+    $sysNodeProblem = $null
+    if ($sysNode) { $sysNodeProblem = Get-NodeProblem $sysNode.Source }
+    if ($sysNode -and -not $sysNodeProblem) { Log ("  Node.js already present (" + $sysNode.Source + ").") "Green" }
     else {
+        if ($sysNode) {
+            Log ("  The Node.js on this PC (" + $sysNode.Source + ") cannot run her web page: " + $sysNodeProblem + ". Amadeus gets her own copy instead - yours stays as it is.") "Yellow"
+            $script:NodeSwitched = $true
+        }
         if (-not (Test-Path (Join-Path $NodeDir "node.exe"))) {
             Install-PortableZip "Node.js v24.22.1" "https://nodejs.org/dist/v24.22.1/node-v24.22.1-win-x64.zip" 37748064 "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5" "node-v24.22.1-win-x64" $NodeDir
         } else { Log "  Node.js already present (Amadeus' own copy)." "Green" }
         Refresh-Path
-        if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Die "Could not set up Node.js. Look at this window and the log." }
+        $nowNode = Get-Command node -ErrorAction SilentlyContinue
+        if (-not $nowNode) { Die "Could not set up Node.js. Look at this window and the log." }
+        $nowProblem = Get-NodeProblem $nowNode.Source
+        if ($nowProblem) { Die ("The Node.js now in use (" + $nowNode.Source + ") cannot run her web page: " + $nowProblem + ". Look at this window and the log.") }
         Log ("  Node.js ready: " + $NodeDir) "Green"
     }
 
@@ -2305,11 +2360,34 @@ try {
 
     # ---------- STEP 9: frontend ----------
     Step 9 "Setting up the web interface (frontend)"
-    Push-Location (Join-Path $proj "frontend")
+    $feDir = Join-Path $proj "frontend"
+    Push-Location $feDir
+    # v4.13.1: the parts are set up again when the Node.js changed since the
+    # last time (recorded in node_modules\.amadeus-node.txt), or - for parts
+    # from an older installer, which wrote no record - when step 2 just
+    # replaced an unusable Node.js with Amadeus' own copy.
+    $nodeModules = Join-Path $feDir "node_modules"
+    $nodeRecord = Join-Path $nodeModules ".amadeus-node.txt"
+    $nodeNow = $null
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCmd) { $nodeNow = Get-NodeId $nodeCmd.Source }
+    if (Test-Path -LiteralPath $nodeModules) {
+        $nodeBefore = $null
+        if (Test-Path -LiteralPath $nodeRecord) { $nodeBefore = ([IO.File]::ReadAllText($nodeRecord)).Trim() }
+        if (($nodeBefore -and $nodeNow -and $nodeBefore -ne $nodeNow) -or (-not $nodeBefore -and $NodeSwitched)) {
+            Log "  Her web page's parts were set up with a different Node.js - setting them up again." "Yellow"
+            & (Join-Path $env:SystemRoot "System32\cmd.exe") /d /c rmdir /s /q "$nodeModules" 2>$null | Out-Null
+        }
+    }
     # --no-audit --no-fund: skip npm's background registry checks - they
     # save nothing for an install and can add tens of seconds on fresh PCs.
     Invoke-Tool "Setting up the web interface" (Join-Path $env:SystemRoot "System32\cmd.exe") @("/d", "/c", "npm", "install", "--no-audit", "--no-fund")
-    if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else { Log "  Frontend ready." "Green" }
+    if ($LASTEXITCODE -ne 0) { Log "  npm install reported an issue, but this is often harmless. Continuing." "Yellow" } else {
+        Log "  Frontend ready." "Green"
+        if ($nodeNow -and (Test-Path -LiteralPath $nodeModules)) {
+            try { [IO.File]::WriteAllText($nodeRecord, $nodeNow) } catch { Write-LogOnly ("  could not write " + $nodeRecord + ": " + $_) }
+        }
+    }
     Pop-Location
 
     # ---------- STEP 10: built-in local model (option A only) ----------
