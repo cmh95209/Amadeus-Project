@@ -1,4 +1,8 @@
 # Amadeus-L
+
+**Join Discord for support and discussions:** [![](https://dcbadge.limes.pink/api/server/qSYmSYkpuA)](https://discord.gg/qSYmSYkpuA)
+
+**Reddit Announcement Thread for more details** https://www.reddit.com/r/steinsgate/s/9K5Hvjqtxw
 <p align="center">
   <a href="docs/images/screenshot-poke.png"><img width="32%" alt="Amadeus answering a poke, with her English and Japanese lines" src="docs/images/screenshot-poke.png" /></a>
   <a href="docs/images/screenshot-web-search.png"><img width="32%" alt="Amadeus answering a travel question with web search, pictures and videos on her desk" src="docs/images/screenshot-web-search.png" /></a>
