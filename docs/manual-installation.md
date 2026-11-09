@@ -7,7 +7,7 @@ What the installer scripts do, step by step — only needed if you'd rather inst
 
 Before installing Amadeus, make sure you have:
 
-- **Git** and **Git LFS** (the voice models are stored via LFS)
+- **Git** and **Git LFS** (her voice reference clips and reaction sounds in this repository are stored via LFS)
 - **Miniconda or Anaconda** (three Python environments are created: `amadeus`
   on Python 3.10, `amadeus-cm` on Python 3.13 for the memory sidecar, and
   `GPTSoVits` on Python 3.10 - on Linux name it `GPTSoVITS`, exactly the way
@@ -182,29 +182,57 @@ pip install torch torchvision torchaudio
 
 ## 7. Download GPT-SoVITS Pretrained Models
 
-The voice quality depends on pretrained models, stored on Hugging Face via
-Git LFS (that is why Git LFS is a requirement):
+Her voice needs **8 model files (about 1.2 GB)** from the voice engine's
+Hugging Face page - the same files, from the same pinned version, as the
+installers. Do not clone the whole page: it holds every engine version
+(~6.5 GB, and a Git LFS clone needs about twice that on disk).
+
+From the Amadeus project root, go into the voice engine's model folder:
 
 ```bash
-cd GPT-SoVITS
-git clone https://huggingface.co/lj1995/GPT-SoVITS pretrained_models
+cd GPT-SoVITS/GPT_SoVITS/pretrained_models
 ```
 
-If the downloaded files are tiny LFS *pointers* instead of real model files
-(`git lfs install` missing or the files are a few hundred bytes), run
-`git lfs pull` inside `pretrained_models/`.
+Then download the 8 files (the same commands work on Windows 10/11, macOS and
+Linux - `curl` is built in):
+
+```bash
+curl -L --fail --create-dirs -o "chinese-roberta-wwm-ext-large/config.json" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/chinese-roberta-wwm-ext-large/config.json"
+curl -L --fail --create-dirs -o "chinese-roberta-wwm-ext-large/tokenizer.json" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/chinese-roberta-wwm-ext-large/tokenizer.json"
+curl -L --fail --create-dirs -o "chinese-roberta-wwm-ext-large/pytorch_model.bin" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/chinese-roberta-wwm-ext-large/pytorch_model.bin"
+curl -L --fail --create-dirs -o "chinese-hubert-base/config.json" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/chinese-hubert-base/config.json"
+curl -L --fail --create-dirs -o "chinese-hubert-base/preprocessor_config.json" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/chinese-hubert-base/preprocessor_config.json"
+curl -L --fail --create-dirs -o "chinese-hubert-base/pytorch_model.bin" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/chinese-hubert-base/pytorch_model.bin"
+curl -L --fail --create-dirs -o "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
+curl -L --fail --create-dirs -o "gsv-v2final-pretrained/s2G2333k.pth" "https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5/gsv-v2final-pretrained/s2G2333k.pth"
+```
+
+If one is interrupted, run its line again. To make sure a file is complete,
+compare its size and SHA-256 with the table below (`sha256sum <file>` on
+Linux, `shasum -a 256 <file>` on macOS, `certutil -hashfile <file> SHA256` on
+Windows):
+
+| File | Bytes | SHA-256 |
+|---|---:|---|
+| `chinese-roberta-wwm-ext-large/config.json` | 963 | `3d57de2fd7e80d0e5c8ff194f0bbb6baa10df7e43fc262a0cc71298a78b0a3e5` |
+| `chinese-roberta-wwm-ext-large/tokenizer.json` | 268,962 | `173796956820ea27bd14f76bf28162607ff4254807e2948253eb5b46f5bb643b` |
+| `chinese-roberta-wwm-ext-large/pytorch_model.bin` | 651,225,145 | `e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8` |
+| `chinese-hubert-base/config.json` | 1,449 | `c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103` |
+| `chinese-hubert-base/preprocessor_config.json` | 212 | `dcd684124d06722947939d41ea6ae58dbf10968c60a11a29f23ddc602c64a29b` |
+| `chinese-hubert-base/pytorch_model.bin` | 188,811,417 | `24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c` |
+| `gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt` | 155,315,150 | `732f94e63b148066e24c7f9d2637f3374083e637635f07fbdb695dee20ddbe1f` |
+| `gsv-v2final-pretrained/s2G2333k.pth` | 106,035,259 | `924fdccaa3c574bf139c25c9759aa1ed3b3f99e19a7c529ee996c2bc17663695` |
 
 Also pre-download the language-detection model so the first voice line is
 instant:
 
 ```bash
-cd GPT_SoVITS/pretrained_models/fast_langdetect
-# Windows:
-curl -L -o lid.176.bin https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
-# macOS / Linux:
-curl -L -O https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
-cd ../../..
+cd fast_langdetect
+curl -L --fail -o lid.176.bin https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin
+cd ../../../..
 ```
+
+(That last line takes you back to the Amadeus project root.)
 
 Optionally, pre-download the Western-script text data (pronunciation of
 Latin-script names and words in her voice):
