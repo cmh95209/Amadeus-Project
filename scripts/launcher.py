@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import shutil
@@ -125,7 +126,7 @@ def _short(text: str, width: int) -> str:
 
 
 def run_tool(label: str, command: list[str], cwd: Path | None = None,
-             passthrough: bool = False) -> int:
+             passthrough: bool = False, extra_env: dict | None = None) -> int:
     """Run a one-time setup program (pip, venv, npm). Its full output goes
     to logs/launcher.log; the console gets ONE line that updates in place
     (the package being fetched and its download percentage). passthrough:
@@ -138,7 +139,7 @@ def run_tool(label: str, command: list[str], cwd: Path | None = None,
         proc = subprocess.Popen(command, cwd=str(cwd) if cwd else None,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace",
-                                env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                                env={**os.environ, "PYTHONIOENCODING": "utf-8", **(extra_env or {})})
     except OSError as e:
         note(f"<<< {label}: could not start ({e})")
         return 127
@@ -1209,6 +1210,117 @@ def ensure_frontend_dependencies(npm: str) -> None:
     note("Frontend dependencies installed.")
 
 
+# ---------------------------------------------------------------------------
+# The web page, built (2026-11-09). Vite's developer server rebuilt the page
+# in the browser with extra checks on every load; the built page is 2-4x
+# quicker (typing in a 560-message chat: 56 ms -> 24 ms per key, no freezes).
+# The launcher builds it when the page's code changed (an update), into a
+# side folder that replaces frontend/dist only when the build worked, and
+# serves it with `vite preview` on the same address. Anything that goes
+# wrong -> the developer server, exactly as before. For working on the page:
+# .runtime/page_mode.txt = "dev" (or AMADEUS_PAGE_DEV=1) keeps the developer
+# server (changes show on a browser refresh).
+# ---------------------------------------------------------------------------
+PAGE_DIST = FRONTEND_DIR / "dist"
+PAGE_STAMP = RUNTIME_DIR / "page_build.txt"
+PAGE_MODE_FILE = RUNTIME_DIR / "page_mode.txt"
+# Everything the built page is made from.
+PAGE_INPUTS = ("src", "public", "cubism", "index.html", "package.json", "package-lock.json",
+               "vite.config.ts", "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json",
+               "tsconfig.cubism.json")
+
+
+def page_dev_mode() -> bool:
+    if os.environ.get("AMADEUS_PAGE_DEV", "").strip() == "1":
+        return True
+    try:
+        return PAGE_MODE_FILE.read_text(encoding="utf-8").strip().lower() == "dev"
+    except OSError:
+        return False
+
+
+def page_fingerprint(root: Path | None = None) -> str:
+    """Names, sizes and change times of the page's source files: an update
+    (git) changes it, a plain restart does not."""
+    root = root or FRONTEND_DIR
+    digest = hashlib.sha256()
+    for name in PAGE_INPUTS:
+        path = root / name
+        if path.is_file():
+            files = [path]
+        elif path.is_dir():
+            files = sorted(f for f in path.rglob("*") if f.is_file())
+        else:
+            continue
+        for f in files:
+            st = f.stat()
+            digest.update(f"{f.relative_to(root).as_posix()}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def build_page(npm: str) -> bool:
+    """Build the page into frontend/dist.new; only a complete build replaces
+    frontend/dist. Its own temp folder: Windows' temp can refuse the build
+    tool's files ("Access is denied", seen 2026-11-08)."""
+    out = FRONTEND_DIR / "dist.new"
+    old = FRONTEND_DIR / "dist.old"
+    tmp = RUNTIME_DIR / "page-tmp"
+    shutil.rmtree(out, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    code = run_tool("Preparing the web page",
+                    [npm, "run", "build:page", "--", "--outDir", str(out), "--emptyOutDir"],
+                    FRONTEND_DIR, extra_env={"TMP": str(tmp), "TEMP": str(tmp), "TMPDIR": str(tmp)})
+    if code != 0 or not (out / "index.html").is_file():
+        note(f"Building the web page failed (exit {code}).")
+        shutil.rmtree(out, ignore_errors=True)
+        return False
+    try:
+        shutil.rmtree(old, ignore_errors=True)
+        if PAGE_DIST.exists():
+            PAGE_DIST.rename(old)
+        out.rename(PAGE_DIST)
+    except OSError as exc:
+        note(f"Could not put the new web page in place ({exc}).")
+        if not PAGE_DIST.exists() and old.exists():
+            old.rename(PAGE_DIST)
+        shutil.rmtree(out, ignore_errors=True)
+        return False
+    shutil.rmtree(old, ignore_errors=True)
+    return True
+
+
+def prepare_page(npm: str) -> bool:
+    """True = serve the built page (built now if its code changed); False =
+    the developer server (asked for, or the build failed)."""
+    if page_dev_mode():
+        note("Web page: developer server (page_mode.txt / AMADEUS_PAGE_DEV).")
+        return False
+    stamp = page_fingerprint()
+    try:
+        built_from = PAGE_STAMP.read_text(encoding="utf-8").strip()
+    except OSError:
+        built_from = ""
+    if (PAGE_DIST / "index.html").is_file() and built_from == stamp:
+        return True
+    if not build_page(npm):
+        say("  The web page could not be prepared - using its developer version "
+            f"(a little slower, works the same). Details: {LAUNCHER_LOG}")
+        return False
+    try:
+        PAGE_STAMP.parent.mkdir(parents=True, exist_ok=True)
+        PAGE_STAMP.write_text(stamp, encoding="utf-8")
+    except OSError:
+        pass   # built again next time - harmless
+    return True
+
+
+def page_command(npm: str, built: bool) -> list[str]:
+    if built:
+        return [npm, "run", "preview", "--", "--host", "127.0.0.1",
+                "--port", str(FRONTEND_PORT), "--strictPort"]
+    return [npm, "run", "dev", "--", "--host", "127.0.0.1"]
+
+
 def preflight(conda: str, npm: str) -> None:
     check_required_paths()
 
@@ -1727,12 +1839,24 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
 
     begin("The web page")
     started = time.monotonic()
-    frontend = start_process(
-        "frontend",
-        [npm, "run", "dev", "--", "--host", "127.0.0.1"],
-        FRONTEND_DIR,
-    )
-    wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
+    page_built = prepare_page(npm)
+
+    def start_page(built: bool) -> subprocess.Popen:
+        return start_process("frontend", page_command(npm, built), FRONTEND_DIR)
+
+    frontend = start_page(page_built)
+    try:
+        wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
+    except (TimeoutError, RuntimeError) as exc:
+        if not page_built:
+            raise
+        # The built page would not start: the developer server, as before.
+        note(f"The built web page did not start ({exc}) - using the developer server.")
+        terminate_process_tree(frontend)
+        clear_port("WebUI", FRONTEND_PORT)
+        page_built = False
+        frontend = start_page(False)
+        wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
     end(f"ready ({_secs(started)})")
 
     if cm_available:
@@ -1784,6 +1908,28 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
                  "memory": start_memory if cm_available else None})
             backend, gpt, cm = parts["brain"], parts["voice"], parts["memory"]
             cm_warned = False
+            # The page's code changed since it was built (an update while she
+            # ran): build it again and serve the new one.
+            if page_built and not page_dev_mode():
+                try:
+                    stale = PAGE_STAMP.read_text(encoding="utf-8").strip() != page_fingerprint()
+                except OSError:
+                    stale = True
+                if stale:
+                    say("  The web page changed - preparing it again...")
+                    terminate_process_tree(frontend)
+                    clear_port("WebUI", FRONTEND_PORT)
+                    page_built = prepare_page(npm) or (PAGE_DIST / "index.html").is_file()
+                    frontend = start_page(page_built)
+                    try:
+                        wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
+                    except (TimeoutError, RuntimeError) as exc:
+                        note(f"The web page did not come back built ({exc}) - developer server.")
+                        terminate_process_tree(frontend)
+                        clear_port("WebUI", FRONTEND_PORT)
+                        page_built = False
+                        frontend = start_page(False)
+                        wait_for_port("WebUI", FRONTEND_PORT, frontend, timeout=45)
             missing = [name for name, proc in (("voice", gpt), ("memory", cm))
                        if proc is None and (name != "memory" or cm_available)]
             say("  Amadeus is back" + (f" - without her {' and '.join(missing)} "

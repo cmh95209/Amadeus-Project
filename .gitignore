@@ -56,6 +56,8 @@ data/
 # =====================
 frontend/node_modules/
 frontend/dist/
+frontend/dist.new/
+frontend/dist.old/
 frontend/.vite/
 
 # Legacy WebUI folder name, if still present locally

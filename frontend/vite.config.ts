@@ -14,6 +14,12 @@ export default defineConfig({
     ws: false,
   },
 
+  // The built page (scripts/launcher.py serves it with `vite preview` since
+  // 2026-11-09) needs the same phone address allowed - its own setting.
+  preview: {
+    allowedHosts: [".ts.net"],
+  },
+
   resolve: {
     extensions: [".ts", ".tsx", ".js"],
     alias: {
