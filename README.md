@@ -31,7 +31,7 @@ dialogue, web search and weather, and installers for Windows, Mac and Linux.
 **The easy way: double-click to install.** 
 
 1. Download [`Install Amadeus.bat`](https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/Install%20Amadeus.bat)
-   (right click the link and save it). or grab the installer from the [`releases section`](https://github.com/cmh95209/Amadeus-Project/releases/tag/v3.0)
+   (right click the link and save it). or grab the installer from the [`releases section`](https://github.com/cmh95209/Amadeus-Project/releases)
 2. Double-click it. Windows may first say **"Windows protected your PC"**,
    because the file is not signed by a company: click **More info**, then
    **Run anyway**.
