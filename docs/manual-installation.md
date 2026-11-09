@@ -250,8 +250,8 @@ graphics card) so she needs no server of yours and no cloud account. By
 hand there are two ways. Both need a graphics card with **8 GB** or more
 (6-7 GB works, slowly).
 
-These values match installer **v4.13** (Windows) / **v1.6** (Mac) /
-**v1.0** (Linux). On a Mac with an Apple chip, the Mac installer is the
+These values match installer **v4.13** (Windows) / **v1.7** (Mac) /
+**v1.1** (Linux). On a Mac with an Apple chip, the Mac installer is the
 easier route.
 
 ### Download the files

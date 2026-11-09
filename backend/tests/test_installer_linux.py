@@ -97,12 +97,85 @@ class ScriptTextTests(unittest.TestCase):
     def test_same_pins_as_the_mac_installer(self):
         mac, lin = _text(_MAC), _text()
         for var in ("GPT_SOVITS_COMMIT", "SPEECH_REV", "NODE_VER", "LID_URL", "LID_BYTES",
-                    "HF_REPO_URL", "GPT_REPO_URL", "REPO_URL", "NLTK_RESOURCES", "HF_MARKER"):
+                    "VOICE_REPO_URL", "GPT_REPO_URL", "REPO_URL", "NLTK_RESOURCES"):
             with self.subTest(var=var):
                 pat = r"^\s*" + var + r"=(\S+)"
                 self.assertEqual(re.search(pat, lin, re.M).group(1), re.search(pat, mac, re.M).group(1))
         for spec in re.findall(r'"((?:config\.json|model\.bin|tokenizer\.json|vocabulary\.txt) \d+ [0-9a-f]{64})"', mac):
             self.assertIn(spec, lin)
+
+    def test_voice_models_are_the_windows_file_list(self):
+        # 2026-11-09 tester: the old step cloned the voice engine's whole
+        # model page (every engine version) through /tmp - ~13 GB, more than
+        # a memory-backed /tmp holds ("unable to write file", then "Could not
+        # download the voice models"). Linux and Mac now fetch the same 8
+        # checked files as Windows.
+        win = _text(_SCRIPTS / "install_windows.ps1")
+        win_url = re.search(r'^\$VoiceRepoUrl = "([^"]+)"', win, re.M).group(1)
+        table = win[win.index("$VoiceFileTable = @("):]
+        table = table[:table.index("\n)\n")]
+        win_files = re.findall(r'@\("([^"]+)", (\d+), "([0-9a-f]{64})"\)', table)
+        self.assertEqual(len(win_files), 8)
+        for path in (_LINUX, _MAC):
+            with self.subTest(installer=path.name):
+                text = _text(path)
+                url = re.search(r'^VOICE_REPO_URL="([^"]+)"', text, re.M).group(1)
+                self.assertEqual(url + "/", win_url)
+                body = re.search(r'^VOICE_FILES="([^"]+)"', text, re.M).group(1)
+                self.assertEqual([tuple(line.split()) for line in body.splitlines()], win_files)
+
+    def test_voice_models_never_clone_the_whole_page(self):
+        for path in (_LINUX, _MAC):
+            with self.subTest(installer=path.name):
+                code = _code_only(_text(path))
+                self.assertNotIn("huggingface.co/lj1995/GPT-SoVITS\"", code)
+                self.assertNotIn("hf_cache", code)
+                self.assertNotIn("git lfs pull", code)
+
+    def test_voice_step_downloads_each_file_and_stops_on_a_failure(self):
+        if not _BASH:
+            self.skipTest("bash not available")
+        text = _text()
+        start = text.index('step 8 "Downloading her voice models')
+        end = text.index('log "  Voice models are in place."', start)
+        step8 = text[start:end]
+        pins = re.search(r'^VOICE_REPO_URL=.*?^VOICE_FILES="[^"]+"\n', text, re.M | re.S).group(0)
+        tmp = Path(tempfile.mkdtemp(prefix="amadeus_linux_voice_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "old" / "GPT-SoVITS-hf").mkdir(parents=True)
+
+        def run(fail_on):
+            script = "\n".join([
+                "set -uo pipefail",
+                pins,
+                f"GPT='{_posix(tmp / 'gpt')}'; TMP='{_posix(tmp / 'old')}'",
+                "log() { printf 'LOG %s\n' \"$1\"; }",
+                "step() { :; }",
+                "die() { printf 'DIE %s | %s\n' \"$1\" \"$2\"; exit 1; }",
+                "get_verified_file() { printf 'GET %s|%s|%s|%s|%s\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\";",
+                f"  case \"$2\" in *{fail_on}) VF_ERROR='no network'; return 1 ;; esac; return 0; }}",
+                step8,
+                "echo DONE",
+            ])
+            out = subprocess.run([_BASH, "-c", script], capture_output=True, text=True, timeout=60)
+            return out.stdout
+
+        out = run("never-matches")
+        gets = [line[4:].split("|") for line in out.splitlines() if line.startswith("GET ")]
+        self.assertEqual(len(gets), 8)
+        url, dest, size, sha, label = gets[6]
+        self.assertTrue(url.endswith("/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt?download=true"))
+        self.assertTrue(dest.endswith("/gpt/GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"))
+        self.assertEqual((size, label), ("155315150", "voice file s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"))
+        self.assertEqual(len(sha), 64)
+        self.assertIn("DONE", out)
+        # The old ~13 GB full download in the temp folder is cleaned up.
+        self.assertFalse((tmp / "old" / "GPT-SoVITS-hf").exists())
+
+        out = run("pytorch_model.bin")
+        self.assertIn("DIE Could not download her voice models. | no network", out)
+        self.assertEqual(sum(line.startswith("GET ") for line in out.splitlines()), 3)
+        self.assertNotIn("DONE", out)
 
     def test_same_app_packages_as_the_mac_installer(self):
         pat = r'pip_in_env "amadeus" install (Flask[^\\\n]*)'
@@ -238,7 +311,7 @@ class ScreenTests(_Base):
         self.assertFalse(s["model_ok"])
         self.assertFalse(s["server_ok"])
         self.assertTrue(s["simulated"])
-        self.assertEqual(s["installer"], "linux-v1.0")
+        self.assertEqual(s["installer"], "linux-v1.1")
         self.assertIn("(answer: Y)", (self.inst / "install_linux.log").read_text(encoding="utf-8"))
 
     def test_older_nvidia_driver_gets_the_older_cuda_build(self):
@@ -376,7 +449,7 @@ class _FunctionBase(_Base):
             f"INSTALL_DIR='{_posix(self.inst)}'",
             f"INSTALL_LOG='{_posix(self.log)}'",
             "PROJ=\"$INSTALL_DIR/Amadeus-Project\"",
-            "SKIP_LLM_DOWNLOAD=0; INSTALLER_VERSION=v1.0; SIM_GPU=''; SIM_VRAM_GB=-1; SIM_RAM_GB=-1; SIM_DRIVER=''",
+            "SKIP_LLM_DOWNLOAD=0; INSTALLER_VERSION=v1.1; SIM_GPU=''; SIM_VRAM_GB=-1; SIM_RAM_GB=-1; SIM_DRIVER=''",
             "log() { printf '%s\\n' \"$1\"; printf '%s\\n' \"$1\" >> \"$INSTALL_LOG\"; }",
             "step() { printf 'STEP %s: %s\\n' \"$1\" \"$2\"; }",
             "die() { printf 'DIE %s\\n' \"$1\"; exit 1; }",

@@ -139,7 +139,7 @@ class ScreenTests(_Base):
         self.assertFalse(s["server_ok"])
         self.assertTrue(s["model_file"].endswith("/models/gemma-4-12b-it-Q3_K_M.gguf"))
         self.assertTrue(s["simulated"])
-        self.assertEqual(s["installer"], "mac-v1.6")
+        self.assertEqual(s["installer"], "mac-v1.7")
         # The log holds the whole conversation.
         self.assertIn("(answer: Y)", (self.inst / "install_macos.log").read_text(encoding="utf-8"))
 
@@ -317,7 +317,7 @@ class _FunctionBase(_Base):
             f"INSTALL_DIR='{_posix(self.inst)}'",
             f"INSTALL_LOG='{_posix(self.log)}'",
             "PROJ=\"$INSTALL_DIR/Amadeus-Project\"",
-            "IS_SILICON=1; SIM_RAM_GB=-1; SIM_CHIP=''; SKIP_LLM_DOWNLOAD=0; INSTALLER_VERSION=v1.6",
+            "IS_SILICON=1; SIM_RAM_GB=-1; SIM_CHIP=''; SKIP_LLM_DOWNLOAD=0; INSTALLER_VERSION=v1.7",
             "log() { printf '%s\\n' \"$1\"; printf '%s\\n' \"$1\" >> \"$INSTALL_LOG\"; }",
             "step() { printf 'STEP %s: %s\\n' \"$1\" \"$2\"; }",
             "die() { printf 'DIE %s\\n' \"$1\"; exit 1; }",

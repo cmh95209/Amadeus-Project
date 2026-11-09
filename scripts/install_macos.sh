@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.6  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.7  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -48,6 +48,14 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.7 (November 2026, app v3.0.3):
+#   - Her voice models: only the files she uses are downloaded (about
+#     1.2 GB, each checked against its official size and fingerprint) -
+#     the same as on Windows. The old step copied the voice engine's whole
+#     model page (every engine version) through the temp folder, which
+#     needed ~13 GB there and stopped with "Could not download the voice
+#     models" on PCs where that folder is small.
 #
 #  WHAT'S NEW IN v1.6 (November 2026, app v3.0):
 #   - On an update that brings new versions of her personality and voice
@@ -147,10 +155,25 @@ REPO_URL="https://github.com/cmh95209/Amadeus-Project"
 # on the old feature branch and are moved to main in step 3 (when they hold
 # nothing of the user's own).
 BRANCH="main"
-INSTALLER_VERSION="v1.6"
+INSTALLER_VERSION="v1.7"
 LEGACY_BRANCH="feature/character-memory-spike"
 GPT_REPO_URL="https://github.com/RVC-Boss/GPT-SoVITS.git"
-HF_REPO_URL="https://huggingface.co/lj1995/GPT-SoVITS"
+# Her voice's model files: only the 8 she loads (about 1.2 GB), pinned to
+# one version of the voice engine's model page, each checked against its
+# published size + SHA-256 - the same list as the Windows installer. (The
+# old step cloned the whole page - every engine version - which needed
+# ~13 GB in the temp folder; on many Linux PCs /tmp lives in memory and is
+# far smaller, so the download stopped half-way. Tester report 2026-11-09.)
+VOICE_REPO_URL="https://huggingface.co/lj1995/GPT-SoVITS/resolve/8f8857563c040d542de108a2c18b0425abd6c9c5"
+# One "path bytes sha256" per line.
+VOICE_FILES="chinese-roberta-wwm-ext-large/config.json 963 3d57de2fd7e80d0e5c8ff194f0bbb6baa10df7e43fc262a0cc71298a78b0a3e5
+chinese-roberta-wwm-ext-large/tokenizer.json 268962 173796956820ea27bd14f76bf28162607ff4254807e2948253eb5b46f5bb643b
+chinese-roberta-wwm-ext-large/pytorch_model.bin 651225145 e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8
+chinese-hubert-base/config.json 1449 c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103
+chinese-hubert-base/preprocessor_config.json 212 dcd684124d06722947939d41ea6ae58dbf10968c60a11a29f23ddc602c64a29b
+chinese-hubert-base/pytorch_model.bin 188811417 24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c
+gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt 155315150 732f94e63b148066e24c7f9d2637f3374083e637635f07fbdb695dee20ddbe1f
+gsv-v2final-pretrained/s2G2333k.pth 106035259 924fdccaa3c574bf139c25c9759aa1ed3b3f99e19a7c529ee996c2bc17663695"
 
 # Miniforge: the community-maintained conda build (no license conditions).
 # Stable "latest release" links - they always point at the newest build.
@@ -168,9 +191,6 @@ GITLFS_URL_X64="https://github.com/git-lfs/git-lfs/releases/download/$GITLFS_VER
 # extracted into the user's home folder - no admin password needed.
 NODE_VER="v24.21.0"
 NODE_DIST_BASE="https://nodejs.org/dist/$NODE_VER"
-
-# The Hugging Face file that must be present for her voice to work at all.
-HF_MARKER="s2G488k.pth"
 
 # The ~130 MB language-identification model her voice engine uses to tell
 # which language a line is in. Pre-downloaded so her very first line never
@@ -1724,40 +1744,29 @@ esac
 # ----------------------------------------------------------------------------
 #  STEP 8: her voice models + pre-downloads
 # ----------------------------------------------------------------------------
-step 8 "Downloading her voice models (a few GB the first time)"
+step 8 "Downloading her voice models (about 1.2 GB the first time)"
 
 GPT_PKG="$GPT/GPT_SoVITS"
 PRETRAINED="$GPT_PKG/pretrained_models"
 mkdir -p "$PRETRAINED"
 
-hf_cache="$TMP/GPT-SoVITS-hf"
-if [ -f "$hf_cache/$HF_MARKER" ]; then
-    log "  Voice model files already downloaded - reusing them."
-else
-    rm -rf "$hf_cache"
-    log "  Downloading the voice models from the Hugging Face mirror..."
-    log "  (several GB on the first run - this is normal; keep the window open)"
-    if ! git clone --depth 1 --quiet "$HF_REPO_URL" "$hf_cache" 2>>"$PIP_LOG"; then
-        die "Could not download the voice models." \
-            "Check your internet connection (or your connection to huggingface.co), then re-run the installer."
+# Straight into the voice engine's folder (not the temp folder); a re-run
+# skips the files already checked and continues a half-finished one.
+while read -r vf_rel vf_bytes vf_sha; do
+    [ -n "$vf_rel" ] || continue
+    if ! get_verified_file "$VOICE_REPO_URL/$vf_rel?download=true" "$PRETRAINED/$vf_rel" \
+            "$vf_bytes" "$vf_sha" "voice file $(basename "$vf_rel")" </dev/null; then
+        die "Could not download her voice models." "$VF_ERROR"
     fi
-    # Git-LFS guard: if the clone came back as tiny placeholder stubs
-    # instead of real files, fetch the real files now.
-    if head -c 200 "$hf_cache/$HF_MARKER" 2>/dev/null | grep -q "git-lfs"; then
-        log "  (the models arrived as Git-LFS placeholders - fetching the real files now...)"
-        ( cd "$hf_cache" && git lfs pull 2>>"$PIP_LOG" ) \
-            || die "Could not fetch the voice model files (Git-LFS step failed)." "Re-run the installer."
-    fi
-    hf_size="$(stat -f %z "$hf_cache/$HF_MARKER" 2>/dev/null || echo 0)"
-    if [ ! -f "$hf_cache/$HF_MARKER" ] || [ "$hf_size" -lt 1000000 ] 2>/dev/null; then
-        die "The voice models do not look complete." "Re-run the installer; if it fails again, send the log."
-    fi
+done <<VOICE_LIST
+$VOICE_FILES
+VOICE_LIST
+# The old full download (older installers) in the temp folder: ~13 GB
+# nobody needs any more.
+if [ -d "$TMP/GPT-SoVITS-hf" ]; then
+    rm -rf "$TMP/GPT-SoVITS-hf"
+    log "  Removed the old full voice-model download from the temp folder."
 fi
-# Mirror the downloaded models into the voice engine's expected folder.
-# (The cache outside the app folder means a reinstall of the app does not
-#  force a re-download of several GB.)
-rsync -a --exclude .git "$hf_cache/" "$PRETRAINED/" >/dev/null 2>&1 \
-    || cp -R "$hf_cache/." "$PRETRAINED/"
 log "  Voice models are in place."
 
 # Pre-download the ~130 MB language-identification model her voice engine

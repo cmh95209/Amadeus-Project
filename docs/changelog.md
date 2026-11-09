@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.0.3 — Linux and Mac Installers: Her Voice Download — November 2026
+
+**Fixed: "STOPPED: Could not download the voice models"** (Linux installer
+v1.1, Mac installer v1.7). The installer copied the voice engine's whole
+model page - every engine version - through the temp folder, which needed
+about 13 GB there. On many Linux PCs that folder lives in memory and is much
+smaller, so the download stopped half-way even with a good connection. The
+installers now download only the 8 files her voice uses (about 1.2 GB, each
+checked against its official size and fingerprint), straight into the app
+folder - the same as the Windows installer. If it stopped for you, just run
+the installer again.
+
 ## v3.0.2 — Her Voice Without Gaps, and a Quicker App — November 2026
 
 **Her voice no longer stops and starts on slower PCs.** Her voice is made

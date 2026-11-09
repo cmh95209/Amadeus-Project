@@ -119,7 +119,7 @@ Amadeus-Project/
 ├── scripts/
 │   ├── launcher.py            # cross-platform automatic launcher
 │   ├── install_windows.ps1    # Windows one-shot installer (v4.13)
-│   └── install_macos.sh       # macOS one-shot installer (v1.6)
+│   └── install_macos.sh       # macOS one-shot installer (v1.7)
 │
 ├── GPT-SoVITS/                # voice engine (cloned locally, git-ignored)
 ├── docs/images/
