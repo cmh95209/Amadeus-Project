@@ -220,6 +220,7 @@ Long-term memory (v2.0)       ✓
 One-shot installers           ✓ Windows, Mac, Linux (new)
 Show her Japanese line        ✓
 Voice without gaps (v3.0.2)   ✓ Smooth / Early / Right away / When fully ready
+Quick typing in long chats    ✓ v3.0.2
 Japanese-way voice (v2.1)     ✓ numbers, your name, English words
 About you (v2.1)              ✓ pronouns, what she calls you
 Built-in local model (v3.0)   ✓ Windows, Linux + Apple-chip Macs, no account needed

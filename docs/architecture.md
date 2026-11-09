@@ -45,6 +45,11 @@ Memory sidecar       http://127.0.0.1:9870
 LLM server           (yours — local port or cloud URL)
 ```
 
+The WebUI on 5173 is a built copy of `frontend/` that the launcher prepares
+(into `frontend/dist`) whenever the page's code changed, served with
+`vite preview`; Vite's developer server is the fallback, and stays in use when
+`.runtime/page_mode.txt` says `dev` (or `AMADEUS_PAGE_DEV=1`).
+
 The AI backend is intentionally independent from the frontend. This allowed
 the original Unity interface to be replaced by a browser-based React/WebGL
 frontend without rewriting the conversational core, and the memory engine to

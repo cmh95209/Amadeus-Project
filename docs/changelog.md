@@ -1,6 +1,6 @@
 # Changelog
 
-## v3.0.2 — Her Voice Without Gaps on Slower PCs — November 2026
+## v3.0.2 — Her Voice Without Gaps, and a Quicker App — November 2026
 
 **Her voice no longer stops and starts on slower PCs.** Her voice is made
 while she speaks. When a PC makes it more slowly than she talks - often when
@@ -26,6 +26,26 @@ waits to speak.
 **Her voice gets the processor to itself.** While she speaks, the app holds
 back its background work (the conversation summary, the closeness check, and
 in Early mode the English line) when her voice runs on the processor.
+
+**Typing stays quick in long chats.** Each key used to redraw the whole chat;
+in a chat of 500+ messages typing lagged and sometimes froze for a moment.
+Now a key redraws only the message box (typing in a 560-message chat: from
+about 56 ms per key with freezes up to 0.4 s, to about 16 ms with none).
+
+**Long chats open with their newest 150 messages.** "Show earlier messages"
+at the top brings back 150 more each time, without moving what you were
+reading.
+
+**A quicker page.** The launcher now prepares a finished copy of the web page
+when it changed (after an update - a few seconds, once) instead of serving
+the slower developer version. If that ever fails, it simply uses the
+developer version as before. For people working on the page:
+`.runtime/page_mode.txt` containing `dev` (or `AMADEUS_PAGE_DEV=1`) keeps the
+developer version.
+
+**Her animation is drawn at most about 60 times a second**, also on 120-240
+Hz screens - it looks the same and leaves the PC more room (on a 144 Hz
+screen her window used about 30% of a processor core while idle).
 
 ## Linux installer v1.0 — Amadeus on Linux — November 2026
 
