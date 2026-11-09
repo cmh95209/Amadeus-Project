@@ -410,6 +410,25 @@ button {
   scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
+/* Long chats: older messages wait behind this button (only the newest are
+   drawn, which keeps typing and updates quick). */
+.show-earlier {
+  display: block;
+  margin: 0 auto 24px;
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: transparent;
+  color: #818c9d;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.show-earlier:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #c9d1d9;
+}
+
 .empty-state {
   min-height: 100%;
   display: grid;

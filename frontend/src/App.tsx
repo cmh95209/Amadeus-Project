@@ -37,6 +37,9 @@ import { knownLinkKeys } from "./linkText";
 import { deriveFooter, placeGreeting, isCeremonyWaitLine, waitUntilQuiet } from "./greetingFlow";
 import type { GreetPhase } from "./greetingFlow";
 import type { Live2DCharacterHandle } from "./components/Live2DCharacter";
+import ComposerBox, { readDraft } from "./components/ComposerBox";
+import { MESSAGE_WINDOW, firstShownIndex } from "./messageWindow";
+import type { ComposerBoxHandle } from "./components/ComposerBox";
 import {
   VOICE_PLAYBACK_CHOICES,
   loadVoicePlayback,
@@ -143,18 +146,6 @@ function addressOptions(name: string): [string, string][] {
     ["custom", "Custom…"],
   ];
 }
-// The message being typed, kept across a reload (see the effect in App).
-const DRAFT_KEY = "amadeus.draft";
-const DRAFT_KEEP_MS = 12 * 60 * 60 * 1000;
-function readDraft(): string {
-  try {
-    const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? "null") as { text?: unknown; at?: number } | null;
-    if (!saved || typeof saved.text !== "string" || !saved.at) return "";
-    return Date.now() - saved.at < DRAFT_KEEP_MS ? saved.text : "";
-  } catch {
-    return "";
-  }
-}
 
 const REASONING_CHOICES: Array<[ReasoningLevel, string]> = [
   ["off", "Off"],
@@ -177,7 +168,9 @@ export default function App() {
   const [renamingConvId, setRenamingConvId] = useState<number | null>(null);
   const [convDraft, setConvDraft] = useState("");
   const [sessionsBusy, setSessionsBusy] = useState(false);
-  const [input, setInput] = useState(readDraft);
+  // What is typed lives in ComposerBox (a keystroke redraws only the box);
+  // App only knows whether the box is empty (the Send button).
+  const [hasText, setHasText] = useState(() => readDraft().trim().length > 0);
   const [model, setModelName] = useState("");
   const [webAccess, setWebAccessState] = useState<boolean | null>(null);
   const [webToggling, setWebToggling] = useState(false);
@@ -334,7 +327,12 @@ export default function App() {
   }
 
   const bottomRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
+  // Long chats: only the newest MESSAGE_WINDOW messages are drawn (a 560-
+  // message chat made every update of the page slow, 2026-11-09); "Show
+  // earlier messages" adds more. A newly opened chat starts at the newest.
+  const [shownCount, setShownCount] = useState(MESSAGE_WINDOW);
+  const earlierScroll = useRef<{ height: number; top: number } | null>(null);
+  const composerRef = useRef<ComposerBoxHandle>(null);
   const characterRef = useRef<Live2DCharacterHandle>(null);
   // Startup greeting: once per app start (sessionStorage blocks a refresh
   // from re-greeting) plus a re-fire the moment the model server becomes
@@ -472,6 +470,26 @@ export default function App() {
     void initialize();
   }, []);
 
+  // A different chat opens at its newest messages again.
+  useEffect(() => {
+    setShownCount(MESSAGE_WINDOW);
+  }, [displayedConvId]);
+
+  // "Show earlier messages" adds them ABOVE: keep the lines you were reading
+  // where they were instead of jumping.
+  useLayoutEffect(() => {
+    const before = earlierScroll.current;
+    earlierScroll.current = null;
+    const list = bottomRef.current?.parentElement;
+    if (before && list) list.scrollTop = before.top + (list.scrollHeight - before.height);
+  }, [shownCount]);
+
+  function showEarlier() {
+    const list = bottomRef.current?.parentElement;
+    earlierScroll.current = list ? { height: list.scrollHeight, top: list.scrollTop } : null;
+    setShownCount((count) => count + MESSAGE_WINDOW);
+  }
+
   useEffect(() => {
     // Scroll only the message list: scrollIntoView would also push the whole
     // page up on phones.
@@ -492,40 +510,6 @@ export default function App() {
     window.addEventListener("scroll", pin, { passive: true });
     return () => window.removeEventListener("scroll", pin);
   }, []);
-
-  useEffect(() => {
-    // Keep what is typed: Android may close the app in the background (a
-    // call, the gallery) and it reloads when you come back.
-    try {
-      if (input) localStorage.setItem(DRAFT_KEY, JSON.stringify({ text: input, at: Date.now() }));
-      else localStorage.removeItem(DRAFT_KEY);
-    } catch {
-      // Not kept across a reload - harmless.
-    }
-  }, [input]);
-
-  useLayoutEffect(() => {
-    // The message box grows with what is typed (the CSS max-height caps it,
-    // then it scrolls) and shrinks back once the message is sent. A new
-    // screen width re-wraps the lines, so measure again on resize too.
-    // The scrollbar only appears once it is capped, so short text uses the
-    // box's full width. A growing box shrinks the chat above it, so if her
-    // newest line was in view, keep it there.
-    const box = composerRef.current;
-    if (!box) return;
-    function fit() {
-      const list = bottomRef.current?.parentElement;
-      const atBottom = !!list && list.scrollHeight - list.clientHeight - list.scrollTop < 40;
-      box!.style.height = "auto";
-      box!.style.overflowY = "hidden";
-      box!.style.height = `${box!.scrollHeight}px`;
-      if (box!.scrollHeight > box!.clientHeight + 1) box!.style.overflowY = "auto";
-      if (list && atBottom) list.scrollTop = list.scrollHeight;
-    }
-    fit();
-    window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
-  }, [input]);
 
   useEffect(() => {
     try {
@@ -1108,7 +1092,7 @@ export default function App() {
   async function submit(event: FormEvent) {
     event.preventDefault();
 
-    const text = input.trim();
+    const text = (composerRef.current?.text() ?? "").trim();
 
     // Words OR a ready picture (never while a picture is still being prepared).
     if (!canSend(text, pictures.cards) || loading) {
@@ -1146,7 +1130,7 @@ export default function App() {
       },
     ]);
 
-    setInput("");
+    composerRef.current?.clear();
     setLoading(true);
     setStatus(sent.ids.length ? "Amadeus is looking..." : "Amadeus is thinking...");
     if (sent.ids.length) characterRef.current?.setLooking(true);
@@ -2271,7 +2255,13 @@ export default function App() {
             </div>
           )}
 
-          {messages.map((message, index) => (
+          {firstShownIndex(messages.length, shownCount) > 0 && (
+            <button type="button" className="show-earlier" onClick={showEarlier}>
+              Show earlier messages ({firstShownIndex(messages.length, shownCount)} more)
+            </button>
+          )}
+
+          {messages.map((message, index) => index < firstShownIndex(messages.length, shownCount) ? null : (
             <article
               key={`${message.id ?? "message"}-${index}`}
               className={`message ${
@@ -2496,12 +2486,10 @@ export default function App() {
             onOpen={() => void pictures.refreshCaps()}
             onNote={setAttachNote}
           />
-          <textarea
+          <ComposerBox
             ref={composerRef}
-            value={input}
-            onChange={(event) => {
-              setInput(event.target.value);
-            }}
+            onHasText={setHasText}
+            getList={() => bottomRef.current?.parentElement ?? null}
             onPaste={(event) => {
               // A pasted picture becomes a card; pasted words stay words -
               // unless they are a long text (E3): then a "Pasted text" card.
@@ -2517,20 +2505,8 @@ export default function App() {
                 addPictureFiles([pastedTextFile(text)]);
               }
             }}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey
-              ) {
-                event.preventDefault();
-
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
             disabled={ceremonyPending}
             placeholder={ceremonyPending ? "..." : dropGlow ? "Drop anywhere to show Amadeus" : "Message Amadeus..."}
-            rows={1}
-            aria-disabled={ceremonyPending}
           />
 
           <button
@@ -2563,7 +2539,7 @@ export default function App() {
 
           <button
             type="submit"
-            disabled={!canSend(input, pictures.cards) || loading || ceremonyPending}
+            disabled={!canSend(hasText ? "x" : "", pictures.cards) || loading || ceremonyPending}
             title={pictures.cards.some((c) => c.state === "preparing")
               ? "Waiting for your pictures to be ready" : undefined}
           >

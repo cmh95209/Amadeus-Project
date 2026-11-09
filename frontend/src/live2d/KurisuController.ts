@@ -4,6 +4,8 @@ import { initializeCubism } from "./cubismBootstrap";
 import { KurisuModel } from "./KurisuModel";
 import type { PlayMotionResult } from "./MotionPlayer";
 
+import { nextDrawAt } from "./frameRate";
+
 export class KurisuController {
   private canvas: HTMLCanvasElement;
   private modelPath: string;
@@ -14,6 +16,7 @@ export class KurisuController {
   private animationFrame = 0;
   private destroyed = false;
   private lastFrameTime = 0;
+  private drawDue = 0;
   private resizeObserver: ResizeObserver | null = null;
   private pixelRatio = 0;
 
@@ -125,6 +128,15 @@ export class KurisuController {
     ) {
       return;
     }
+
+    // At most ~60 drawings a second, whatever the screen's refresh rate (her
+    // movement uses the real time between drawings, so it keeps its speed).
+    const frameNow = performance.now();
+    if (frameNow < this.drawDue - 1) {
+      this.animationFrame = requestAnimationFrame(this.render);
+      return;
+    }
+    this.drawDue = nextDrawAt(this.drawDue, frameNow);
 
     const gl = this.gl;
 
