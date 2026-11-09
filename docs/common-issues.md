@@ -88,6 +88,18 @@ GPT-SoVITS/GPT_SoVITS/pretrained_models/
 
 ---
 
+## Her voice stops and starts
+
+Her voice is made while she speaks; on a slower PC it can fall behind her.
+Since v3.0.2, **Settings -> Preferences -> Voice playback -> Smooth** (the
+default) waits just long enough to speak without gaps; the first line after
+an update can still stutter while she learns how fast your PC is. If it keeps
+happening, choose **When fully ready**. `logs/backend.log` shows the speed:
+a line like `voice ... (1.40x real time)` above 1.00x means the voice is made
+more slowly than she speaks.
+
+---
+
 ## Live2D character does not appear
 
 Check the browser developer console and verify that the model reaches the
