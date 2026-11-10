@@ -27,6 +27,11 @@ RUNTIME_DIR = PROJECT_ROOT / ".runtime"
 LOG_DIR = PROJECT_ROOT / "logs"
 LAUNCHER_LOG = LOG_DIR / "launcher.log"
 
+# The Amadeus help channel (one constant per language/script - the same
+# value lives once in the installers and start scripts): every failure
+# message ends with a line built from it + the exact file to send.
+DISCORD_URL = "https://discord.gg/YxYkZPSVf3"
+
 GPT_PORT = 9880
 BACKEND_PORT = 5050
 FRONTEND_PORT = 5173
@@ -121,6 +126,137 @@ def end(result: str) -> None:
         print(f"  {result}", flush=True)
     note("  -> " + result)
 
+
+# ---------------------------------------------------------------------------
+# Plain-words failure messages (2026-11-10: a Linux tester's GPT-SoVITS
+# crashed on a missing package and the launcher only said "exited during
+# startup"). Every failure message now says (1) WHICH part failed, in plain
+# words, (2) the most likely reason in one sentence - only when the log
+# actually shows it, never a guess, (3) what to try, (4) where to get help:
+# the Discord + the exact file to send (for the app, her whole logs folder).
+# ---------------------------------------------------------------------------
+
+# The plain words each part is called by (a tester does not know
+# "GPT-SoVITS" or "cm-sidecar").
+PART_WORDS = {
+    "GPT-SoVITS": "her voice",
+    "backend": "the app",
+    "frontend": "the web page",
+    "WebUI": "the web page",
+    "cm-sidecar": "her memory",
+    "built-in model": "her built-in model",
+}
+# The one thing to try when that part fails.
+_PART_WHAT_TO_TRY = {
+    "her voice": "start Amadeus again - if it happens again, run the installer again (it sets up her voice toolbox)",
+    "the app": "start Amadeus again - if it happens again, run the installer again",
+    "the web page": "start Amadeus again - if it happens again, run the installer again",
+    "her memory": "start Amadeus again (she works without long-term memory) - if it happens again, run the installer again",
+    "her built-in model": "load it again in Settings -> Connection - if it happens again, run the installer again",
+}
+# The port each part listens on (the "port already in use" cause names it).
+_PART_PORTS = {
+    "GPT-SoVITS": GPT_PORT,
+    "backend": BACKEND_PORT,
+    "frontend": FRONTEND_PORT,
+    "WebUI": FRONTEND_PORT,
+    "cm-sidecar": CM_PORT,
+}
+# A part's name -> the log file the launcher writes for it.
+_SERVICE_LOG = {
+    "GPT-SoVITS": "gptsovits",
+    "backend": "backend",
+    "frontend": "frontend",
+    "WebUI": "frontend",
+    "cm-sidecar": "cm-sidecar",
+    "built-in model": "llm",
+}
+
+
+def help_line(file_hint: str = "", logs_folder: bool = False) -> str:
+    """The 'where to get help' line: the Discord, and the exact file to
+    send - or her whole logs folder to send (logs_folder, for the app),
+    when one is known. A folder is never called 'the file'."""
+    if file_hint:
+        if logs_folder:
+            return (f"Need help? Ask on our Discord: {DISCORD_URL} - and send "
+                    f"your logs folder: {file_hint}.")
+        return (f"Need help? Ask on our Discord: {DISCORD_URL} - and send the "
+                f"file {file_hint}.")
+    return f"Need help? Ask on our Discord: {DISCORD_URL}."
+
+
+def known_failure_reason(part: str, log_text: str) -> str:
+    """The most likely reason in one plain sentence, when the part's log
+    shows a KNOWN cause. '' when it shows nothing we recognize: a reason
+    the log does not show must never be invented (no 'often not enough
+    graphics memory' unless the log says it)."""
+    if not log_text:
+        return ""
+    missing = re.search(
+        r"ModuleNotFoundError: No module named ['\"]([A-Za-z0-9_.\-]+)['\"]",
+        log_text)
+    if missing:
+        package = missing.group(1)
+        word = PART_WORDS.get(part, part)
+        toolbox = {"her voice": "Her voice toolbox",
+                   "the app": "The app's toolbox",
+                   "the web page": "The web page's toolbox",
+                   "her memory": "Her memory toolbox"}.get(word)
+        if toolbox is None:
+            toolbox = "The toolbox"
+        return (f"{toolbox} is incomplete (the package '{package}' is missing) - "
+                "run the installer again.")
+    if re.search(r"address already in use|only one usage of a socket address|"
+                 r"eaddrinuse|:\d+ is already in use", log_text, re.IGNORECASE):
+        port = _PART_PORTS.get(part)
+        if port is None:
+            return ("A port on this PC is already used by another program - "
+                    "close it, then start Amadeus again.")
+        return (f"Port {port} is already used by another program on this PC - "
+                "close that program, then start Amadeus again.")
+    return ""
+
+
+def failure_message(part: str, happened: str, reason: str = "",
+                    file_hint: str = "", logs_folder: bool = False) -> str:
+    """One clear failure message: (1) WHICH part failed, in plain words;
+    (2) the reason, only when it is known (reason not empty); (3) what to
+    try; (4) where to get help (the Discord, and the exact file to send -
+    or the logs folder - when file_hint is given)."""
+    word = PART_WORDS.get(part, part)
+    subject = word[:1].upper() + word[1:]
+    text = f"{subject} {happened}."
+    if reason:
+        text += f"\n  {reason}"
+    try_it = _PART_WHAT_TO_TRY.get(
+        word, "start Amadeus again - if it happens again, run the installer again")
+    text += f"\n  What to try: {try_it}."
+    text += f"\n  {help_line(file_hint, logs_folder=logs_folder)}"
+    return text
+
+
+def _service_log_tail(part: str, lines: int = 40) -> str:
+    """The last lines of the part's own log (best effort): a missing or
+    unreadable log gives '', and the message then carries no reason at
+    all - a guess is a lie."""
+    name = _SERVICE_LOG.get(part, "")
+    if not name:
+        return ""
+    try:
+        text = (LOG_DIR / f"{name}.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    kept = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(kept[-lines:])
+
+
+def service_failure(part: str, happened: str) -> str:
+    """The failure message for a part that did not start: plain words +
+    the known cause its own log shows (when it names one) + what to try +
+    where to get help (send her whole logs folder)."""
+    reason = known_failure_reason(part, _service_log_tail(part))
+    return failure_message(part, happened, reason, str(LOG_DIR), logs_folder=True)
 
 def _short(text: str, width: int) -> str:
     return text if len(text) <= width else text[:max(0, width - 3)] + "..."
@@ -355,7 +491,14 @@ def ask_about_graphics_memory(need: float, read_free=None, ask=input) -> bool:
     nothing."""
     read_free = read_free or nvidia_free_vram_gb
     free = read_free()
-    if free is None or free >= need:
+    if free is None:
+        # Not readable (no NVIDIA card, a failed probe): say so plainly
+        # instead of the old "None GB free" (2026-11-10, a Linux tester's
+        # log) - the check still happens when her model loads.
+        note(f"Graphics memory: could not be read on this card, "
+             f"her model needs about {need} GB.")
+        return True
+    if free >= need:
         note(f"Graphics memory: {free} GB free, her model needs about {need} GB.")
         return True
     if not sys.stdin or not sys.stdin.isatty():
@@ -378,7 +521,10 @@ def ask_about_graphics_memory(need: float, read_free=None, ask=input) -> bool:
             return False
         free = read_free()
         if free is None or free >= need:
-            say(f"  Now {free} GB free - starting her model.")
+            if free is None:
+                say("  The card has room now - starting her model.")
+            else:
+                say(f"  Now {free} GB free - starting her model.")
             return True
 
 
@@ -929,14 +1075,13 @@ def wait_for_port(name: str, port: int, process: subprocess.Popen, timeout: int)
 
         if process.poll() is not None:
             raise RuntimeError(
-                f"{name} exited during startup. Details: {LOG_DIR}"
+                service_failure(name, "stopped while Amadeus was starting it")
             )
 
         time.sleep(1)
 
     raise TimeoutError(
-        f"{name} did not become ready within {timeout} seconds. "
-        f"Details: {LOG_DIR}"
+        service_failure(name, f"did not become ready after {timeout} seconds")
     )
 
 
@@ -1770,8 +1915,102 @@ def voice_env_name(conda: str) -> str:
     return wanted
 
 
+def voice_python(conda: str) -> Path | None:
+    """The voice engine's own Python interpreter, by FULL path:
+    <conda home>/envs/<voice env>/bin/python (Linux/Mac) or
+    <conda home>\\envs\\<voice env>\\python.exe (Windows) - the interpreter
+    the voice toolbox was installed into. The engine (and the preflight
+    check) run with this one directly, never through a nested `conda run`:
+    on a tester's Linux PC (2026-11-10) the launcher's own conda run ran
+    the engine with a DIFFERENT, newer Python (no soundfile/torch/nltk),
+    while the voice environment itself was perfectly fine. None when that
+    interpreter file does not exist (a half-made install): the engine then
+    runs the old way, through `conda run -n <voice env>`."""
+    if not conda:
+        return None
+    home = conda_home(conda)
+    if home is None:
+        return None
+    py = home / "envs" / voice_env_name(conda) / \
+        ("python.exe" if os.name == "nt" else Path("bin", "python"))
+    return py if py.is_file() else None
+
+
+def voice_engine_env(env_dir: Path | str) -> dict:
+    """What activating the voice environment would put into her environment
+    (no conda process involved): the PATH entries activation adds, first on
+    PATH, plus CONDA_PREFIX. Windows: the environment itself (its DLLs),
+    Library\\bin and Scripts; Linux/Mac: the environment's bin folder."""
+    env = str(env_dir)
+    if os.name == "nt":
+        entries = [env, os.path.join(env, "Library", "bin"), os.path.join(env, "Scripts")]
+    else:
+        entries = [os.path.join(env, "bin")]
+    return {
+        "PATH": os.pathsep.join(entries + [os.environ.get("PATH", "")]),
+        "CONDA_PREFIX": env,
+    }
+
+
+def voice_env_check(conda: str, timeout: int = 30) -> str:
+    """A quick check BEFORE starting her voice (2026-11-10: a Linux
+    tester's GPT-SoVITS crashed on start - torch and soundfile were missing
+    from the voice environment - and the launcher only said "exited during
+    startup"). It asks the voice environment for those two packages with the
+    SAME interpreter the engine will run with (its own Python, by full path;
+    `conda run` only when that file is missing) and answers within `timeout`
+    seconds; it never blocks the start for long - when it cannot answer in
+    time (a slow PC) the start goes on exactly as before. Returns the
+    problem in plain words, or '' when the check passes or stays silent."""
+    probe = (
+        "import importlib.util\n"
+        "missing = [p for p in ('torch', 'soundfile') if importlib.util.find_spec(p) is None]\n"
+        "print('OK' if not missing else 'MISSING ' + ' '.join(missing))\n"
+    )
+    env = voice_env_name(conda)
+    py = voice_python(conda)
+    if py is not None:
+        command = [str(py), "-c", probe]
+        check_env = {**os.environ, **voice_engine_env(py.parent if os.name == "nt" else py.parent.parent)}
+    else:
+        command = [conda, "run", "-n", env, "--no-capture-output", "python", "-c", probe]
+        check_env = None
+    try:
+        out = subprocess.run(command, capture_output=True, text=True,
+                             timeout=timeout, check=False,
+                             **({"env": check_env} if check_env else {}))
+    except (OSError, subprocess.SubprocessError):
+        return ""   # conda could not even be run: the start will report it
+    answer = ""
+    for line in (out.stdout or "").splitlines():
+        if line.strip():
+            answer = line.strip()
+    if answer.startswith("MISSING "):
+        packages = [p for p in answer[len("MISSING "):].split() if p]
+        if len(packages) == 1:
+            who = f"the package '{packages[0]}' is missing"
+        else:
+            who = "the packages " + " and ".join(f"'{p}'" for p in packages) + " are missing"
+        return f"Her voice toolbox is incomplete ({who}) - run the installer again."
+    if answer == "OK":
+        return ""
+    # The check could not answer (an error, a timeout, ...). A missing conda
+    # environment IS a known cause - say it, nothing else.
+    all_text = ((out.stdout or "") + (out.stderr or "")).lower()
+    if "not a conda environment" in all_text or "environmentlocationnotfound" in all_text:
+        return (f"Her voice environment (conda env '{env}') is not set up - "
+                "run the installer again.")
+    return ""
+
+
 def gptsovits_command(conda: str) -> list[str]:
-    """The voice engine runs in its own conda environment."""
+    """The voice engine runs in its own conda environment: with that
+    environment's own interpreter, by full path (voice_python) - never
+    through a nested `conda run`. `conda run` is the fallback when the
+    interpreter file does not exist."""
+    py = voice_python(conda)
+    if py is not None:
+        return [str(py), str(BACKEND_DIR / "start_gptsovits.py")]
     return [
         conda,
         "run",
@@ -1781,6 +2020,34 @@ def gptsovits_command(conda: str) -> list[str]:
         "python",
         str(BACKEND_DIR / "start_gptsovits.py"),
     ]
+
+
+def gptsovits_env(conda: str) -> dict:
+    """The voice engine's extra environment: when it runs with its own
+    interpreter, the PATH entries + CONDA_PREFIX that activation of the
+    voice environment would set up; through `conda run` conda sets those up
+    itself, so nothing extra."""
+    py = voice_python(conda)
+    if py is None:
+        return {}
+    return voice_engine_env(py.parent if os.name == "nt" else py.parent.parent)
+
+
+def voice_python_version(py: Path) -> str:
+    """The voice interpreter's version ("3.10.14"), for launcher.log. A
+    short probe with a hard 2 s timeout - it must never slow the start down
+    by more than that; an interpreter that does not answer gives no version
+    (the line still records the path)."""
+    code = "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+    try:
+        out = subprocess.run([str(py), "-c", code], capture_output=True, text=True,
+                             timeout=2, check=False)
+        for line in reversed((out.stdout or "").splitlines()):
+            if line.strip():
+                return line.strip()
+        return ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def _secs(started: float) -> str:
@@ -2007,7 +2274,7 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
 
     def start_voice() -> subprocess.Popen:
         return start_process("gptsovits", gptsovits_command(conda), PROJECT_ROOT,
-                             {**voice_env(builtin), **voice_extra})
+                             {**voice_env(builtin), **voice_extra, **gptsovits_env(conda)})
 
     def start_memory() -> subprocess.Popen:
         return start_process("cm-sidecar", [str(_cm_python()), str(CM_DIR / "cm_sidecar.py")],
@@ -2018,6 +2285,22 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
 
     begin("Her voice")
     started = time.monotonic()
+    voice_py = voice_python(conda)
+    if voice_py is not None:
+        # Which Python will really run her voice engine, for launcher.log:
+        # on 2026-11-10 a tester's PC ran it with a different, newer Python
+        # (nested `conda run`), and this line says exactly which one.
+        note(f"Voice Python: {voice_py} "
+             f"({voice_python_version(voice_py) or 'version unknown'})")
+    issue = voice_env_check(conda)
+    if issue:
+        # The step-1 message, said at once - without waiting for the crash
+        # to show it (her start below still runs; its own message then
+        # confirms the same reason).
+        block = failure_message("GPT-SoVITS", "does not start",
+                                reason=issue, file_hint=str(LOG_DIR),
+                                logs_folder=True)
+        say("  WARNING: " + block.replace("\n", "\n  "))
     gpt = start_voice()
     wait_for_port("GPT-SoVITS", GPT_PORT, gpt, timeout=180)
     end(f"ready ({_secs(started)})")
@@ -2096,7 +2379,8 @@ def run(no_browser: bool = False, simulate_vram_gb: int | None = None,
                     end("did not start")
                     say("  WARNING: her memory did not start after 3 tries - she "
                         "works without long-term memory. Details: "
-                        f"{LOG_DIR / 'cm-sidecar.log'}")
+                        f"{LOG_DIR / 'cm-sidecar.log'}. "
+                        + help_line(str(LOG_DIR), logs_folder=True))
                     cm = None
 
     url = f"http://127.0.0.1:{FRONTEND_PORT}/"
@@ -2300,7 +2584,13 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as error:
-        say(f"\nERROR: {error}", file=sys.stderr)
+        # Every failure ends with the help line: the Discord + her logs
+        # folder to send (messages built by service_failure() already carry
+        # it - never add it twice).
+        text = str(error)
+        if DISCORD_URL not in text:
+            text += f"\n{help_line(str(LOG_DIR), logs_folder=True)}"
+        say(f"\nERROR: {text}", file=sys.stderr)
         return 1
     finally:
         cleanup()

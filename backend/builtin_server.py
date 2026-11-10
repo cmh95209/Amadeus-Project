@@ -31,10 +31,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = PROJECT_ROOT / "logs" / "llm.log"
 LOAD_TIMEOUT_S = 900   # a 14 GB model from a slow disk; the server says "loading" meanwhile
 
+# The Amadeus help channel (one constant per language/script: the same
+# value lives once in the launcher and the installers): every failure
+# message ends with a line built from it + the exact folder to send.
+DISCORD_URL = "https://discord.gg/YxYkZPSVf3"
+
 _lock = threading.RLock()
-# pictures: she runs with her vision file; pictures_note: why not (Settings).
+# pictures: she runs with her vision file; pictures_file: which one (the
+# name, for Settings); pictures_note: why not (Settings).
 _state = {"state": "unloaded", "file": "", "error": "", "since": 0.0,
-          "pictures": False, "pictures_where": "", "pictures_note": ""}
+          "pictures": False, "pictures_where": "", "pictures_note": "",
+          "pictures_file": ""}
 _proc: subprocess.Popen | None = None
 
 
@@ -140,7 +147,8 @@ def _place(cfg: dict, on_card: bool) -> str:
 
 
 def server_command(cfg: dict, model_file: str, safe: bool = False,
-                   vision: bool = True, vision_on_card: bool | None = None) -> list[str]:
+                   vision: bool = True, vision_on_card: bool | None = None,
+                   vision_path: str | None = None) -> list[str]:
     """llama-server with the tier's settings; sampling = Unsloth's
     recommendation for Gemma 4 (the Model Sampling panel can override).
     Thinking is NOT set server-wide: every request already says it (the
@@ -151,9 +159,14 @@ def server_command(cfg: dict, model_file: str, safe: bool = False,
     is always served under one fixed name (builtin_llm.ALIAS), so switching
     files never confuses the backend or the memory sidecar. vision: load
     the model's vision file when there is one (builtin_llm.vision_file) -
-    False = the retry without it. vision_on_card: where the vision part runs
-    (None = by tier: the processor only on 6-7 GB cards; load() measures)."""
-    vision_path = builtin_llm.vision_file(model_file) if vision else ""
+    False = the retry without it. vision_path: an explicit vision file to
+    use (the one picked in Settings); None = auto-detect. vision_on_card:
+    where the vision part runs (None = by tier: the processor only on 6-7 GB
+    cards; load() measures)."""
+    if vision_path is None:
+        vision_path = builtin_llm.vision_file(model_file) if vision else ""
+    else:
+        vision_path = vision_path if vision else ""
     if vision_on_card is None:
         vision_on_card = cfg.get("tier") not in VISION_ON_PROCESSOR_TIERS
     cmd = [
@@ -221,9 +234,8 @@ def _poll() -> None:
                 _set("failed", _state["file"], driver_error_message())
             else:
                 _set("failed", _state["file"],
-                     f"her model stopped (exit {code}) - often not enough "
-                     f"{'memory' if builtin_llm.shared_memory() else 'graphics memory'}. "
-                     f"Details: {LOG_FILE}\n" + _log_tail())
+                     f"her model stopped (exit {code}){_memory_shortage()}. "
+                     f"Details: {LOG_FILE}\n" + _log_tail() + _help_footer())
 
 
 def _log_tail(lines: int = 6) -> str:
@@ -236,7 +248,7 @@ def _log_tail(lines: int = 6) -> str:
 
 # A CUDA build the driver cannot run (the driver is too old for the build's
 # CUDA version) dies at first GPU use with one of these lines. No amount of
-# retrying helps, and "often not enough graphics memory" would be a lie.
+# retrying helps.
 DRIVER_ERROR_LINES = (
     "PTX was compiled with an unsupported toolchain",
     "CUDA driver version is insufficient",
@@ -252,11 +264,54 @@ def _driver_error_in_log() -> bool:
     return any(line.lower() in low for line in DRIVER_ERROR_LINES)
 
 
+def _help_footer() -> str:
+    """The help line every failure message ends with: the Discord, and the
+    exact folder to send - her logs folder, which since 4192a33 also holds
+    install_log.txt and the PC block in launcher.log."""
+    return (f"\nNeed help? Ask on our Discord: {DISCORD_URL} - and send "
+            f"your logs folder: {LOG_FILE.parent}.")
+
+
+# The "often not enough ... memory" words are only for a SHOWN cause: her
+# log has to report a memory shortage (2026-11-10: the old wording guessed
+# on every crash - on a card whose memory even cannot be read, that guess
+# is a lie).
+OOM_HINTS = ("out of memory", "out of graphics memory", "not enough memory",
+             "cannot allocate memory", "std::bad_alloc")
+
+
+def _log_says_out_of_memory() -> bool:
+    """Did her log report a memory shortage (so we may say so)?"""
+    try:
+        low = LOG_FILE.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return any(hint in low for hint in OOM_HINTS)
+
+
+def _memory_shortage() -> str:
+    if not _log_says_out_of_memory():
+        return ""
+    what = "memory" if builtin_llm.shared_memory() else "graphics memory"
+    return f" - often not enough {what}"
+
+
+def _no_pictures_note(cfg: dict) -> str:
+    """Settings says why she runs without pictures."""
+    if str(cfg.get("selected_vision_file") or "") == "none":
+        return ("you turned pictures off (Vision file: None) - she can't see "
+                "pictures with it")
+    return "no vision file found next to her model - choose one under Vision file"
+
+
 def driver_error_message() -> str:
+    """Plain words for that failure (Settings and the launcher window):
+    the fix, not the PTX line - and where to get help."""
     return ("her helper program (llama.cpp, the NVIDIA version) needs a newer "
             "NVIDIA graphics driver. Update the driver (the NVIDIA app or "
             f"nvidia.com) and press Load again - or run the installer again, "
-            f"which picks a version your driver can run. Details: {LOG_FILE}")
+            f"which picks a version your driver can run. Details: {LOG_FILE}"
+            + _help_footer())
 
 
 def _port_taken(port: int, wait_s: float = 3.0) -> bool:
@@ -318,7 +373,8 @@ def load(file: str | None = None) -> dict:
             # llama-server): starting ours would fail to bind, and the
             # readiness check would see THEIR server as hers.
             _set("failed", target, f"port {port} is used by another program - close it "
-                                   "(or restart Amadeus, which frees the port), then load again.")
+                                   "(or restart Amadeus, which frees the port), then load again."
+                                   + _help_footer())
             return dict(_state)
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         log = open(LOG_FILE, "w", encoding="utf-8")
@@ -327,22 +383,26 @@ def load(file: str | None = None) -> dict:
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         global _proc
         started, memory_before = timing.now(), timing.gpu_memory()
-        vision_path = builtin_llm.vision_file(target)
+        # The vision file picked in Settings (Automatic / a file / "none"),
+        # else the one found next to her model.
+        vision_path = builtin_llm.vision_for(target, cfg)
         on_card, why = vision_on_card(cfg, memory_before, target) if vision_path else (False, "")
         if vision_path:
             print(f"[Amadeus] her pictures are read on the {_place(cfg, on_card)} "
                   f"({why}).")
         try:
-            _proc = subprocess.Popen(server_command(cfg, target, vision_on_card=on_card), **kwargs)
+            _proc = subprocess.Popen(
+                server_command(cfg, target, vision_on_card=on_card, vision_path=vision_path),
+                **kwargs)
         except OSError as e:
             log.close()
-            _set("failed", target, f"could not start llama-server: {e}")
+            _set("failed", target, f"could not start llama-server: {e}" + _help_footer())
             return dict(_state)
         _set("loading", target)
         _state.update({"pictures": bool(vision_path),
                        "pictures_where": ("card" if on_card else "processor") if vision_path else "",
-                       "pictures_note": "" if vision_path else
-                       "no vision file next to her model - she can't see pictures with it"})
+                       "pictures_file": os.path.basename(vision_path) if vision_path else "",
+                       "pictures_note": "" if vision_path else _no_pictures_note(cfg)})
         proc = _proc
 
     def _start(note: str, safe: bool, vision: bool, card: bool = False):
@@ -352,14 +412,18 @@ def load(file: str | None = None) -> dict:
                 log.write(f"\n[Amadeus] retrying {note}\n")
                 log.flush()
                 new = subprocess.Popen(server_command(cfg, target, safe=safe, vision=vision,
-                                                      vision_on_card=card), **kwargs)
+                                                      vision_on_card=card, vision_path=vision_path),
+                                       **kwargs)
             except Exception:   # noqa: BLE001 - a retry that can't start just ends the chain
                 return None
             if vision:
-                _state["pictures_where"] = "card" if card else "processor"
+                _state.update({"pictures": True,
+                               "pictures_where": "card" if card else "processor",
+                               "pictures_file": os.path.basename(vision_path)})
             else:
                 # She runs without pictures now - Settings says why (V1 a).
-                _state.update({"pictures": False, "pictures_where": "", "pictures_note":
+                _state.update({"pictures": False, "pictures_where": "",
+                               "pictures_file": "", "pictures_note":
                                "her model would not start with its vision file "
                                f"({os.path.basename(vision_path)}), so it runs without it - "
                                "she can't see pictures"})
@@ -418,9 +482,9 @@ def _watch_loading(proc, target, port, log, started=None, memory_before=None,
                     if _proc is proc:
                         _proc = None
                         _set("failed", target,
-                             f"her model could not load (exit {proc.returncode}) - often "
-                             f"not enough {'memory' if builtin_llm.shared_memory() else 'graphics memory'}. "
-                             f"Details: {LOG_FILE}\n" + _log_tail())
+                             f"her model could not load (exit {proc.returncode})"
+                             f"{_memory_shortage()}. "
+                             f"Details: {LOG_FILE}\n" + _log_tail() + _help_footer())
                 return
             if _health(port) == 200:
                 with _lock:
@@ -436,7 +500,7 @@ def _watch_loading(proc, target, port, log, started=None, memory_before=None,
         with _lock:
             if _proc is proc:
                 _set("failed", target, f"her model did not finish loading in {LOAD_TIMEOUT_S // 60} "
-                                       f"minutes. Details: {LOG_FILE}")
+                                       f"minutes. Details: {LOG_FILE}" + _help_footer())
                 _stop(proc)
     finally:
         # The server keeps its own copy of the log handle.
@@ -482,7 +546,8 @@ def unload() -> dict:
         if proc is not None:
             _stop(proc)
         _set("unloaded")
-        _state.update({"pictures": False, "pictures_where": "", "pictures_note": ""})
+        _state.update({"pictures": False, "pictures_where": "", "pictures_note": "",
+                       "pictures_file": ""})
         _forget_picture_check()
         return dict(_state)
 

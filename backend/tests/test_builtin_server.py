@@ -131,6 +131,24 @@ class ModelListTests(_ServerBase):
             with self.subTest(file=bad):
                 self.assertIsNone(self.b.resolve_model_file(bad))
 
+    def test_vision_files_listed_for_the_picker(self):
+        # Every vision marker counts; chat models, MTP files and other names
+        # do not. By name, like the chat-model list.
+        for name in ("mmproj-gemma-4-12B-it-qat.gguf",      # a prefix marker
+                     "gemma-4-12B-it-qat-mmproj-F16.gguf",  # a suffix marker
+                     "MyModel-7B-vision.gguf",              # another marker
+                     "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",  # a chat model (already there)
+                     "mtp-gemma-4-12B-it.gguf",
+                     "envision-7b-instruct.gguf"):          # looks like one, is not
+            (self.models / name).write_bytes(b"x")
+        out = self.b.vision_files()
+        self.assertEqual([f["name"] for f in out],
+                         ["gemma-4-12B-it-qat-mmproj-F16.gguf",
+                          "mmproj-gemma-4-12B-it-qat.gguf",
+                          "MyModel-7B-vision.gguf"])
+        self.assertTrue(all(f["file"].startswith(str(self.models)) for f in out))
+        self.assertEqual(self.b.vision_choice(), "")
+
     def test_own_gguf_when_hers_is_not_downloaded(self):
         # An option-B install: llama.cpp but no model of hers. The user's
         # own GGUF in the folder is the one she loads.
@@ -221,6 +239,9 @@ class LoadTests(_ServerBase):
         st = self.wait_for("failed")
         self.assertIn("exit 3", st["error"])
         self.assertIn("out of graphics memory", st["error"])   # the log's last lines
+        # The failure ends with the help line (the Discord + the logs folder).
+        self.assertIn("discord.gg/YxYkZPSVf3", st["error"])
+        self.assertIn("logs folder", st["error"])
         self.assertEqual(self.b.load_config().get("selected_file"), None)
 
     def test_port_used_by_another_program(self):
@@ -236,6 +257,8 @@ class LoadTests(_ServerBase):
             st = self.s.load()
         self.assertEqual(st["state"], "failed")
         self.assertIn(f"port {self.port} is used by another program", st["error"])
+        self.assertIn("discord.gg/YxYkZPSVf3", st["error"])
+        self.assertIn("logs folder", st["error"])
         self.assertIsNone(self.s._proc)
 
     def test_no_load_when_off_or_missing(self):
@@ -279,6 +302,8 @@ class DriverErrorTests(_ServerBase):
         self.assertIn("newer NVIDIA graphics driver", st["error"])
         self.assertIn(str(self.s.LOG_FILE), st["error"])
         self.assertNotIn("not enough", st["error"])
+        self.assertIn("discord.gg/YxYkZPSVf3", st["error"])   # the help line ends it
+        self.assertIn("logs folder", st["error"])
         self.assertEqual(len(starts), 1)   # no retrying for a driver problem
 
     def test_driver_error_second_signature(self):
@@ -323,6 +348,41 @@ class RouteTests(_FreshAppTests):
         import openai
         exc = openai.APIConnectionError(request=__import__("httpx").Request("GET", "http://x"))
         self.assertIn("not loaded", self.api._llm_error_message(exc))
+
+    def test_the_vision_file_choice(self):
+        vision = "gemma-4-12B-it-qat-mmproj-F16.gguf"
+        (Path("models") / vision).write_bytes(b"x")
+        (Path("models") / "gemma-4-12b-it-mmproj-F16.gguf").write_bytes(b"x")
+        info = self.client.get("/builtinModel").json
+        self.assertEqual([f["name"] for f in info["vision_files"]],
+                         ["gemma-4-12b-it-mmproj-F16.gguf",
+                          "gemma-4-12B-it-qat-mmproj-F16.gguf"])
+        self.assertEqual(info["vision_choice"], "")
+        self.assertEqual(info["vision_auto"], vision)   # the installer's pair wins
+
+        res = self.client.post("/builtinModel/vision", json={"file": "gemma-4-12b-it-mmproj-F16.gguf"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["choice"], "gemma-4-12b-it-mmproj-F16.gguf")
+        self.assertEqual(self.client.get("/builtinModel").json["vision_choice"],
+                         "gemma-4-12b-it-mmproj-F16.gguf")
+
+        self.assertEqual(self.client.post("/builtinModel/vision", json={"file": "none"}).status_code, 200)
+        self.assertEqual(self.client.get("/builtinModel").json["vision_choice"], "none")
+
+        self.assertEqual(self.client.post("/builtinModel/vision", json={"file": ""}).status_code, 200)
+        self.assertEqual(self.client.get("/builtinModel").json["vision_choice"], "")
+
+        # Only vision files inside the models folder are accepted.
+        (Path("mtp.gguf")).write_bytes(b"x")
+        for bad in ("mtp.gguf", "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", "../elsewhere.gguf",
+                    "missing-vision.gguf"):
+            with self.subTest(file=bad):
+                res = self.client.post("/builtinModel/vision", json={"file": bad})
+                self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.client.post("/builtinModel/vision", json={"file": 5}).status_code, 400)
+        # The choice is kept, whatever the rejected posts tried.
+        self.assertEqual(self.client.post("/builtinModel/vision", json={"file": ""}).status_code, 200)
+        self.assertEqual(self.client.get("/builtinModel").json["vision_choice"], "")
 
 
 def _load_launcher():

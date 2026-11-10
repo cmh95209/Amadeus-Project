@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.0.4 — Older NVIDIA Cards, Her Vision File, Clearer Errors — November 2026
+
+**Fixed: her model would not load on older NVIDIA cards (RTX 20 and older)**
+("PTX was compiled with an unsupported toolchain"). The installer now picks a
+llama.cpp version your card and driver can really run. Run the installer
+again to get it, or update your NVIDIA driver.
+
+**Fixed: her voice would not start on some Linux PCs** ("No module named
+'soundfile'"). Her voice now always starts with its own Python.
+
+**NEW: Vision file picker** (Settings -> Connection). Her vision file is found
+under more names (e.g. "mmproj-<model>.gguf"), and you can pick it yourself.
+
+**Clearer errors.** When a part fails, Amadeus says which one, why (when it
+knows), what to try, and which file to send on our Discord:
+https://discord.gg/YxYkZPSVf3. Your PC details and install log are now in the
+logs folder.
+
 ## v3.0.3 — Linux and Mac Installers: Her Voice Download — November 2026
 
 **Fixed: "STOPPED: Could not download the voice models"** (Linux installer

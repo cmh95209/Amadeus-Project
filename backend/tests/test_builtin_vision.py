@@ -175,7 +175,7 @@ class RetryTests(_ServerBase):
     def use_vision_fake(self, die_with_vision: bool, die_safe: bool = True, die_on_card=False):
         seen = []
 
-        def cmd(cfg, model, safe=False, vision=True, vision_on_card=None):
+        def cmd(cfg, model, safe=False, vision=True, vision_on_card=None, vision_path=None):
             seen.append((safe, vision, vision_on_card if vision else None))
             die = 3 if ((vision and die_with_vision) or (safe and die_safe and vision)
                         or (vision and vision_on_card and die_on_card)) else -1
@@ -249,7 +249,7 @@ class RetryTests(_ServerBase):
     def test_everything_failing_still_reports_failed(self):
         (self.models / QAT_VISION).write_bytes(b"x")
 
-        def cmd(cfg, model, safe=False, vision=True, vision_on_card=None):
+        def cmd(cfg, model, safe=False, vision=True, vision_on_card=None, vision_path=None):
             return [sys.executable, str(self.fake), str(self.port), "0.3", "4"]
         p = patch.object(self.s, "server_command", side_effect=cmd)
         p.start()
@@ -257,6 +257,175 @@ class RetryTests(_ServerBase):
         self.s.load()
         st = self.wait_for("failed")
         self.assertIn("exit 4", st["error"])
+
+
+class VisionDetectionTests(_ServerBase):
+    """Finding the vision file by name markers (2026-11-11: the tester's
+    folder had "mmproj-Gemma4-12B-....gguf" - marker in FRONT of the model
+    name - plus the installer's own Gemma files and an MTP file: the old
+    code found nothing)."""
+
+    HAUHAU = "Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf"
+    HAUHAU_VISION = "mmproj-Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-F16.gguf"
+
+    def test_a_vision_file_named_after_its_model(self):
+        # Her real folder: the model, its "mmproj-..." file, an MTP speed-up
+        # file, and the installer's own Gemma 4 files.
+        model = self.models / self.HAUHAU
+        model.write_bytes(b"x")
+        (self.models / self.HAUHAU_VISION).write_bytes(b"x")
+        (self.models / "mtp-gemma-4-12b-it.gguf").write_bytes(b"x")
+        (self.models / QAT).write_bytes(b"x")
+        (self.models / QAT_VISION).write_bytes(b"x")
+        (self.models / "gemma-4-12b-it-Q3_K_M.gguf").write_bytes(b"x")
+        (self.models / "gemma-4-12b-it-mmproj-F16.gguf").write_bytes(b"x")
+        self.assertEqual(self.b.vision_file(model), str(self.models / self.HAUHAU_VISION))
+
+    def test_the_markers_are_found_as_whole_parts(self):
+        for name, marker in (
+            ("MyModel-7B-mmproj-F16.gguf", "mmproj"),
+            ("MyModel-7B.mmproj.gguf", "mmproj"),
+            ("MyModel-7B-mm-proj-F16.gguf", "mm-proj"),
+            ("MyModel-7B-vision.gguf", "vision"),
+            ("MyModel-7B-clip.gguf", "clip"),
+            ("MyModel-7B-projector.gguf", "projector"),
+        ):
+            with self.subTest(marker=marker):
+                own = self.models / "MyModel-7B-Q8_0.gguf"
+                own.write_bytes(b"x")
+                vision = self.models / name
+                vision.write_bytes(b"x")
+                self.assertEqual(self.b.vision_file(own), str(vision))
+                own.unlink()
+                vision.unlink()
+
+    def test_envision_is_a_chat_model_not_a_vision_file(self):
+        own = self.models / "envision-7b-instruct-Q4_K_M.gguf"
+        own.write_bytes(b"x")
+        self.assertFalse(self.b._is_vision_name(own.name))
+        self.assertIn(own.name, [f["name"] for f in self.b.list_models()])
+
+    def test_quant_and_precision_tags_do_not_break_the_match(self):
+        # The model is 4-bit, its vision file is F16: the tags differ, the
+        # model name must still match (and so does a bf16/q8_0 vision file).
+        own = self.models / "MyModel-7B-Q4_K_M.gguf"
+        own.write_bytes(b"x")
+        (self.models / "MyModel-7B-mmproj-F16.gguf").write_bytes(b"x")
+        self.assertEqual(self.b.vision_file(own),
+                         str(self.models / "MyModel-7B-mmproj-F16.gguf"))
+        own2 = self.models / "MyModel-7B-IQ4_XS.gguf"
+        own2.write_bytes(b"x")
+        (self.models / "mymodel-7b-mmproj-bf16.gguf").write_bytes(b"x")
+        self.assertEqual(self.b.vision_file(own2),
+                         str(self.models / "mymodel-7b-mmproj-bf16.gguf"))
+
+    def test_the_vision_files_are_never_chat_models(self):
+        (self.models / self.HAUHAU_VISION).write_bytes(b"x")
+        (self.models / "MyModel-7B-vision.gguf").write_bytes(b"x")
+        names = [f["name"] for f in self.b.list_models()]
+        self.assertNotIn(self.HAUHAU_VISION, names)
+        self.assertNotIn("MyModel-7B-vision.gguf", names)
+        self.assertIn(QAT, names)                      # the config's model
+        for f in self.b.vision_files():
+            self.assertIn(f["name"], (self.HAUHAU_VISION, "MyModel-7B-vision.gguf"))
+
+
+class VisionChoiceTests(_ServerBase):
+    """The Settings -> Connection "Vision file" choice ("" = Automatic,
+    "none" = no pictures, else a file from her models folder), kept like the
+    chosen model file; the server loads it on the next Load."""
+
+    OTHER = "gemma-4-12b-it-mmproj-F16.gguf"
+
+    def test_a_picked_file_is_saved_and_used(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        (self.models / self.OTHER).write_bytes(b"x")
+        self.b.save_selected_vision_file(self.OTHER)
+        cfg = self.b.load_config()
+        self.assertEqual(cfg.get("selected_vision_file"), str(self.models / self.OTHER))
+        self.assertEqual(self.b.vision_choice(), self.OTHER)
+        self.assertEqual(self.b.selected_vision_file(), str(self.models / self.OTHER))
+        self.assertEqual(self.b.describe()["vision_file"], self.OTHER)
+        self.b.save_selected_vision_file("")
+        self.assertEqual(self.b.vision_choice(), "")     # Automatic again
+        self.assertEqual(self.b.load_config().get("selected_vision_file"), None)
+
+    def test_none_turns_pictures_off(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        self.b.save_selected_vision_file("none")
+        self.assertEqual(self.b.vision_choice(), "none")
+        self.assertEqual(self.b.selected_vision_file(), "")
+        self.assertEqual(self.b.vision_file(self.models / QAT), str(self.models / QAT_VISION))
+
+    def test_only_vision_files_in_the_folder_are_accepted(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        (self.models / "mtp-gemma-4-12b-it.gguf").write_bytes(b"x")
+        outside = self.tmp / "elsewhere-vision.gguf"
+        outside.write_bytes(b"x")
+        for bad in (str(outside), "../elsewhere-vision.gguf", "mtp-gemma-4-12b-it.gguf",
+                    QAT, "missing-vision.gguf"):
+            with self.subTest(file=bad):
+                with self.assertRaises(ValueError):
+                    self.b.save_selected_vision_file(bad)
+        self.assertIsNone(self.b.resolve_vision_file(str(outside)))
+        self.b.save_selected_vision_file(QAT_VISION)     # a valid one
+        self.assertEqual(self.b.vision_choice(), QAT_VISION)
+
+    def test_a_picked_file_that_is_gone_is_automatic_again(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        self.b.save_selected_vision_file(QAT_VISION)
+        (self.models / QAT_VISION).unlink()
+        self.assertEqual(self.b.vision_choice(), "")
+        self.assertEqual(self.b.selected_vision_file(), "")
+
+    def test_load_passes_the_picked_file_to_llama_server(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        (self.models / self.OTHER).write_bytes(b"x")
+        self.b.save_selected_vision_file(self.OTHER)
+        p = patch.object(self.s, "vision_on_card", return_value=(True, "test: room on the card"))
+        p.start()
+        self.addCleanup(p.stop)
+        seen = []
+
+        def cmd(cfg, model, safe=False, vision=True, vision_on_card=None, vision_path=None):
+            seen.append(vision_path if vision else None)
+            return [sys.executable, str(self.fake), str(self.port), "0.3", "-1"]
+        p = patch.object(self.s, "server_command", side_effect=cmd)
+        p.start()
+        self.addCleanup(p.stop)
+        self.s.load()
+        st = self.wait_for("loaded")
+        self.assertTrue(st["pictures"])
+        self.assertEqual(st["pictures_file"], self.OTHER)
+        self.assertEqual(seen, [str(self.models / self.OTHER)])
+
+    def test_load_with_none_runs_without_pictures(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        self.b.save_selected_vision_file("none")
+        seen = []
+
+        def cmd(cfg, model, safe=False, vision=True, vision_on_card=None, vision_path=None):
+            seen.append(vision_path)
+            return [sys.executable, str(self.fake), str(self.port), "0.3", "-1"]
+        p = patch.object(self.s, "server_command", side_effect=cmd)
+        p.start()
+        self.addCleanup(p.stop)
+        self.s.load()
+        st = self.wait_for("loaded")
+        self.assertFalse(st["pictures"])
+        self.assertEqual(st["pictures_file"], "")
+        self.assertIn("turned pictures off", st["pictures_note"])
+        self.assertEqual(seen, [""])
+
+    def test_unload_forgets_the_pictures_file(self):
+        (self.models / QAT_VISION).write_bytes(b"x")
+        self.use_fake(delay=0.4)
+        self.s.load()
+        st = self.wait_for("loaded")
+        self.assertEqual(st["pictures_file"], QAT_VISION)
+        st = self.s.unload()
+        self.assertEqual(st["pictures_file"], "")
+        self.assertFalse(st["pictures"])
 
 
 class TierMemoryTests(unittest.TestCase):

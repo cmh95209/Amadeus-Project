@@ -1,6 +1,10 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
+rem The Amadeus help channel (one constant per script): the error message
+rem below ends with this line + the exact folder to send.
+set "DISCORD_URL=https://discord.gg/YxYkZPSVf3"
+
 cd /d "%~dp0"
 
 rem ---- Amadeus Python -------------------------------------------------------
@@ -62,6 +66,7 @@ if not "%EXIT_CODE%"=="0" (
     echo.
     echo Amadeus launcher exited with an error.
     echo The details are in the logs folder: %CD%\logs
+    echo Need help? Ask on our Discord: %DISCORD_URL% - and send the logs folder %CD%\logs.
     pause
 )
 

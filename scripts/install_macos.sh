@@ -131,6 +131,9 @@ else
 fi
 
 INSTALL_LOG=""   # set once INSTALL_DIR is known; every line is tee'd to it
+# The Amadeus help channel (one constant per script): every failure ends
+# with this line + the exact file to send.
+DISCORD_URL="https://discord.gg/YxYkZPSVf3"
 tee_to() { if [ -n "$INSTALL_LOG" ]; then tee -a "$INSTALL_LOG"; else cat; fi; }
 
 log()  { printf '%s%s%s\n' "$C_DIM" "$1" "$C_RESET" | tee_to; }
@@ -140,11 +143,22 @@ step() {
     printf '%s\n' "============================================================" | tee_to
 }
 die() {
+    local extra="${3:-}"
     printf '%s%s%s\n' "$C_BOLD$C_RED" "STOPPED: $1" "$C_RESET" | tee_to
     if [ -n "${2:-}" ]; then
         printf '%s%s%s\n' "$C_DIM" "$2" "$C_RESET" | tee_to
     fi
     copy_install_log
+    # Where to get help: the Discord + the exact file to send - the install
+    # log, and voice_pip.log when the voice packages failed.
+    if [ -n "${INSTALL_LOG:-}" ]; then
+        printf '%s\n' "Need help? Ask on our Discord: $DISCORD_URL - and send the file $INSTALL_LOG." | tee_to
+    else
+        printf '%s\n' "Need help? Ask on our Discord: $DISCORD_URL." | tee_to
+    fi
+    if [ -n "$extra" ]; then
+        printf '%s\n' "  (and this one too: $extra)" | tee_to
+    fi
     exit 1
 }
 
@@ -1710,7 +1724,7 @@ else
     pip_in_env "GPTSoVits" uninstall -y torch torchvision torchaudio >/dev/null 2>&1 || true
     if ! pip_in_env "GPTSoVits" install torch torchvision torchaudio 2>&1 | tee "$PIP_LOG" >/dev/null; then
         tail -15 "$PIP_LOG" | tee_to
-        die "Could not install PyTorch." "See: $PIP_LOG"
+        die "Could not install PyTorch." "See: $PIP_LOG" "$PIP_LOG"
     fi
     log "  PyTorch installed."
 fi
@@ -1728,7 +1742,7 @@ if ! pip_in_env "GPTSoVits" install -r "$GPT/requirements.txt" 2>&1 | tee -a "$P
     log "  (full package list failed - retrying without the optional Japanese text helper)"
     grep -v '^pyopenjtalk-prebuilt' "$GPT/requirements.txt" > "$GPT/requirements-core.tmp.txt"
     pip_in_env "GPTSoVits" install -r "$GPT/requirements-core.tmp.txt" 2>&1 | tee -a "$PIP_LOG" >/dev/null \
-        || { tail -15 "$PIP_LOG" | tee_to; die "Could not install the voice engine's packages." "See: $PIP_LOG"; }
+        || { tail -15 "$PIP_LOG" | tee_to; die "Could not install the voice engine's packages." "See: $PIP_LOG" "$PIP_LOG"; }
 fi
 
 # Note: on a Mac, ONE package (python_mecab_ko, for Korean) is built from

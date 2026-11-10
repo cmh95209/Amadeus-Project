@@ -46,6 +46,7 @@ import requests
 
 import chat
 import json
+import os
 import queue
 import threading
 import uuid
@@ -1371,8 +1372,11 @@ def set_brain_mode():
 # pre: none
 # post: her built-in model's server: state ("unloaded" | "loading" |
 #       "loaded" | "failed"), the file it runs (or tried), why it failed,
-#       and every chat-model GGUF in the models folder (Settings' dropdown;
-#       asking again = "Refresh list").
+#       every chat-model GGUF in the models folder (Settings' dropdown;
+#       asking again = "Refresh list"), and the Vision file choice: the
+#       vision-file GGUFs in the folder (picker options), the saved choice
+#       ("" = Automatic, "none" = no pictures, else a file name), and what
+#       Automatic finds for the model she loads.
 @application.route("/builtinModel", methods=["GET"])
 def get_builtin_model():
     info = builtin_llm.describe()
@@ -1382,6 +1386,9 @@ def get_builtin_model():
     folder = builtin_llm.models_dir()
     info["folder"] = str(folder) if folder else ""
     info["catalog"] = builtin_llm.catalog()
+    info["vision_files"] = builtin_llm.vision_files()
+    info["vision_choice"] = builtin_llm.vision_choice()
+    info["vision_auto"] = os.path.basename(builtin_llm.vision_file(info["selected"]))
     return jsonify(info)
 
 
@@ -1402,6 +1409,27 @@ def load_builtin_model():
     except LookupError as exc:
         return jsonify({"message": str(exc)}), 409
     return jsonify({"status": "ok", "server": status})
+
+
+# pre: body {"file": "" | "none" | "<a vision GGUF name from /builtinModel's
+#      visionFiles>"} ("" = Automatic, "none" = no pictures); built-in mode
+#      on
+# post: the Vision file choice is saved (kept like the chosen model file in
+#       data/local_llm.json); the model is (re)loaded with it on the next
+#       Load
+@application.route("/builtinModel/vision", methods=["POST"])
+def set_builtin_model_vision():
+    data = request.get_json(silent=True)
+    file = data.get("file") if isinstance(data, dict) else None
+    if file is not None and not isinstance(file, str):
+        return jsonify({"message": "'file' must be a file name, 'none', or empty"}), 400
+    try:
+        builtin_llm.save_selected_vision_file(file or "")
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except LookupError as exc:
+        return jsonify({"message": str(exc)}), 409
+    return jsonify({"status": "ok", "choice": builtin_llm.vision_choice()})
 
 
 # post: her models folder opens in Explorer / Finder (Settings' "Open

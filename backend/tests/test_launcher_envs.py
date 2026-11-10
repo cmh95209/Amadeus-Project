@@ -6,15 +6,23 @@ to the real one) records its suffix in .runtime/env_suffix.txt. Covers:
   1. no file = the plain names (every normal install is unchanged);
   2. a recorded suffix is appended to every environment name;
   3. a malformed file is ignored instead of producing a bad name;
-  4. the memory sidecar's base Python and the voice engine's `conda run`
-     both use the suffixed names.
+  4. the memory sidecar's base Python and the voice engine's start command
+     both use the suffixed names;
+  5. the voice engine runs with its own environment's Python, by FULL path
+     (a nested `conda run` once ran it with a different, newer Python,
+     2026-11-10): the command uses the full path when the interpreter file
+     exists (Windows and POSIX layouts), falls back to `conda run` when it
+     does not, and the environment gets the PATH entries + CONDA_PREFIX that
+     activation would set up.
 """
 import importlib.util
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 _LAUNCHER = Path(__file__).resolve().parents[2] / "scripts" / "launcher.py"
@@ -160,6 +168,142 @@ class EnvSuffixTests(unittest.TestCase):
         self._write("-test")
         cmd = self.launcher.gptsovits_command("conda")
         self.assertEqual(cmd[1:4], ["run", "-n", "GPTSoVITS-test"])
+
+
+class _OsLike:
+    """The launcher's `os` with a pinned name/pathsep: the layout tests
+    must hold on a Windows AND a POSIX runner alike (they pretend to be on
+    the other side of the platform wall)."""
+
+    def __init__(self, name, pathsep):
+        self.name = name
+        self.pathsep = pathsep
+
+    def __getattr__(self, item):
+        return getattr(os, item)
+
+
+class VoicePythonTests(unittest.TestCase):
+    """The voice engine runs with the voice environment's own interpreter,
+    by FULL path (<conda home>/envs/<env>/bin/python or ...\\python.exe),
+    with the PATH entries + CONDA_PREFIX that activation would set up.
+    `conda run -n <env>` is only the fallback when that file does not exist
+    (2026-11-10: a tester's PC ran the engine through the launcher's nested
+    conda run, and a DIFFERENT, newer Python ran it - no soundfile/torch)."""
+
+    def setUp(self):
+        self.launcher = _load_launcher()
+        self.tmp = Path(tempfile.mkdtemp(prefix="amadeus_voicepy_"))
+        self.launcher.ENV_SUFFIX_FILE = self.tmp / "env_suffix.txt"
+        self.home = self.tmp / "miniforge3"
+        (self.home / "bin").mkdir(parents=True)
+        (self.home / "bin" / "conda").write_text("", encoding="utf-8")
+        (self.home / "envs").mkdir()
+        self.conda = str(self.home / "bin" / "conda")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _env_dir(self, spelling="GPTSoVITS"):
+        env_dir = self.home / "envs" / spelling
+        env_dir.mkdir(parents=True, exist_ok=True)
+        return env_dir
+
+    def _make_python(self, env_dir, posix):
+        py = env_dir / (Path("bin", "python") if posix else "python.exe")
+        py.parent.mkdir(parents=True, exist_ok=True)
+        py.write_text("", encoding="utf-8")
+        return py
+
+    def test_command_uses_the_envs_own_python_windows_layout(self):
+        env_dir = self._env_dir()
+        py = self._make_python(env_dir, posix=False)
+        with patch.object(self.launcher, "os", _OsLike("nt", ";")):
+            self.assertEqual(self.launcher.voice_python(self.conda), py)
+            cmd = self.launcher.gptsovits_command(self.conda)
+        self.assertEqual(cmd, [str(py),
+                               str(self.launcher.BACKEND_DIR / "start_gptsovits.py")])
+        self.assertNotIn("run", cmd)
+
+    def test_command_uses_the_envs_own_python_posix_layout(self):
+        env_dir = self._env_dir()
+        py = self._make_python(env_dir, posix=True)
+        with patch.object(self.launcher, "os", _OsLike("posix", ":")):
+            self.assertEqual(self.launcher.voice_python(self.conda), py)
+            cmd = self.launcher.gptsovits_command(self.conda)
+        self.assertEqual(cmd, [str(py),
+                               str(self.launcher.BACKEND_DIR / "start_gptsovits.py")])
+
+    def test_missing_python_falls_back_to_conda_run(self):
+        self._env_dir()                      # the env exists, its Python does not
+        for os_like in (_OsLike("nt", ";"), _OsLike("posix", ":")):
+            with self.subTest(layout=os_like.name), \
+                 patch.object(self.launcher, "os", os_like):
+                self.assertIsNone(self.launcher.voice_python(self.conda))
+                cmd = self.launcher.gptsovits_command(self.conda)
+                self.assertEqual(cmd[1:4], ["run", "-n", "GPTSoVITS"])
+                self.assertEqual(cmd[0], self.conda)
+                self.assertEqual(cmd[4:], ["--no-capture-output", "python",
+                                            str(self.launcher.BACKEND_DIR / "start_gptsovits.py")])
+                self.assertEqual(self.launcher.gptsovits_env(self.conda), {})
+        # No conda at all: the old command shape, with nothing to find.
+        cmd = self.launcher.gptsovits_command("")
+        self.assertEqual(cmd[1:4], ["run", "-n", "GPTSoVITS"])
+
+    def test_env_sets_path_and_conda_prefix_windows_layout(self):
+        env_dir = self._env_dir()
+        self._make_python(env_dir, posix=False)
+        rest = os.environ.get("PATH", "")
+        with patch.object(self.launcher, "os", _OsLike("nt", ";")):
+            env = self.launcher.gptsovits_env(self.conda)
+        self.assertEqual(env.get("CONDA_PREFIX"), str(env_dir))
+        expected = [str(env_dir), os.path.join(str(env_dir), "Library", "bin"),
+                    os.path.join(str(env_dir), "Scripts")]
+        self.assertEqual(env.get("PATH", ""),
+                         ";".join(expected + [rest]))   # rest may be ""
+
+    def test_env_sets_path_and_conda_prefix_posix_layout(self):
+        env_dir = self._env_dir()
+        self._make_python(env_dir, posix=True)
+        rest = os.environ.get("PATH", "")
+        with patch.object(self.launcher, "os", _OsLike("posix", ":")):
+            env = self.launcher.gptsovits_env(self.conda)
+        self.assertEqual(env.get("CONDA_PREFIX"), str(env_dir))
+        expected = [os.path.join(str(env_dir), "bin")]
+        self.assertEqual(env.get("PATH", ""),
+                         ":".join(expected + [rest]))   # rest may be ""
+
+    def test_env_check_asks_the_envs_own_python(self):
+        env_dir = self._env_dir()
+        py = self._make_python(env_dir, posix=False)
+        run = mock.Mock(return_value=types.SimpleNamespace(
+            stdout="OK\n", stderr=""))
+        with patch.object(self.launcher, "os", _OsLike("nt", ";")), \
+             mock.patch("subprocess.run", run):
+            self.assertEqual(self.launcher.voice_env_check(self.conda), "")
+        run.assert_called_once()
+        command = run.call_args[0][0]
+        self.assertEqual(command[0], str(py))
+        self.assertEqual(command[1], "-c")
+        self.assertNotIn("run", command)
+        self.assertNotIn("-n", command)
+        env = run.call_args[1].get("env")
+        self.assertIsInstance(env, dict)
+        self.assertEqual(env.get("CONDA_PREFIX"), str(env_dir))
+        self.assertIn("GPTSoVITS", env.get("PATH", ""))
+        self.assertEqual(run.call_args[1].get("timeout"), 30)
+
+    def test_env_check_falls_back_to_conda_run_without_extra_env(self):
+        self._env_dir()                      # no interpreter file in the env
+        run = mock.Mock(return_value=types.SimpleNamespace(
+            stdout="OK\n", stderr=""))
+        with patch.object(self.launcher, "os", _OsLike("nt", ";")), \
+             mock.patch("subprocess.run", run):
+            self.assertEqual(self.launcher.voice_env_check(self.conda), "")
+        command = run.call_args[0][0]
+        self.assertEqual(command[0], self.conda)
+        self.assertEqual(command[1:4], ["run", "-n", "GPTSoVITS"])
+        self.assertNotIn("env", run.call_args[1])
 
 
 if __name__ == "__main__":

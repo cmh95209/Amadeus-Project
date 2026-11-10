@@ -313,6 +313,12 @@ if (-not $InstallDir) { $InstallDir = Join-Path $env:USERPROFILE "Amadeus" }
 $InstallDir = $InstallDir.TrimEnd('\')
 if ($InstallDir -match '^[A-Za-z]:$') { $InstallDir += '\' }   # a drive root keeps its backslash
 $LogPath    = Join-Path $InstallDir "install_log.txt"
+# The Amadeus help channel (one constant per script): every failure
+# message ends with this line + the exact file to send.
+$DiscordHelpUrl = "https://discord.gg/YxYkZPSVf3"
+# Set once step 6 has written voice_pip.log: a failure in the voice-package
+# steps then sends that log with the install log too.
+$VoicePipLog = $null
 # Since v2.1 every install follows the fork's main branch. Installs made by
 # older installers sit on the old feature branch; they are moved to main
 # (Step 3) when they hold nothing of the user's own.
@@ -482,10 +488,13 @@ function Resolve-Exe($name){
     if ($c) { return $c.Source }
     return $name
 }
-function Die($msg){
+function Die($msg, $extraFile = $null){
     Stop-BackgroundDownloads   # its ".part" files stay: the next run continues them
     Log "" "Red"; Log ("INSTALL STOPPED: " + $msg) "Red"
-    Log ("Please open and send this file to your helper:  " + $LogPath) "Yellow"
+    Log ("Need help? Ask on our Discord: " + $DiscordHelpUrl + " - and send the file " + $LogPath + ".") "Yellow"
+    if ($extraFile -and (Test-Path $extraFile)) {
+        Log ("  (and this one too: " + $extraFile + ")") "Yellow"
+    }
     Copy-InstallLogToProject (Join-Path $InstallDir "Amadeus-Project")
     Read-Host "Press Enter to close this window" | Out-Null
     exit 1
@@ -2429,6 +2438,7 @@ try {
     Ensure-Env $EnvVoice
     Push-Location $gpt
     $pipLog = Join-Path $InstallDir "voice_pip.log"
+    $VoicePipLog = $pipLog
     # A fresh voice_pip.log per run (the voice engine's pip output; the same
     # lines also go into install_log.txt).
     try { [IO.File]::WriteAllText($pipLog, ("Voice engine packages, installer " + $InstallerVersion + ", " + (Get-Date) + "`r`n"), $Utf8NoBom) } catch {}
@@ -2718,5 +2728,8 @@ try {
 } catch {
     Log ("UNEXPECTED ERROR: " + $_.Exception.Message) "Red"
     Log ("At line: " + $_.InvocationInfo.ScriptLineNumber) "Red"
-    Die "Something unexpected went wrong."
+    # A voice-package failure (step 6) throws: its log is sent with the
+    # install log.
+    $extra = if ($VoicePipLog -and (Test-Path $VoicePipLog)) { $VoicePipLog } else { $null }
+    Die "Something unexpected went wrong." $extra
 }

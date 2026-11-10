@@ -88,6 +88,9 @@ else
 fi
 
 INSTALL_LOG=""   # set once INSTALL_DIR is known; every line is tee'd to it
+# The Amadeus help channel (one constant per script): every failure ends
+# with this line + the exact file to send.
+DISCORD_URL="https://discord.gg/YxYkZPSVf3"
 tee_to() { if [ -n "$INSTALL_LOG" ]; then tee -a "$INSTALL_LOG"; else cat; fi; }
 
 log()  { printf '%s%s%s\n' "$C_DIM" "$1" "$C_RESET" | tee_to; }
@@ -97,11 +100,22 @@ step() {
     printf '%s\n' "============================================================" | tee_to
 }
 die() {
+    local extra="${3:-}"
     printf '%s%s%s\n' "$C_BOLD$C_RED" "STOPPED: $1" "$C_RESET" | tee_to
     if [ -n "${2:-}" ]; then
         printf '%s%s%s\n' "$C_DIM" "$2" "$C_RESET" | tee_to
     fi
     copy_install_log
+    # Where to get help: the Discord + the exact file to send - the install
+    # log, and voice_pip.log when the voice packages failed.
+    if [ -n "${INSTALL_LOG:-}" ]; then
+        printf '%s\n' "Need help? Ask on our Discord: $DISCORD_URL - and send the file $INSTALL_LOG." | tee_to
+    else
+        printf '%s\n' "Need help? Ask on our Discord: $DISCORD_URL." | tee_to
+    fi
+    if [ -n "$extra" ]; then
+        printf '%s\n' "  (and this one too: $extra)" | tee_to
+    fi
     exit 1
 }
 
@@ -1954,7 +1968,7 @@ else
     log "  (a large download - this is normal; keep the window open)"
     if ! install_torch "$torch_index"; then
         tail -15 "$PIP_LOG" | tee_to
-        die "Could not install PyTorch." "See: $PIP_LOG"
+        die "Could not install PyTorch." "See: $PIP_LOG" "$PIP_LOG"
     fi
     log "  PyTorch installed."
 fi
@@ -1984,7 +1998,7 @@ if [ $voice_reqs_ok = 0 ]; then
     log "  (full package list failed - retrying without the optional Japanese text helper)"
     grep -v '^pyopenjtalk-prebuilt' "$GPT/requirements.txt" > "$GPT/requirements-core.tmp.txt"
     pip_in_env "$VOICE_ENV" install -r "$GPT/requirements-core.tmp.txt" 2>&1 | tee -a "$PIP_LOG" >/dev/null \
-        || { tail -15 "$PIP_LOG" | tee_to; die "Could not install the voice engine's packages." "See: $PIP_LOG"; }
+        || { tail -15 "$PIP_LOG" | tee_to; die "Could not install the voice engine's packages." "See: $PIP_LOG" "$PIP_LOG"; }
 fi
 
 # ----------------------------------------------------------------------------
@@ -2012,7 +2026,7 @@ if [ "$VOICE_BUILD" = "cuda" ]; then
         GPU_OK) log "  PyTorch can use your graphics card - her voice will run on it." ;;
         GPU_FAIL\|*kernel\ image*|GPU_FAIL\|*not\ compatible*|GPU_FAIL\|*compute\ capability*|GPU_FAIL\|*sm_[0-9]*)
             log "  Your graphics card could not run the voice engine's graphics-card build. Switching her voice to the processor (works, just slower)..."
-            install_torch cpu || { tail -15 "$PIP_LOG" | tee_to; die "Could not install PyTorch (processor build)." "See: $PIP_LOG"; }
+            install_torch cpu || { tail -15 "$PIP_LOG" | tee_to; die "Could not install PyTorch (processor build)." "See: $PIP_LOG" "$PIP_LOG"; }
             log "  Her voice will run on the processor." ;;
         GPU_FAIL*) log "  NOTE: PyTorch sees your card but a test calculation on it failed (details in the install log). If her voice does not work, update your NVIDIA driver and re-run this installer once." ;;
         *) log "  NOTE: PyTorch is installed but could not see the card yet. Update your NVIDIA driver, then re-run this installer once." ;;

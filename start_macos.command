@@ -2,6 +2,9 @@
 
 set -u
 
+# The Amadeus help channel (one constant per script).
+DISCORD_URL="https://discord.gg/YxYkZPSVf3"
+
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_ROOT"
 
@@ -54,6 +57,7 @@ if [[ $EXIT_CODE -ne 0 ]]; then
     echo
     echo "Amadeus launcher exited with an error."
     echo "The details are in the logs folder: $PROJECT_ROOT/logs"
+    echo "Need help? Ask on our Discord: $DISCORD_URL - and send the logs folder $PROJECT_ROOT/logs."
     read "?Press Enter to close..."
 fi
 

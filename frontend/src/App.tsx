@@ -88,6 +88,7 @@ import {
   getBuiltinModel,
   loadBuiltinModel,
   unloadBuiltinModel,
+  setBuiltinModelVision,
   openModelsFolder,
   setContextBudget,
   getLLMServer,
@@ -218,6 +219,9 @@ export default function App() {
   const [builtinModel, setBuiltinModel] = useState<BuiltinModel | null>(null);
   const [modelChoice, setModelChoice] = useState<string>("");
   const [modelBusy, setModelBusy] = useState(false);
+  // The Vision file choice ("" = Automatic, "none" = no pictures, else a file name).
+  const [visionChoice, setVisionChoice] = useState<string>("");
+  const [visionBusy, setVisionBusy] = useState(false);
   const [brainSwitching, setBrainSwitching] = useState(false);
   const builtinMode = brain?.mode === "builtin";
   // A Mac with an Apple chip: her model shares the Mac's memory (no
@@ -1454,11 +1458,14 @@ export default function App() {
   }
 
   // Her built-in model's server: state + the GGUF files in her models folder
-  // ("Refresh list" asks again). The dropdown keeps the user's pick.
+  // ("Refresh list" asks again). The dropdown keeps the user's pick; the
+  // Vision file picker always mirrors the saved choice (the server reports
+  // Automatic again when a picked file is gone).
   async function refreshBuiltinModel() {
     try {
       const info = await getBuiltinModel();
       setBuiltinModel(info);
+      setVisionChoice(info.visionChoice);
       setModelChoice((current) => {
         const names = info.files.map((f) => f.name);
         if (current && names.includes(current)) return current;
@@ -1467,6 +1474,28 @@ export default function App() {
       });
     } catch {
       setBuiltinModel(null);
+    }
+  }
+
+  // Save the Vision file choice ("" = Automatic, "none" = no pictures, else a
+  // file name from her models folder). She runs with it on the next Load.
+  async function chooseVisionFile(name: string) {
+    if (visionBusy || modelBusy) return;
+    setVisionBusy(true);
+    setSettingsError("");
+    setSettingsNotice("");
+    try {
+      await setBuiltinModelVision(name);
+      await refreshBuiltinModel();
+      setSettingsNotice(name === ""
+        ? "Vision file: Automatic - it finds the file that goes with her model. Load her model again to run with it."
+        : name === "none"
+          ? "Vision is off: she runs without a vision file until you choose one. Load her model again to run without it."
+          : `Vision file: ${name}. Load her model again to run with it.`);
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not save the Vision file choice.");
+    } finally {
+      setVisionBusy(false);
     }
   }
 
@@ -2785,6 +2814,29 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                  <div className="conn-row">
+                    <label>
+                      Vision file
+                      <select
+                        value={visionChoice}
+                        disabled={visionBusy || modelBusy || !builtinModel}
+                        onChange={(event) => void chooseVisionFile(event.target.value)}
+                      >
+                        <option value="">Automatic ({builtinModel?.visionAuto || "none found"})</option>
+                        <option value="none">None (no pictures)</option>
+                        {(builtinModel?.visionFiles ?? []).map((f) => (
+                          <option key={f.name} value={f.name}>
+                            {f.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <p className="settings-help">
+                    The model file that gives her vision (pictures and videos).
+                    It usually has 'mmproj' in its name - Automatic finds it
+                    for most models.
+                  </p>
                   <p className="settings-help">
                     Unload frees {onMac ? "the memory her model uses" : "her graphics memory"} (for a game, for example); she
                     can't answer until you load her model again. To use your own GGUF
@@ -2792,7 +2844,8 @@ export default function App() {
                     <span className="settings-path">{builtinModel?.folder || "her models folder"}</span>{" "}
                     and press Refresh list. Your own model runs with this {onMac ? "Mac" : "PC"}'s
                     settings{brain?.context ? ` (${brain.context.toLocaleString("en-US")} context)` : ""};
-                    a model too big for your {onMac ? "Mac's memory" : "graphics card"} will not load.
+                    a model too big for your {onMac ? "Mac's memory" : "graphics card"}
+                    will work poorly (slow, or may fail to start).
                   </p>
                   {builtinModel && builtinModel.catalog.length > 0 && (
                     <details className="model-catalog">
@@ -2894,12 +2947,12 @@ export default function App() {
                   (builtinModel.state === "loaded" || builtinModel.state === "loading") && (
                   <p className="settings-help" role="status">
                     {builtinModel.pictures
-                      ? `Pictures: yes - she can see pictures you attach${
+                      ? `Vision: yes - ${baseName(builtinModel.picturesFile) || "her vision file"}${
                         builtinModel.picturesWhere === "processor"
-                          ? " (read on the processor, to keep room on the graphics card)"
+                          ? " (read on the processor)"
                           : builtinModel.picturesWhere === "card"
                             ? (onMac ? " (read on the Apple chip)" : " (read on the graphics card)") : ""}.`
-                      : `Pictures: no - ${builtinModel.picturesNote || "she can't see pictures with this model"}.`}
+                      : `Vision: no - ${builtinModel.picturesNote || "she can't see pictures with this model"}.`}
                   </p>
                 )}
                 {builtinMode && builtinModel && !brain?.runner_missing ? null : (

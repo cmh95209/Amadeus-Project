@@ -87,6 +87,71 @@ def models_dir(cfg=None):
 
 _SPLIT_PART = re.compile(r"-(\d{5})-of-\d{5}\.gguf$")
 
+# The name parts that mark a GGUF as the picture-reading (vision) part of a
+# model, not a chat model (2026-11-11: "mmproj" was the only marker, so a
+# vision file NAMED AFTER ITS MODEL - "mmproj-Gemma4-12B-....gguf" - matched
+# nothing, and with two Gemma vision files in the folder even the "only
+# vision file" fallback never applied). A marker counts only as a WHOLE name
+# part, so a chat model called "envision" is never a vision file.
+_VISION_PARTS = ("mmproj", "vision", "clip", "projector")
+_VISION_MARKER = re.compile(
+    r"(?<![a-z0-9])(?:mmproj|mm-proj|vision|clip|projector)(?![a-z0-9])")
+# Quant/precision tags a vision file carries but its model need not ("...
+# -qat-mmproj-F16" vs "...-qat-UD-Q4_K_XL"): dropped before the names are
+# compared. "qat" is a name part, not a tag: it stays.
+_QUANT_START = re.compile(r"^(?:i?iq|q)\d{1,2}$")
+_QUANT_TAIL = re.compile(r"^(?:[a-z]{1,2}|\d+)$")
+_PRECISION = re.compile(r"^b?f\d+$")
+
+
+def _is_vision_name(name: str) -> bool:
+    """A .gguf whose name carries one of the vision markers as a whole part:
+    "mmproj-X", "X-mmproj-F16", "X.mmproj.gguf", "X-vision", "X-clip",
+    "mm-proj-X"."""
+    low = name.lower()
+    if low.endswith(".gguf"):
+        low = low[:-5]
+    return bool(_VISION_MARKER.search(low))
+
+
+def _match_parts(name: str) -> list:
+    """The name's parts for matching a model with its vision file:
+    lower-cased, minus the vision markers (the marker may be a prefix OR a
+    suffix) and minus the quant/precision tags:
+    "Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf" ->
+    ["gemma4", "12b", "qat", "uncensored", "hauhaucs", "balanced"]."""
+    parts = [p for p in re.split(r"[-_. ]", name.lower()) if p and p != "gguf"]
+    out, i = [], 0
+    while i < len(parts):
+        p = parts[i]
+        if p in _VISION_PARTS:
+            i += 1
+        elif p == "mm" and i + 1 < len(parts) and parts[i + 1] == "proj":
+            i += 2
+        elif _QUANT_START.match(p):
+            i += 1
+            while i < len(parts) and _QUANT_TAIL.match(parts[i]):
+                i += 1
+        elif _PRECISION.match(p):
+            i += 1
+        else:
+            out.append(p)
+            i += 1
+    return out
+
+
+def _match_score(vision: list, model: list) -> tuple:
+    """How well a vision file's remaining name matches the model's: the
+    shared start (the model name goes on in order after the marker), and at
+    a tie the file whose remaining name ends at the break (one that carries
+    extra parts after the model's name matches less well)."""
+    score = 0
+    for v, m in zip(vision, model):
+        if v != m:
+            break
+        score += 1
+    return (score, vision[:score] == vision)
+
 
 def _is_main_model(path: Path) -> bool:
     """A GGUF that is a chat model: not a speed-up (MTP) or vision file,
@@ -95,7 +160,7 @@ def _is_main_model(path: Path) -> bool:
     name = path.name.lower()
     split = _SPLIT_PART.search(name)
     return (name.endswith(".gguf") and not name.startswith("mtp-")
-            and "mmproj" not in name and (split is None or split.group(1) == "00001"))
+            and not _is_vision_name(name) and (split is None or split.group(1) == "00001"))
 
 
 # Settings -> "Get more models" (2026-10-18 - option B: links, no
@@ -202,18 +267,14 @@ VISION_FILES = {
 }
 
 
-def _vision_stem(path: Path) -> str:
-    """The name start a vision file shares with its model:
-    "gemma-4-12B-it-qat-mmproj-F16.gguf" -> "gemma-4-12b-it-qat"."""
-    return path.name.lower().split("mmproj")[0].rstrip("-_. ")
-
-
 def vision_file(model_file) -> str:
     """The vision file her model can see pictures with, or "" when there is
-    none: the installer's file for its own models; for a model the user added,
-    the vision file next to it whose name starts the same way (the longest
-    match), else the only vision file in the folder. A wrong one only means
-    the server starts again without it (builtin_server)."""
+    none: the installer's file for its own models; for a model the user
+    added, the vision file next to it whose name carries the model's name -
+    the marker part may sit in front of it ("mmproj-Gemma4-12B-...") or
+    behind it ("Gemma4-12B-...-mmproj-F16", "...-vision") - the best match
+    on the remaining name, else the only vision file in the folder. A wrong
+    one only means the server starts again without it (builtin_server)."""
     if not model_file:
         return ""
     model = Path(str(model_file))
@@ -222,14 +283,19 @@ def vision_file(model_file) -> str:
     if known and (folder / known).is_file():
         return str(folder / known)
     try:
-        found = [p for p in folder.iterdir()
-                 if p.is_file() and p.suffix.lower() == ".gguf" and "mmproj" in p.name.lower()]
+        found = [p for p in sorted(folder.iterdir(), key=lambda p: p.name.lower())
+                 if p.is_file() and p.suffix.lower() == ".gguf"
+                 and _is_vision_name(p.name)]
     except OSError:
         return ""
-    name = model.name.lower()
-    matching = [p for p in found if _vision_stem(p) and name.startswith(_vision_stem(p))]
-    if matching:
-        return str(max(matching, key=lambda p: len(_vision_stem(p))))
+    model_parts = _match_parts(model.name)
+    best = None
+    for p in found:
+        score = _match_score(_match_parts(p.name), model_parts)
+        if best is None or score > best[0]:
+            best = (score, p)
+    if best is not None and best[0][0] > 0:
+        return str(best[1])
     return str(found[0]) if len(found) == 1 else ""
 
 
@@ -244,6 +310,95 @@ def resolve_model_file(file: str):
     if candidate.parent != folder.resolve() or not candidate.is_file() or not _is_main_model(candidate):
         return None
     return candidate
+
+
+def vision_files(cfg=None) -> list:
+    """Every vision-file GGUF in the models folder (Settings' Vision file
+    picker), as [{"file", "name", "gb"}], by name - like list_models()."""
+    folder = models_dir(cfg)
+    if folder is None or not folder.is_dir():
+        return []
+    out = []
+    for path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
+        if path.is_file() and path.suffix.lower() == ".gguf" and _is_vision_name(path.name):
+            try:
+                gb = round(path.stat().st_size / 1024 ** 3, 1)
+            except OSError:
+                continue
+            out.append({"file": str(path), "name": path.name, "gb": gb})
+    return out
+
+
+def resolve_vision_file(file: str):
+    """The full path of `file` (a name or a path) when it is a vision-file
+    GGUF directly inside the models folder, else None - Settings can never
+    point the server at a file anywhere else on the PC (the same rule as a
+    chat-model file)."""
+    folder = models_dir()
+    if folder is None or not file:
+        return None
+    candidate = (folder / Path(str(file)).name).resolve()
+    if (candidate.parent != folder.resolve() or not candidate.is_file()
+            or not _is_vision_name(candidate.name)):
+        return None
+    return candidate
+
+
+def vision_for(model_file: str, cfg=None) -> str:
+    """The vision file loaded WITH `model_file` on the next Load: the one
+    picked in Settings (a file name, or "none" = the user chose no
+    pictures), while it still exists; a saved file that is gone counts as
+    Automatic again. Else the auto-detected one next to the model ("" when
+    there is none)."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    chosen = str(cfg.get("selected_vision_file") or "")
+    if chosen == "none":
+        return ""
+    if chosen and os.path.isfile(chosen):
+        return chosen
+    return vision_file(model_file)
+
+
+def selected_vision_file(cfg=None) -> str:
+    """The vision file the model she loads (selected_file) runs with - the
+    picked one, or the auto-detected one ("" = no pictures)."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    return vision_for(selected_file(cfg), cfg)
+
+
+def vision_choice(cfg=None) -> str:
+    """What Settings' Vision file picker shows: "" = Automatic, "none" = the
+    user chose no pictures, else the picked file's name (a saved file that
+    is gone counts as Automatic again)."""
+    cfg = cfg if cfg is not None else (load_config() or {})
+    chosen = str(cfg.get("selected_vision_file") or "")
+    if chosen == "none":
+        return "none"
+    if chosen and os.path.isfile(chosen):
+        return os.path.basename(chosen)
+    return ""
+
+
+def save_selected_vision_file(path: str) -> None:
+    """Save the Vision file choice (kept like the chosen model file): '' =
+    Automatic (cleared again), 'none' = no pictures, else a vision-file GGUF
+    directly inside the models folder, kept by its full path. LookupError
+    when no built-in model is set up; ValueError for a file that is not a
+    vision file inside the folder."""
+    cfg = load_config()
+    if not cfg:
+        raise LookupError("No built-in model is set up on this install.")
+    cfg = dict(cfg)
+    if not path:
+        cfg.pop("selected_vision_file", None)
+    elif path == "none":
+        cfg["selected_vision_file"] = "none"
+    else:
+        target = resolve_vision_file(path)
+        if target is None:
+            raise ValueError(f"'{path}' is not a vision file in her models folder.")
+        cfg["selected_vision_file"] = str(target)
+    save_config(cfg)
 
 
 def selected_file(cfg=None) -> str:
@@ -295,8 +450,9 @@ def describe() -> dict:
         "model_missing": available and model_missing(),
         # llama.cpp itself is missing (vs. only the model file).
         "runner_missing": available and runner_missing(),
-        # Her vision file next to the model she loads (pictures, Phase 3).
-        "vision_file": os.path.basename(vision_file(selected_file(cfg))) if available else "",
+        # Her vision file with the model she loads (pictures, Phase 3):
+        # the picked one, or the auto-detected one next to it.
+        "vision_file": os.path.basename(selected_vision_file(cfg)) if available else "",
         "context": (cfg or {}).get("context") if available else None,
         # A Mac with an Apple chip: Settings says "memory", not "graphics card".
         "shared_memory": available and shared_memory(cfg),

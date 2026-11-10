@@ -105,6 +105,9 @@ class MacServerTests(_ServerBase):
         self.assertEqual(self.s._place(self.cfg, False), "processor")
 
     def test_a_crash_says_memory_not_graphics_memory(self):
+        # The "not enough memory" words are only for a SHOWN cause (her log
+        # reports a memory shortage), and on a Mac they say "memory" (the
+        # chip's shared memory), never "graphics memory".
         class Dead:
             returncode = 3
 
@@ -112,10 +115,18 @@ class MacServerTests(_ServerBase):
                 return 3
         self.s._proc = Dead()
         self.s._set("loaded", "x.gguf")
+        self.s.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.s.LOG_FILE.write_text("out of memory: cannot allocate\n", encoding="utf-8")
         self.s._poll()
         self.assertEqual(self.s.status()["state"], "failed")
         self.assertIn("not enough memory", self.s.status()["error"])
         self.assertNotIn("graphics", self.s.status()["error"])
+        # No evidence in the log: no guessed cause.
+        self.s.LOG_FILE.write_text("some other error\n", encoding="utf-8")
+        self.s._proc = Dead()
+        self.s._set("loaded", "x.gguf")
+        self.s._poll()
+        self.assertNotIn("not enough", self.s.status()["error"])
 
 
 class MacLauncherTests(unittest.TestCase):

@@ -941,6 +941,8 @@ export type BuiltinModel = {
   /** Where her pictures are read: "card" / "processor" ("" without pictures). */
   picturesWhere: string;
   picturesNote: string;
+  /** The vision file name she runs with ("" without pictures). */
+  picturesFile: string;
   /** Every chat-model GGUF in her models folder. */
   files: { file: string; name: string; gb: number }[];
   /** The file she loads by default (the one last loaded fine). */
@@ -948,6 +950,12 @@ export type BuiltinModel = {
   folder: string;
   /** "Get more models": the official files, with browser download links. */
   catalog: CatalogModel[];
+  /** The vision-file GGUFs in her models folder (Settings' Vision file picker). */
+  visionFiles: { file: string; name: string; gb: number }[];
+  /** The saved Vision file choice: "" = Automatic, "none" = no pictures, else a file name. */
+  visionChoice: string;
+  /** What Automatic finds for the model she loads ("" = none found). */
+  visionAuto: string;
 };
 
 export type CatalogModel = {
@@ -971,6 +979,7 @@ function toBuiltinModel(data: Record<string, unknown>): BuiltinModel {
     pictures: server.pictures === true,
     picturesWhere: typeof server.pictures_where === "string" ? server.pictures_where : "",
     picturesNote: typeof server.pictures_note === "string" ? server.pictures_note : "",
+    picturesFile: typeof server.pictures_file === "string" ? server.pictures_file : "",
     files: Array.isArray(data.files)
       ? (data.files as Record<string, unknown>[])
           .filter((f) => typeof f.name === "string")
@@ -978,6 +987,13 @@ function toBuiltinModel(data: Record<string, unknown>): BuiltinModel {
       : [],
     selected: typeof data.selected === "string" ? data.selected : "",
     folder: typeof data.folder === "string" ? data.folder : "",
+    visionFiles: Array.isArray(data.vision_files)
+      ? (data.vision_files as Record<string, unknown>[])
+          .filter((f) => typeof f.name === "string")
+          .map((f) => ({ file: String(f.file ?? ""), name: String(f.name), gb: Number(f.gb) || 0 }))
+      : [],
+    visionChoice: typeof data.vision_choice === "string" ? data.vision_choice : "",
+    visionAuto: typeof data.vision_auto === "string" ? data.vision_auto : "",
     catalog: Array.isArray(data.catalog)
       ? (data.catalog as Record<string, unknown>[])
           .filter((m) => typeof m.file === "string" && typeof m.url === "string")
@@ -1002,6 +1018,18 @@ export async function getBuiltinModel(): Promise<BuiltinModel> {
 export async function loadBuiltinModel(name: string): Promise<void> {
   await parseResponse(
     await fetch(`${API_BASE}/builtinModel/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: name }),
+    })
+  );
+}
+
+/** Save the Vision file choice: "" = Automatic, "none" = no pictures, else a
+ *  file name from /builtinModel's visionFiles. She runs with it on the next Load. */
+export async function setBuiltinModelVision(name: string): Promise<void> {
+  await parseResponse(
+    await fetch(`${API_BASE}/builtinModel/vision`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file: name }),
