@@ -147,27 +147,52 @@ class RoundingTests(unittest.TestCase):
         self.assertEqual(tiers.round_gb(8.5), 9)
 
 
-# (vendor, vram, ram) -> expected (offered, reason or model, voice, build, warning)
+# (vendor, vram, ram, driver, cuda, cc) -> expected (offered, reason or model,
+# voice, build, warning). cuda = the CUDA version nvidia-smi's header
+# reports (the newest CUDA the driver can run; "" = unreadable). cc = the
+# card's compute capability ("7.5"; "" = unknown) - a build holding native
+# code for it runs even on a driver whose CUDA version is below the build's.
 GRID = [
-    (None, 0, 32, (False, "no_card")),
-    ("nvidia", 1, 32, (False, "no_card")),
-    ("nvidia", 5, 32, (False, "small_card")),
-    ("nvidia", 6, 32, (True, "12B-Q3", "cpu", "cuda-13.4", True)),
-    ("nvidia", 6, 8, (False, "low_ram")),
-    ("nvidia", 8, 16, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
-    ("nvidia", 10, 32, (True, "12B-Q3", "cpu", "cuda-13.4", False)),
-    ("nvidia", 8, 8, (False, "low_ram")),
-    ("nvidia", 12, 32, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 12, 8, (True, "12B", "cuda", "cuda-13.4", False)),   # voice on the card: no memory rule
-    ("nvidia", 16, 8, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 24, 32, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 32, 32, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("nvidia", 48, 64, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("amd", 16, 8, (False, "low_ram")),
-    ("amd", 32, 32, (True, "12B", "cpu", "vulkan", False)),
-    ("intel", 12, 16, (True, "12B", "cpu", "vulkan", False)),
-    ("nvidia-unverified", 24, 32, (True, "12B", "cpu", "vulkan", False)),
-    ("nvidia", 8, -1, (True, "12B-Q3", "cpu", "cuda-13.4", False)),   # memory unknown
+    (None, 0, 32, "", "", "", (False, "no_card")),
+    ("nvidia", 1, 32, "610.88", "", "", (False, "no_card")),
+    ("nvidia", 5, 32, "610.88", "", "", (False, "small_card")),
+    ("nvidia", 6, 32, "610.88", "", "", (True, "12B-Q3", "cpu", "cuda-12.4", True)),
+    ("nvidia", 6, 8, "610.88", "", "", (False, "low_ram")),
+    ("nvidia", 8, 16, "610.88", "", "", (True, "12B-Q3", "cpu", "cuda-12.4", False)),
+    ("nvidia", 10, 32, "610.88", "", "", (True, "12B-Q3", "cpu", "cuda-12.4", False)),
+    ("nvidia", 8, 8, "610.88", "", "", (False, "low_ram")),
+    ("nvidia", 12, 32, "610.88", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    ("nvidia", 12, 8, "610.88", "", "", (True, "12B", "cuda", "cuda-12.4", False)),   # voice on the card: no memory rule
+    ("nvidia", 16, 8, "610.88", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    ("nvidia", 24, 32, "610.88", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    ("nvidia", 32, 32, "610.88", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    ("nvidia", 48, 64, "610.88", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    # The tester's PC (2026-11-10): a driver 58x reports CUDA 13.0, which
+    # cannot run a 13.4 build - the newest build it CAN run is 12.4.
+    ("nvidia", 6, 32, "581.0", "13.0", "", (True, "12B-Q3", "cpu", "cuda-12.4", True)),
+    ("nvidia", 12, 32, "581.0", "13.0", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    # A driver that reports CUDA 13.4 runs the 13.4 build.
+    ("nvidia", 32, 32, "580.10", "13.4", "", (True, "12B", "cuda", "cuda-13.4", False)),
+    # CUDA version unreadable: the driver-number rule, minus the 13.x builds.
+    ("nvidia", 32, 32, "590.0", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    ("nvidia", 32, 32, "576.02", "", "", (True, "12B", "cuda", "cuda-12.4", False)),
+    ("nvidia", 32, 32, "516.94", "", "", (True, "12B", "cuda", "vulkan", False)),
+    ("nvidia", 32, 32, "", "", "", (True, "12B", "cuda", "vulkan", False)),
+    ("amd", 16, 8, "", "", "", (False, "low_ram")),
+    ("amd", 32, 32, "", "", "", (True, "12B", "cpu", "vulkan", False)),
+    ("intel", 12, 16, "", "", "", (True, "12B", "cpu", "vulkan", False)),
+    ("nvidia-unverified", 24, 32, "", "", "", (True, "12B", "cpu", "vulkan", False)),
+    ("nvidia", 8, -1, "610.88", "", "", (True, "12B-Q3", "cpu", "cuda-12.4", False)),   # memory unknown
+    # CUDA minor-version compatibility via the build's NATIVE code (the 13.4
+    # build holds native sm_86/sm_89/sm_120/sm_121 code; 12.4 holds
+    # sm_50..sm_90). A build runs when the card's generation is in its list
+    # even if the driver's CUDA version is below the build's.
+    ("nvidia", 32, 32, "610.88", "13.3", "12.0", (True, "12B", "cuda", "cuda-13.4", False)),   # RTX 5090: 13.3 < 13.4 but sm_120 is native in 13.4
+    ("nvidia", 6, 32, "581.0", "13.0", "7.5", (True, "12B-Q3", "cpu", "cuda-12.4", True)),     # RTX 2060: sm_75 not native in 13.4, 13.0 >= 12.4
+    ("nvidia", 12, 32, "581.0", "13.0", "8.6", (True, "12B", "cuda", "cuda-13.4", False)),     # RTX 3060: sm_86 is native in 13.4
+    ("nvidia", 32, 32, "580.10", "13.3", "", (True, "12B", "cuda", "cuda-12.4", False)),       # unknown generation: only the driver's CUDA decides
+    ("nvidia", 32, 32, "580.10", "13.4", "7.5", (True, "12B", "cuda", "cuda-13.4", False)),    # driver CUDA >= build: native list not needed
+    ("nvidia", 32, 32, "610.88", "12.4", "7.5", (True, "12B", "cuda", "cuda-12.4", False)),    # 12.4 native for sm_75, 13.4 is not
 ]
 
 
@@ -179,9 +204,9 @@ def _summary(choice):
 
 class PythonRuleTests(unittest.TestCase):
     def test_grid(self):
-        for vendor, vram, ram, expected in GRID:
-            with self.subTest(vendor=vendor, vram=vram, ram=ram):
-                self.assertEqual(_summary(tiers.choose(TABLE, vendor, vram, ram, "610.88")), expected)
+        for vendor, vram, ram, driver, cuda, cc, expected in GRID:
+            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver, cuda=cuda, cc=cc):
+                self.assertEqual(_summary(tiers.choose(TABLE, vendor, vram, ram, driver, cuda, cc)), expected)
 
     def test_offered_choice_carries_tier_settings(self):
         c = tiers.choose(TABLE, "nvidia", 32, 32, "610.88")
@@ -191,8 +216,32 @@ class PythonRuleTests(unittest.TestCase):
 
 class BuildTests(unittest.TestCase):
     def test_build_follows_the_nvidia_driver(self):
-        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88"), "cuda-13.4")
-        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "580.10"), "cuda-13.4")
+        # The CUDA version the driver supports decides first (nvidia-smi's
+        # header): a build is only used when the driver runs its CUDA version
+        # OR the build holds native code for the card's generation.
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "581.0", None, "13.0"), "cuda-12.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "580.10", None, "13.4"), "cuda-13.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88", None, "13.4"), "cuda-13.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88", None, "13.3"), "cuda-12.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "576.02", None, "13.4"), "cuda-12.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "516.94", None, "13.4"), "vulkan")
+        # Native code: a build compiled for the card's generation runs on a
+        # driver whose CUDA version is below the build's (minor-version
+        # compatibility; the native lists are measured from the b11400
+        # archives - see the tier table's native_cc).
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88", None, "13.3", "12.0"), "cuda-13.4")   # RTX 5090
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88", None, "13.3", "12.1"), "cuda-13.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "581.0", None, "13.0", "8.6"), "cuda-13.4")     # RTX 3060
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "581.0", None, "13.0", "8.9"), "cuda-13.4")     # RTX 4060
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "581.0", None, "13.0", "7.5"), "cuda-12.4")     # RTX 2060: not in 13.4's native list
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "581.0", None, "13.0", "9.0"), "cuda-12.4")     # sm_90 not in 13.4's native list
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "580.10", None, "13.4", "7.5"), "cuda-13.4")    # driver CUDA >= build: native list not needed
+        # A card whose generation we cannot read is never "native".
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88", None, "13.3", ""), "cuda-12.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88", None, "13.3", "99.9"), "cuda-12.4")
+        # CUDA version unreadable: the driver-number rule stays, minus 13.x.
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "610.88"), "cuda-12.4")
+        self.assertEqual(tiers.pick_build(TABLE, "nvidia", "590.0"), "cuda-12.4")
         self.assertEqual(tiers.pick_build(TABLE, "nvidia", "576.02"), "cuda-12.4")
         self.assertEqual(tiers.pick_build(TABLE, "nvidia", "516.94"), "vulkan")
         self.assertEqual(tiers.pick_build(TABLE, "nvidia", ""), "vulkan")
@@ -214,6 +263,22 @@ class BuildTests(unittest.TestCase):
                         self.assertTrue(f["name"].endswith("-x64.zip"))
                     self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")
                     self.assertGreater(f["bytes"], 0)
+
+    def test_native_cc_lists_are_the_measured_b11400_sets(self):
+        # Measured from the official b11400 archives (2026-11-10): the CUDA
+        # 13.4 builds hold native sm_86/sm_89/sm_120/sm_121 code (no PTX),
+        # the Windows CUDA 12.4 build sm_50..sm_90 (SASS + PTX), and the
+        # Linux CUDA 12.8 build sm_120 only.
+        win = TABLE["llama_cpp"]["builds"]
+        self.assertEqual(win["cuda-13.4"]["native_cc"], ["8.6", "8.9", "12.0", "12.1"])
+        self.assertEqual(win["cuda-12.4"]["native_cc"], ["5.0", "6.1", "7.0", "7.5", "8.0", "9.0"])
+        lin = TABLE["linux"]["builds"]
+        self.assertEqual(lin["cuda-13.4"]["native_cc"], ["8.6", "8.9", "12.0", "12.1"])
+        self.assertEqual(lin["cuda-12.8"]["native_cc"], ["12.0"])
+        for builds in (win, lin):
+            for name, b in builds.items():
+                if not name.startswith("cuda-"):
+                    self.assertNotIn("native_cc", b)   # vulkan / metal: no CUDA code
 
     def test_download_size_counts_everything(self):
         m = TABLE["models"]["12B"]
@@ -244,9 +309,12 @@ class PowerShellAgreesTests(unittest.TestCase):
                           (16, 8), (24, 32), (32, 32), (48, 64)]:
             with self.subTest(vram=vram, ram=ram):
                 hw = self.run_check(vram, ram)
-                vendor = hw["card"]["vendor"] if hw["card"] else None
-                driver = hw["card"]["driver"] if hw["card"] else ""
-                expected = tiers.choose(TABLE, vendor, vram, ram, driver)
+                card = hw["card"] or {}
+                vendor = card.get("vendor")
+                driver = card.get("driver", "")
+                cuda = card.get("cuda", "")
+                cc = card.get("cc", "")
+                expected = tiers.choose(TABLE, vendor, vram, ram, driver, cuda, cc)
                 self.assertEqual(_summary(hw["choice"]), _summary(expected))
                 if expected["offered"]:
                     self.assertEqual(hw["choice"]["tier"], expected["tier"])
@@ -432,7 +500,8 @@ class LinuxTableCopyTests(unittest.TestCase):
         rows = [line.split() for line in self.sh["LINUX_BUILDS"].splitlines()]
         expected = []
         for name, b in TABLE["linux"]["builds"].items():
-            row = [name, str(b.get("min_nvidia_driver", 0))]
+            row = [name, str(b.get("min_nvidia_driver", 0)),
+                   ",".join(b.get("native_cc") or []) or "-"]
             for f in b["files"]:
                 row += [f["name"], str(f["bytes"]), f["sha256"]]
             expected.append(row)
@@ -483,29 +552,41 @@ class LinuxDecisionTests(unittest.TestCase):
         self.assertEqual(tiers.pick_build(TABLE, "nvidia", "575.64"), "cuda-12.4")   # Windows unchanged
 
 
-LINUX_GRID = [   # (vendor, vram, ram, driver, x64) -> summary
-    (None, 0, 32, "", True, (False, "no_card")),
-    ("nvidia-nodriver", 0, 32, "", True, (False, "nvidia_no_driver")),
-    ("nvidia", 16, 32, "610.88", False, (False, "not_x64")),
-    ("nvidia", 5, 32, "610.88", True, (False, "small_card")),
-    ("nvidia", 6, 32, "610.88", True, (True, "12B-Q3", "cpu", "cuda-13.4", True)),
-    ("nvidia", 8, 8, "610.88", True, (False, "low_ram")),
-    ("nvidia", 12, 8, "575.64", True, (True, "12B", "cuda", "cuda-12.8", False)),
-    ("nvidia", 16, 32, "570.0", True, (True, "12B", "cuda", "cuda-12.8", False)),
-    ("nvidia", 24, 32, "550.120", True, (True, "12B", "cuda", "vulkan", False)),
-    ("nvidia", 32, 64, "580.10", True, (True, "12B", "cuda", "cuda-13.4", False)),
-    ("amd", 16, 8, "", True, (False, "low_ram")),
-    ("amd", 16, 32, "", True, (True, "12B", "cpu", "vulkan", False)),
-    ("intel", 12, 16, "", True, (True, "12B", "cpu", "vulkan", False)),
-    ("amd", 8, -1, "", True, (True, "12B-Q3", "cpu", "vulkan", False)),   # memory unknown
+LINUX_GRID = [   # (vendor, vram, ram, driver, x64, cuda, cc) -> summary
+    (None, 0, 32, "", True, "", "", (False, "no_card")),
+    ("nvidia-nodriver", 0, 32, "", True, "", "", (False, "nvidia_no_driver")),
+    ("nvidia", 16, 32, "610.88", False, "", "", (False, "not_x64")),
+    ("nvidia", 5, 32, "610.88", True, "", "", (False, "small_card")),
+    ("nvidia", 6, 32, "610.88", True, "", "", (True, "12B-Q3", "cpu", "cuda-12.8", True)),
+    ("nvidia", 8, 8, "610.88", True, "", "", (False, "low_ram")),
+    ("nvidia", 12, 8, "575.64", True, "", "", (True, "12B", "cuda", "cuda-12.8", False)),
+    ("nvidia", 16, 32, "570.0", True, "", "", (True, "12B", "cuda", "cuda-12.8", False)),
+    ("nvidia", 24, 32, "550.120", True, "", "", (True, "12B", "cuda", "vulkan", False)),
+    # The CUDA version the driver reports decides first (2026-11-10).
+    ("nvidia", 32, 64, "580.10", True, "13.4", "", (True, "12B", "cuda", "cuda-13.4", False)),
+    ("nvidia", 32, 64, "581.0", True, "13.0", "", (True, "12B", "cuda", "cuda-12.8", False)),
+    # CUDA version unreadable: the driver-number rule, minus the 13.x builds.
+    ("nvidia", 32, 64, "580.10", True, "", "", (True, "12B", "cuda", "cuda-12.8", False)),
+    ("nvidia", 32, 64, "590.0", True, "", "", (True, "12B", "cuda", "cuda-12.8", False)),
+    ("amd", 16, 8, "", True, "", "", (False, "low_ram")),
+    ("amd", 16, 32, "", True, "", "", (True, "12B", "cpu", "vulkan", False)),
+    ("intel", 12, 16, "", True, "", "", (True, "12B", "cpu", "vulkan", False)),
+    ("amd", 8, -1, "", True, "", "", (True, "12B-Q3", "cpu", "vulkan", False)),   # memory unknown
+    # CUDA minor-version compatibility via the builds' NATIVE code (13.4:
+    # sm_86/sm_89/sm_120/sm_121; 12.8: sm_120 only - measured from the
+    # b11400 archives).
+    ("nvidia", 32, 64, "610.88", True, "13.3", "12.0", (True, "12B", "cuda", "cuda-13.4", False)),   # RTX 5090: 13.3 < 13.4 but sm_120 is native in both CUDA builds
+    ("nvidia", 6, 32, "581.0", True, "13.0", "7.5", (True, "12B-Q3", "cpu", "cuda-12.8", True)),     # RTX 2060: sm_75 is native in neither build, 13.0 >= 12.8
+    ("nvidia", 12, 32, "581.0", True, "13.0", "8.6", (True, "12B", "cuda", "cuda-13.4", False)),     # RTX 3060: sm_86 is native in 13.4
+    ("nvidia", 32, 64, "610.88", True, "13.3", "", (True, "12B", "cuda", "cuda-12.8", False)),       # unknown generation: only the driver's CUDA decides
 ]
 
 
 class LinuxPythonRuleTests(unittest.TestCase):
     def test_grid(self):
-        for vendor, vram, ram, driver, x64, expected in LINUX_GRID:
-            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver):
-                self.assertEqual(_summary(tiers.choose_linux(TABLE, vendor, vram, ram, driver, x64)), expected)
+        for vendor, vram, ram, driver, x64, cuda, cc, expected in LINUX_GRID:
+            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver, cuda=cuda, cc=cc):
+                self.assertEqual(_summary(tiers.choose_linux(TABLE, vendor, vram, ram, driver, x64, cuda, cc)), expected)
 
     def test_download_counts_both_nvidia_archives(self):
         b = TABLE["linux"]["builds"]["cuda-13.4"]
@@ -524,19 +605,22 @@ class LinuxShellAgreesTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         script = tmp / "install_linux.sh"
         script.write_bytes(_LINUX_INSTALLER.read_bytes().replace(b"\r\n", b"\n"))
-        for vendor, vram, ram, driver, x64, _ in LINUX_GRID:
+        for vendor, vram, ram, driver, x64, _cuda, cc, _ in LINUX_GRID:
             if not x64:
                 continue        # the processor type is read from the PC (not pretendable)
-            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver):
+            with self.subTest(vendor=vendor, vram=vram, ram=ram, driver=driver, cc=cc):
                 args = [_BASH, str(script), str(tmp / "inst"), "--hardware-check-only", "--json",
                         "--simulate-gpu", vendor or "none", "--simulate-vram-gb", str(vram),
                         "--simulate-ram-gb", str(ram)]
                 if driver:
                     args += ["--simulate-driver", driver]
+                if cc:
+                    args += ["--simulate-cc", cc]
                 out = subprocess.run(args, capture_output=True, text=True, timeout=60)
                 self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
                 hw = json.loads(out.stdout.strip().splitlines()[-1])
-                expected = tiers.choose_linux(TABLE, vendor, vram, ram, driver, True)
+                expected = tiers.choose_linux(TABLE, vendor, vram, ram, driver, True,
+                                              hw.get("cuda", ""), hw.get("cc", ""))
                 self.assertEqual(hw["choice"], expected)
                 self.assertFalse((tmp / "inst").exists())      # installs nothing
                 if expected["offered"]:

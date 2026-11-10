@@ -279,11 +279,15 @@ class SyntaxTests(_Base):
 
 
 class ScreenTests(_Base):
-    def screens(self, answers, gpu="nvidia", vram=16, ram=32, driver="610.88", extra=()):
+    def screens(self, answers, gpu="nvidia", vram=16, ram=32, driver="610.88", cuda="", cc="", extra=()):
         args = [_BASH, str(self.script), _posix(self.inst), "--llm-screens-only",
                 "--simulate-gpu", gpu, "--simulate-vram-gb", str(vram), "--simulate-ram-gb", str(ram)]
         if driver:
             args += ["--simulate-driver", driver]
+        if cuda:
+            args += ["--simulate-cuda", cuda]
+        if cc:
+            args += ["--simulate-cc", cc]
         return subprocess.run(args + list(extra), input="\n".join(answers) + "\n",
                               capture_output=True, text=True, timeout=120)
 
@@ -297,17 +301,20 @@ class ScreenTests(_Base):
         return json.loads(self.settings_path().read_text(encoding="utf-8"))
 
     def test_nvidia_card_gets_cuda_and_voice_on_the_card(self):
+        # (A pretend card reports no CUDA version and no generation, so no
+        # 13.x build is picked: the newest build whose driver number passes
+        # is the 12.8 one.)
         out = self.screens(["A", "Y"], vram=16)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("STEP 0: How should Amadeus think?", out.stdout)
         c = self.choice()
         self.assertEqual((c["mode"], c["model"], c["tier"], c["build"], c["voice_device"]),
-                         ("builtin", "12B", "16-23", "cuda-13.4", "cuda"))
+                         ("builtin", "12B", "16-23", "cuda-12.8", "cuda"))
         s = self.settings()
         self.assertEqual((s["mode"], s["model"], s["tier"], s["context"], s["kv_cache"], s["voice_device"]),
                          ("builtin", "12B", "16-23", 32768, "f16", "cuda"))
         self.assertEqual(s["model_label"], "Gemma 4 12B (QAT)")
-        self.assertEqual((s["port"], s["gpu_layers"], s["build"]), (8091, 999, "cuda-13.4"))
+        self.assertEqual((s["port"], s["gpu_layers"], s["build"]), (8091, 999, "cuda-12.8"))
         self.assertFalse(s["model_ok"])
         self.assertFalse(s["server_ok"])
         self.assertTrue(s["simulated"])
@@ -320,6 +327,31 @@ class ScreenTests(_Base):
         self.screens(["N", "A", "Y"], vram=12, driver="550.120")
         self.assertEqual(self.settings()["build"], "vulkan")
         self.assertEqual(self.settings()["voice_device"], "cuda")   # the voice still uses the card
+
+    def test_the_cuda_version_the_driver_reports_decides(self):
+        # nvidia-smi's header says which CUDA version the driver can run: a
+        # CUDA 13.4 build runs only when the driver reports 13.4 (2026-11-10:
+        # a driver 58x reported CUDA 13.0 and the 13.4 build crashed it).
+        self.screens(["A", "Y"], vram=32, driver="580.10", cuda="13.4")
+        self.assertEqual(self.settings()["build"], "cuda-13.4")
+        self.screens(["A", "Y"], vram=32, driver="581.0", cuda="13.0")
+        self.assertEqual(self.settings()["build"], "cuda-12.8")
+        # The CUDA version unreadable: the driver-number rule, minus 13.x.
+        self.screens(["A", "Y"], vram=32, driver="590.0")
+        self.assertEqual(self.settings()["build"], "cuda-12.8")
+        self.screens(["A", "Y"], vram=32, driver="516.94")
+        self.assertEqual(self.settings()["build"], "vulkan")
+
+    def test_native_code_for_the_card_allows_a_newer_build(self):
+        # The card's generation is in the build's native list: the build
+        # runs even when the driver's CUDA version is below the build's
+        # (CUDA minor-version compatibility, 2026-11-10).
+        self.screens(["A", "Y"], vram=32, driver="610.88", cuda="13.3", cc="12.0")
+        self.assertEqual(self.settings()["build"], "cuda-13.4")    # RTX 5090: sm_120 is native in both CUDA builds
+        self.screens(["A", "Y"], vram=32, driver="581.0", cuda="13.0", cc="8.6")
+        self.assertEqual(self.settings()["build"], "cuda-13.4")    # RTX 3060: sm_86 is native in 13.4
+        self.screens(["A", "Y"], vram=32, driver="581.0", cuda="13.0", cc="7.5")
+        self.assertEqual(self.settings()["build"], "cuda-12.8")    # RTX 2060: sm_75 is in neither build's list, 13.0 >= 12.8
 
     def test_amd_card_gets_vulkan_and_voice_on_the_processor(self):
         out = self.screens(["A", "Y"], gpu="amd", vram=16, driver="")
@@ -364,7 +396,9 @@ class ScreenTests(_Base):
         self.screens(["N", "B"], vram=24)
         self.assertEqual(self.choice()["mode"], "custom")
         s = self.settings()   # llama.cpp stays ready for a GGUF of the user's own
-        self.assertEqual((s["mode"], s["model"], s["tier"], s["build"]), ("custom", "12B", "24-plus", "cuda-13.4"))
+        # (a pretend card reports no CUDA version or generation, so the
+        # driver-number rule minus 13.x gives the 12.8 build)
+        self.assertEqual((s["mode"], s["model"], s["tier"], s["build"]), ("custom", "12B", "24-plus", "cuda-12.8"))
 
     def test_kept_builtin_choice_keeps_its_voice_device(self):
         self.screens(["A", "Y"], vram=12)
@@ -396,7 +430,9 @@ class ScreenTests(_Base):
     def test_bad_test_options_are_refused(self):
         for args in (["--simulate-gpu", "radeon"], ["--simulate-vram-gb", "lots"],
                      ["--simulate-ram-gb", "-5"], ["--simulate-driver", "x1"],
-                     ["--simulate-driver", "5;rm"], ["--branch", "x;y"], ["--nonsense"]):
+                     ["--simulate-driver", "5;rm"], ["--simulate-cuda", "x1"],
+                     ["--simulate-cuda", "13;rm"], ["--simulate-cc", "x1"],
+                      ["--simulate-cc", "12;rm"], ["--branch", "x;y"], ["--nonsense"]):
             with self.subTest(args=args):
                 out = subprocess.run([_BASH, str(self.script), *args, "--hardware-check-only"],
                                      capture_output=True, text=True, timeout=60)
@@ -449,7 +485,7 @@ class _FunctionBase(_Base):
             f"INSTALL_DIR='{_posix(self.inst)}'",
             f"INSTALL_LOG='{_posix(self.log)}'",
             "PROJ=\"$INSTALL_DIR/Amadeus-Project\"",
-            "SKIP_LLM_DOWNLOAD=0; INSTALLER_VERSION=v1.1; SIM_GPU=''; SIM_VRAM_GB=-1; SIM_RAM_GB=-1; SIM_DRIVER=''",
+            "SKIP_LLM_DOWNLOAD=0; INSTALLER_VERSION=v1.1; SIM_GPU=''; SIM_VRAM_GB=-1; SIM_RAM_GB=-1; SIM_DRIVER=''; SIM_CUDA=''; SIM_CC=''",
             "log() { printf '%s\\n' \"$1\"; printf '%s\\n' \"$1\" >> \"$INSTALL_LOG\"; }",
             "step() { printf 'STEP %s: %s\\n' \"$1\" \"$2\"; }",
             "die() { printf 'DIE %s\\n' \"$1\"; exit 1; }",
@@ -472,13 +508,14 @@ class LlamaBuildTests(_FunctionBase):
     """llama.cpp's Linux archives, served by a tiny local web server."""
 
     def serve(self, builds):
-        """builds: {build: (min_driver, {file name: bytes})} -> a LINUX_BUILDS table."""
+        """builds: {build: (min_driver, {file name: bytes})} -> a LINUX_BUILDS table
+        (the native_cc column is "-": these stand-in builds carry no CUDA code)."""
         files = {name: data for _, named in builds.values() for name, data in named.items()}
         server = _Files(files)
         self.addCleanup(server.close)
         rows = []
         for build, (need, named) in builds.items():
-            rows.append(" ".join([build, str(need)] +
+            rows.append(" ".join([build, str(need), "-"] +
                                  [f"{n} {len(d)} {_sha(d)}" for n, d in named.items()]))
         setup = ("LINUX_BUILDS='" + "\n".join(rows) + "'\n"
                  f"llama_url() {{ printf '%s/%s' '{server.base}' \"$1\"; }}")
@@ -597,6 +634,48 @@ class PickBuildTests(_FunctionBase):
             self.assertEqual(got[driver], tiers.pick_build(table, "nvidia", driver, table["linux"]["builds"]),
                              driver)
         self.assertEqual(got["amd"], "vulkan")
+
+    def test_cuda_version_the_driver_reports(self):
+        # pick_build vendor driver cuda: a build is used only when the driver
+        # runs its CUDA version (nvidia-smi's header line).
+        out = self.run_bash("printf 'C=581/13.0=%s\\n' \"$(pick_build nvidia 581.0 13.0)\"; "
+                            "printf 'C=580/13.4=%s\\n' \"$(pick_build nvidia 580.10 13.4)\"; "
+                            "printf 'C=576/13.4=%s\\n' \"$(pick_build nvidia 576.02 13.4)\"; "
+                            "printf 'C=516/13.4=%s\\n' \"$(pick_build nvidia 516.94 13.4)\"; "
+                            "printf 'C=garbage=%s\\n' \"$(pick_build nvidia 581.0 not-a-version)\"")
+        got = dict(l[2:].rsplit("=", 1) for l in out.stdout.splitlines() if l.startswith("C="))
+        tiers = _load_tiers()
+        table = tiers.load_table()
+        builds = table["linux"]["builds"]
+        self.assertEqual(got["581/13.0"], tiers.pick_build(table, "nvidia", "581.0", builds, "13.0"))
+        self.assertEqual(got["581/13.0"], "cuda-12.8")
+        self.assertEqual(got["580/13.4"], "cuda-13.4")
+        self.assertEqual(got["576/13.4"], "cuda-12.8")
+        self.assertEqual(got["516/13.4"], "vulkan")
+        # An unreadable/garbled CUDA version falls back to the driver-number
+        # rule (no 13.x build), exactly like a missing one.
+        self.assertEqual(got["garbage"], tiers.pick_build(table, "nvidia", "581.0", builds, "not-a-version"))
+        self.assertEqual(got["garbage"], "cuda-12.8")
+
+    def test_native_generation_allows_a_newer_build(self):
+        # pick_build vendor driver cuda cc: a build holding native code for
+        # the card's generation runs even on a driver whose CUDA version is
+        # below the build's (CUDA minor-version compatibility).
+        out = self.run_bash("printf 'N=610/13.3/12.0=%s\\n' \"$(pick_build nvidia 610.88 13.3 12.0)\"; "
+                            "printf 'N=581/13.0/8.6=%s\\n' \"$(pick_build nvidia 581.0 13.0 8.6)\"; "
+                            "printf 'N=581/13.0/7.5=%s\\n' \"$(pick_build nvidia 581.0 13.0 7.5)\"; "
+                            "printf 'N=610/13.3/=%s\\n' \"$(pick_build nvidia 610.88 13.3 '')\"")
+        got = dict(l[2:].rsplit("=", 1) for l in out.stdout.splitlines() if l.startswith("N="))
+        tiers = _load_tiers()
+        table = tiers.load_table()
+        builds = table["linux"]["builds"]
+        self.assertEqual(got["610/13.3/12.0"], tiers.pick_build(table, "nvidia", "610.88", builds, "13.3", "12.0"))
+        self.assertEqual(got["610/13.3/12.0"], "cuda-13.4")    # RTX 5090: sm_120 native in both CUDA builds
+        self.assertEqual(got["581/13.0/8.6"], tiers.pick_build(table, "nvidia", "581.0", builds, "13.0", "8.6"))
+        self.assertEqual(got["581/13.0/8.6"], "cuda-13.4")     # RTX 3060: sm_86 native in 13.4
+        self.assertEqual(got["581/13.0/7.5"], tiers.pick_build(table, "nvidia", "581.0", builds, "13.0", "7.5"))
+        self.assertEqual(got["581/13.0/7.5"], "cuda-12.8")     # RTX 2060: sm_75 in neither build's list
+        self.assertEqual(got["610/13.3/"], "cuda-12.8")        # a generation we cannot read is never "native"
 
 
 class MenuTests(_FunctionBase):

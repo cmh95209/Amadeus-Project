@@ -217,10 +217,13 @@ def _poll() -> None:
         code = _proc.returncode
         _proc = None
         if _state["state"] in ("loading", "loaded"):
-            _set("failed", _state["file"],
-                 f"her model stopped (exit {code}) - often not enough "
-                 f"{'memory' if builtin_llm.shared_memory() else 'graphics memory'}. "
-                 f"Details: {LOG_FILE}\n" + _log_tail())
+            if _driver_error_in_log():
+                _set("failed", _state["file"], driver_error_message())
+            else:
+                _set("failed", _state["file"],
+                     f"her model stopped (exit {code}) - often not enough "
+                     f"{'memory' if builtin_llm.shared_memory() else 'graphics memory'}. "
+                     f"Details: {LOG_FILE}\n" + _log_tail())
 
 
 def _log_tail(lines: int = 6) -> str:
@@ -229,6 +232,31 @@ def _log_tail(lines: int = 6) -> str:
     except OSError:
         return ""
     return "\n".join(t for t in text[-lines:] if t.strip())
+
+
+# A CUDA build the driver cannot run (the driver is too old for the build's
+# CUDA version) dies at first GPU use with one of these lines. No amount of
+# retrying helps, and "often not enough graphics memory" would be a lie.
+DRIVER_ERROR_LINES = (
+    "PTX was compiled with an unsupported toolchain",
+    "CUDA driver version is insufficient",
+)
+
+
+def _driver_error_in_log() -> bool:
+    """Did her log report a driver that is too old for the CUDA build?"""
+    try:
+        low = LOG_FILE.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return any(line.lower() in low for line in DRIVER_ERROR_LINES)
+
+
+def driver_error_message() -> str:
+    return ("her helper program (llama.cpp, the NVIDIA version) needs a newer "
+            "NVIDIA graphics driver. Update the driver (the NVIDIA app or "
+            f"nvidia.com) and press Load again - or run the installer again, "
+            f"which picks a version your driver can run. Details: {LOG_FILE}")
 
 
 def _port_taken(port: int, wait_s: float = 3.0) -> bool:
@@ -366,6 +394,14 @@ def _watch_loading(proc, target, port, log, started=None, memory_before=None,
     try:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
+                if _driver_error_in_log():
+                    # The driver is too old for the CUDA build: no retry can
+                    # help, so the chain ends here with the driver message.
+                    with _lock:
+                        if _proc is proc:
+                            _proc = None
+                            _set("failed", target, driver_error_message())
+                    return
                 again = None
                 while retries and again is None:
                     step = retries.pop(0)

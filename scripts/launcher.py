@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import signal
 import socket
@@ -394,7 +395,10 @@ def apply_simulated_vram(cfg: dict, vram_gb: int) -> dict | None:
         choice = llm_tiers.choose_mac(table, True, vram_gb)
     else:
         vendor = "nvidia" if str(cfg.get("build", "")).startswith("cuda") else "amd"
-        choice = llm_tiers.choose(table, vendor, vram_gb, -1, "999")
+        # A pretend PC whose driver is new enough to run ANY build (the test
+        # option must show the settings of a real modern card, so the driver
+        # number AND the CUDA version are both faked big).
+        choice = llm_tiers.choose(table, vendor, vram_gb, -1, "999", "99")
     if not choice["offered"]:
         return None
     model = table["models"][choice["model"]]
@@ -1336,6 +1340,221 @@ def preflight(conda: str, npm: str) -> None:
         raise RuntimeError(problem)
     if env_suffix():
         note(f"  Envs    : this install's own (suffix '{env_suffix()}')")
+    # The PC this install runs on (2026-11-10): a few lines for the log so a
+    # problem report can say exactly what the PC has. Every probe below is
+    # best effort with a short timeout - they must never stop or noticeably
+    # slow the start.
+    try:
+        refresh_install_log()
+        for line in pc_block_lines():
+            note(line)
+    except Exception:
+        note("  (the PC check could not run - it never stops the start)")
+
+
+# The installer's own log (in the install folder, the project folder's
+# parent) is copied into the app's logs folder on start, so it stays with
+# her other logs. The copy is refreshed when the installer's log is newer
+# or the copy is missing; a problem here never stops the start.
+def refresh_install_log() -> None:
+    try:
+        # (read PROJECT_ROOT here, not LOG_DIR, so the two always agree)
+        project = PROJECT_ROOT
+        install_root = project.parent
+        copy = project / "logs" / "install_log.txt"
+        src = None
+        for name in ("install_log.txt", "install_linux.log", "install_macos.log"):
+            cand = install_root / name
+            if cand.is_file():
+                src = cand
+                break
+        if src is None:
+            return
+        if copy.is_file():
+            try:
+                if src.stat().st_mtime <= copy.stat().st_mtime:
+                    return
+            except OSError:
+                pass
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, copy)
+        note(f"  Install log: {src.name} from the install folder -> logs/install_log.txt")
+    except Exception:
+        pass
+
+
+def _pc_os() -> str:
+    """The operating system, best effort."""
+    try:
+        import platform
+        if sys.platform == "win32":
+            name, ver, _ = platform.win32_ver()
+            return f"{name} {ver}"
+        if sys.platform == "darwin":
+            return f"macOS {platform.mac_ver()[0]}"
+        try:
+            for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+                if line.startswith("PRETTY_NAME="):
+                    return line.split("=", 1)[1].strip().strip('"')
+        except OSError:
+            pass
+        return platform.system() + " " + platform.release()
+    except Exception:
+        return "unknown"
+
+
+def _pc_cpu() -> str:
+    """The processor, best effort."""
+    try:
+        if sys.platform == "win32":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+                name, _ = winreg.QueryValueEx(k, "ProcessorNameString")
+            return " ".join(str(name).split())
+        if sys.platform == "darwin":
+            import platform
+            chip = platform.machine()
+            kind = "Apple chip" if chip == "arm64" else "Intel chip"
+            return f"{chip} ({kind})"
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _pc_ram_gb() -> int | None:
+    """Normal memory in whole GB, None when unreadable."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MEMSTAT(ctypes.Structure):
+                _fields_ = (("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong))
+            m = _MEMSTAT()
+            m.dwLength = ctypes.sizeof(_MEMSTAT)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return int(m.ullTotalPhys // 2 ** 30)
+        if sys.platform == "darwin":
+            out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                 capture_output=True, text=True, timeout=2)
+            return int(out.stdout.strip()) // 2 ** 30
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // (1024 * 1024)
+    except Exception:
+        pass
+    return None
+
+
+def _pc_graphics() -> str:
+    """The graphics card, best effort: for NVIDIA via nvidia-smi (name,
+    memory, driver and the newest CUDA version the driver can run), for
+    everything else the OS' own record of the display adapter(s)."""
+    try:
+        if sys.platform == "darwin":
+            chip = subprocess.run(["sysctl", "-n", "hw.model"],
+                                  capture_output=True, text=True, timeout=2).stdout.strip()
+            if chip:
+                return f"{chip} (Apple graphics - shared memory)"
+            return "unknown"
+        nvidia = shutil.which("nvidia-smi")
+        if nvidia:
+            # Two short probes in parallel (both under the 3 s total budget):
+            # the card's facts, and the header with the CUDA version.
+            results: dict[str, str] = {}
+
+            def probe(key: str, cmd: list[str]) -> None:
+                try:
+                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                    results[key] = out.stdout
+                except Exception:
+                    pass
+
+            q = threading.Thread(target=probe,
+                                 args=("q", [nvidia, "--query-gpu=name,memory.total,driver_version",
+                                             "--format=csv,noheader,nounits"]))
+            h = threading.Thread(target=probe, args=("h", [nvidia]))
+            q.start()
+            h.start()
+            q.join(2.5)
+            h.join(2.5)
+            line = next((l for l in results.get("q", "").splitlines() if l.strip()), "")
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3 and parts[1].isdigit():
+                hdr = results.get("h", "")
+                m = re.search(r"CUDA UMD Version:\s*(\d+\.\d+)", hdr) \
+                    or re.search(r"CUDA Version:\s*(\d+\.\d+)", hdr)
+                bits = [parts[0], f"{int(parts[1]) // 1024} GB", f"driver {parts[2]}"]
+                if m:
+                    bits.append("CUDA " + m.group(1))
+                return ", ".join(bits)
+    except Exception:
+        pass
+    try:
+        if sys.platform == "win32":
+            import winreg
+            names = []
+            class_key = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, class_key) as class_h:
+                for k in winreg.EnumKeys(class_h):
+                    if not re.fullmatch(r"[0-9]{4}", k):
+                        continue
+                    try:
+                        with winreg.OpenKey(class_h, k) as sk:
+                            desc, _ = winreg.QueryValueEx(sk, "DriverDesc")
+                            try:
+                                drv, _ = winreg.QueryValueEx(sk, "DriverVersion")
+                                names.append(f"{desc} (driver {drv})")
+                            except OSError:
+                                names.append(str(desc))
+                    except OSError:
+                        continue
+            return "; ".join(names) if names else "unknown"
+    except Exception:
+        pass
+    try:
+        if sys.platform == "linux":
+            out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=2).stdout
+            lines = [l.strip() for l in out.splitlines() if re.search(r"VGA|3D|Display", l, re.I)]
+            return "; ".join(l.split(":", 2)[-1].strip() for l in lines[:3]) or "unknown"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _pc_llama_cpp() -> str:
+    """The built-in llama.cpp the installer set up (a READ-ONLY look at her
+    settings; 'not installed' otherwise)."""
+    try:
+        cfg = load_builtin_config()
+        if cfg:
+            rel = str(cfg.get("llama_release") or "")
+            build = str(cfg.get("build") or "")
+            if rel or build:
+                return rel + (f" ({build})" if build else "") if rel else build
+    except Exception:
+        pass
+    return "not installed"
+
+
+def pc_block_lines() -> list[str]:
+    """The PC this install runs on - a few lines for logs/launcher.log
+    (so a problem report can say exactly what the PC has)."""
+    lines = ["  PC"]
+    lines.append(f"    OS        : {_pc_os()}")
+    lines.append(f"    CPU       : {_pc_cpu()}")
+    ram = _pc_ram_gb()
+    lines.append(f"    Memory    : {ram} GB" if ram is not None else "    Memory    : unknown")
+    lines.append(f"    Graphics  : {_pc_graphics()}")
+    lines.append(f"    llama.cpp : {_pc_llama_cpp()}")
+    return lines
 
 
 # Browsers that accept Chromium's flags (matched on the executable's base

@@ -35,6 +35,9 @@
 #     --simulate-gpu nvidia|nvidia-nodriver|amd|intel|none   pretend the card
 #     --simulate-vram-gb N      pretend the card has N GB of graphics memory
 #     --simulate-driver X.Y     pretend the NVIDIA driver version
+#     --simulate-cuda X.Y       pretend nvidia-smi reports CUDA version X.Y
+#     --simulate-cc X.Y         pretend the card's generation (compute
+#                               capability, e.g. 7.5 or 12.0)
 #     --simulate-ram-gb N       pretend this PC has N GB of memory
 #     --hardware-check-only [--json]   only show which model this PC gets
 #     --skip-llm-download       all screens, but no model downloads
@@ -98,7 +101,22 @@ die() {
     if [ -n "${2:-}" ]; then
         printf '%s%s%s\n' "$C_DIM" "$2" "$C_RESET" | tee_to
     fi
+    copy_install_log
     exit 1
+}
+
+# The installer's log, copied into the app's logs folder so it stays with the
+# other logs (the launcher keeps the copy up to date on start). A problem
+# copying it never stops the install.
+copy_install_log() {
+    [ -n "${INSTALL_LOG:-}" ] || return 0
+    [ -f "$INSTALL_LOG" ] || return 0
+    [ -n "${PROJ:-}" ] && [ -d "$PROJ" ] || return 0
+    mkdir -p "$PROJ/logs" 2>/dev/null || return 0
+    if cp -f "$INSTALL_LOG" "$PROJ/logs/install_log.txt" 2>/dev/null; then
+        log "  Install log also copied to: $PROJ/logs/install_log.txt"
+    fi
+    return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -174,6 +192,8 @@ SIM_RAM_GB=-1
 SIM_GPU=""
 SIM_VRAM_GB=-1
 SIM_DRIVER=""
+SIM_CUDA=""
+SIM_CC=""
 HARDWARE_CHECK_ONLY=0
 JSON_OUT=0
 SKIP_LLM_DOWNLOAD=0
@@ -185,6 +205,8 @@ while [ $# -gt 0 ]; do
         --simulate-gpu)    SIM_GPU="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         --simulate-vram-gb) SIM_VRAM_GB="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         --simulate-driver) SIM_DRIVER="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        --simulate-cuda)   SIM_CUDA="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+        --simulate-cc)     SIM_CC="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
         --hardware-check-only) HARDWARE_CHECK_ONLY=1; shift ;;
         --json)            JSON_OUT=1; shift ;;
         --skip-llm-download) SKIP_LLM_DOWNLOAD=1; shift ;;
@@ -199,6 +221,10 @@ case "$SIM_VRAM_GB" in -1|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]) ;; *) printf 'Invali
 case "$SIM_GPU" in ''|nvidia|nvidia-nodriver|amd|intel|none) ;; *) printf 'Invalid --simulate-gpu: %s (nvidia, nvidia-nodriver, amd, intel or none)\n' "$SIM_GPU"; exit 2 ;; esac
 case "$SIM_DRIVER" in ''|[0-9]*) ;; *) printf 'Invalid --simulate-driver: %s\n' "$SIM_DRIVER"; exit 2 ;; esac
 case "$SIM_DRIVER" in *[!0-9.]*) printf 'Invalid --simulate-driver: %s\n' "$SIM_DRIVER"; exit 2 ;; esac
+case "$SIM_CUDA" in ''|[0-9]*) ;; *) printf 'Invalid --simulate-cuda: %s\n' "$SIM_CUDA"; exit 2 ;; esac
+case "$SIM_CUDA" in *[!0-9.]*) printf 'Invalid --simulate-cuda: %s\n' "$SIM_CUDA"; exit 2 ;; esac
+case "$SIM_CC" in ''|[0-9]*) ;; *) printf 'Invalid --simulate-cc: %s\n' "$SIM_CC"; exit 2 ;; esac
+case "$SIM_CC" in *[!0-9.]*) printf 'Invalid --simulate-cc: %s\n' "$SIM_CC"; exit 2 ;; esac
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Amadeus}"
 case "$INSTALL_DIR" in /*) ;; *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;; esac
 # Everything below works from the home folder: started inside some git
@@ -315,10 +341,12 @@ LLAMA_RELEASE="b11400"
 DEDICATED_CARD_MIN_GB=2
 VOICE_ON_CPU_MIN_RAM_GB=16
 DISK_HEADROOM_GB=2
-# build min_nvidia_driver (0 = any card), then name bytes sha256 per file
-LINUX_BUILDS="cuda-13.4 580 llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz 152449896 2e297621e5def65c0f19aa8ee6967b98ee83b359bad7ca000ae3c7908507c81d cudart-llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz 440236489 9d040ad50388ca51b4c43dedf6410b5a37ed01634e14ca9a6cc7131749807b39
-cuda-12.8 570 llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz 171555633 7cc6d9ae0ff51ab91f2ca5a0d57bd79f018258c5c2892947548dc2dc146be101 cudart-llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz 594377603 efd4bd1e61d0100e837e129ece19fc0953bd519fde77702ca31a6d54f6afd63a
-vulkan 0 llama-b11400-bin-ubuntu-vulkan-x64.tar.gz 31617783 5912d3ac7eb6ac4a46503309c701213c2a162a71e57a137c6c7f1d295f08a7c4"
+# build min_nvidia_driver (0 = any card) native_cc (comma-joined card
+# generations the build contains native code for; "-" = none; measured from
+# the official b11400 archives), then name bytes sha256 per file
+LINUX_BUILDS="cuda-13.4 580 8.6,8.9,12.0,12.1 llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz 152449896 2e297621e5def65c0f19aa8ee6967b98ee83b359bad7ca000ae3c7908507c81d cudart-llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz 440236489 9d040ad50388ca51b4c43dedf6410b5a37ed01634e14ca9a6cc7131749807b39
+cuda-12.8 570 12.0 llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz 171555633 7cc6d9ae0ff51ab91f2ca5a0d57bd79f018258c5c2892947548dc2dc146be101 cudart-llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz 594377603 efd4bd1e61d0100e837e129ece19fc0953bd519fde77702ca31a6d54f6afd63a
+vulkan 0 - llama-b11400-bin-ubuntu-vulkan-x64.tar.gz 31617783 5912d3ac7eb6ac4a46503309c701213c2a162a71e57a137c6c7f1d295f08a7c4"
 # id min_vram_gb model context kv_cache voice_device history_default vram_need_gb warning(1/0)
 PC_TIERS="6-7 6 12B-Q3 16384 q4_0 cpu 6000 4.6 1
 8-11 8 12B-Q3 16384 q4_0 cpu 6000 6.5 0
@@ -347,7 +375,7 @@ model_field() {
 
 # The files of one llama.cpp build, one "name bytes sha256" per line.
 build_files() {
-    printf '%s\n' "$LINUX_BUILDS" | awk -v b="$1" '$1 == b { for (i = 3; i + 2 <= NF; i += 3) print $i, $(i + 1), $(i + 2) }'
+    printf '%s\n' "$LINUX_BUILDS" | awk -v b="$1" '$1 == b { for (i = 4; i + 2 <= NF; i += 3) print $i, $(i + 1), $(i + 2) }'
 }
 
 # Nearest whole GB, halves rounded up (the same rule as the Windows
@@ -363,19 +391,97 @@ driver_major() {
     case "$head" in ''|*[!0-9]*) echo 0 ;; *) echo "$head" ;; esac
 }
 
-# Which llama.cpp build: the newest CUDA build the NVIDIA driver can run,
-# else Vulkan (AMD / Intel / an old NVIDIA driver) - the same rule as
-# scripts/llm_tiers.py pick_build with the table's "linux" builds.
+# "13.4" >= "13.0" (versions like nvidia-smi's "CUDA Version" line; a missing
+# minor counts as 0). 0 = yes, 1 = no / unreadable.
+ver_ge() {
+    local a1="${1%%.*}" a2="${1#*.}" b1="${2%%.*}" b2="${2#*.}"
+    [ "$a2" = "$1" ] && a2=0
+    [ "$b2" = "$2" ] && b2=0
+    case "$a1$b1" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$a1" -gt "$b1" ]; then return 0; fi
+    if [ "$a1" -lt "$b1" ]; then return 1; fi
+    [ "$a2" -ge "$b2" ]
+}
+
+# "13.4" > "13.0" (same shape as ver_ge). 0 = yes, 1 = no / unreadable.
+ver_gt() {
+    local a1="${1%%.*}" a2="${1#*.}" b1="${2%%.*}" b2="${2#*.}"
+    [ "$a2" = "$1" ] && a2=0
+    [ "$b2" = "$2" ] && b2=0
+    case "$a1$b1" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$a1" -gt "$b1" ]; then return 0; fi
+    if [ "$a1" -lt "$b1" ]; then return 1; fi
+    [ "$a2" -gt "$b2" ]
+}
+
+# The newest CUDA version this PC's NVIDIA driver can run: nvidia-smi's own
+# header line "CUDA Version: X.Y" (newer drivers write "CUDA UMD Version").
+# That is what decides whether a CUDA 13.x build will actually run (a CUDA
+# 13.4 build on a driver that stops at 13.0 crashes at first GPU use).
+# Prints "" when nvidia-smi is missing or can't say (then the driver number
+# alone decides - and no 13.x build is picked).
+detect_cuda_version() {
+    local out v=""
+    command -v nvidia-smi >/dev/null 2>&1 || return 0
+    out="$(nvidia-smi 2>/dev/null | head -3)"
+    v="$(printf '%s\n' "$out" | sed -n 's/.*CUDA UMD Version[[:space:]]*:[[:space:]]*\([0-9]\{1,2\}\.[0-9]\{1,2\}\).*/\1/p' | head -1)"
+    [ -n "$v" ] || v="$(printf '%s\n' "$out" | sed -n 's/.*CUDA Version[[:space:]]*:[[:space:]]*\([0-9]\{1,2\}\.[0-9]\{1,2\}\).*/\1/p' | head -1)"
+    printf '%s' "$v"
+}
+
+# 0 = the word is in the comma-joined list ("x" in ",x,y,") - used for the
+# builds' native_cc lists.
+in_comma_list() {
+    case "$1" in *",$2,"*) return 0 ;; esac
+    return 1
+}
+
+# Which llama.cpp build: the newest CUDA build this NVIDIA driver can run.
+# A build is picked when it passes the driver-number check
+# (min_nvidia_driver) AND either: the driver reports a CUDA version at or
+# above the build's (the "CUDA Version" line of nvidia-smi's header), OR the
+# card's generation is in the build's native_cc list - the build then holds
+# native code for this card, and CUDA's minor-version compatibility lets the
+# driver's lower CUDA version run it (a card whose generation we don't know
+# is never treated as native). When the CUDA version can't be read, the
+# driver-number rule still applies, but 13.x builds are left out (a driver we
+# can't verify); else Vulkan (AMD / Intel / an old or unreadable NVIDIA
+# driver) - the same rule as scripts/llm_tiers.py pick_build with the table's
+# "linux" builds.
+# $1 vendor  $2 NVIDIA driver version  $3 CUDA version nvidia-smi reports
+# ("" = unreadable)  $4 the card's generation ("" = unknown)
 pick_build() {
-    local vendor="$1" major best="" best_need=-1 b need rest
+    local vendor="$1" major best="" b need native bver hv cc
     if [ "$vendor" = "nvidia" ]; then
         major="$(driver_major "$2")"
-        while read -r b need rest; do
+        hv="$(printf '%s' "${3:-}")"
+        case "$hv" in ''|*[!0-9.]*|*.*.*|*.|.|.*) hv="" ;; esac
+        cc="$(printf '%s' "${4:-}")"
+        case "$cc" in ''|[0-9]*.[0-9]*|[0-9]) ;; *) cc="" ;; esac
+        while read -r b need native rest; do
             [ -n "$b" ] || continue
-            if [ "$need" -gt 0 ] && [ "$major" -ge "$need" ] && [ "$need" -gt "$best_need" ]; then
-                best="$b"; best_need="$need"
+            case "$b" in cuda-*) ;; *) continue ;; esac
+            [ "$need" -gt 0 ] && [ "$major" -ge "$need" ] || continue
+            bver="${b#cuda-}"
+            if [ -n "$hv" ] && ver_ge "$hv" "$bver"; then
+                if [ -z "$best" ] || ver_gt "$bver" "${best#cuda-}"; then best="$b"; fi
+                continue
+            fi
+            if [ -n "$cc" ] && [ "$native" != "-" ] && in_comma_list ",$native," "$cc"; then
+                if [ -z "$best" ] || ver_gt "$bver" "${best#cuda-}"; then best="$b"; fi
             fi
         done <<< "$LINUX_BUILDS"
+        if [ -z "$hv" ]; then
+            # CUDA version unreadable: the old driver-number rule, minus 13.x.
+            while read -r b need native rest; do
+                [ -n "$b" ] || continue
+                case "$b" in cuda-13*) continue ;; cuda-*) ;; *) continue ;; esac
+                if [ "$need" -gt 0 ] && [ "$major" -ge "$need" ]; then
+                    bver="${b#cuda-}"
+                    if [ -z "$best" ] || ver_gt "$bver" "${best#cuda-}"; then best="$b"; fi
+                fi
+            done <<< "$LINUX_BUILDS"
+        fi
     fi
     echo "${best:-vulkan}"
 }
@@ -384,10 +490,12 @@ pick_build() {
 # choose_linux (the project's tests run both on the same inputs).
 # $1 vendor (nvidia / nvidia-nodriver / amd / intel / "")  $2 graphics GB
 # $3 memory GB (-1 = unknown)  $4 NVIDIA driver version  $5 x86_64 (1/0)
+# $6 CUDA version nvidia-smi reports ("" = unreadable)  $7 the card's
+# generation ("" = unknown)
 # Sets CH_OFFERED (1/0), CH_REASON, and when offered CH_TIER, CH_MODEL,
 # CH_CONTEXT, CH_KV, CH_VOICE, CH_HISTORY, CH_NEED, CH_WARN, CH_BUILD.
 pc_choose() {
-    local vendor="$1" vram="$2" ram="$3" driver="$4" x64="$5"
+    local vendor="$1" vram="$2" ram="$3" driver="$4" x64="$5" cuda="${6:-}" cc="${7:-}"
     local id min model ctx kv voice hist need warn
     CH_OFFERED=0; CH_REASON=""; CH_TIER=""; CH_MODEL=""; CH_CONTEXT=""; CH_KV=""
     CH_VOICE=""; CH_HISTORY=""; CH_NEED=""; CH_WARN=0; CH_BUILD=""
@@ -409,7 +517,7 @@ pc_choose() {
         CH_TIER=""; CH_MODEL=""; CH_CONTEXT=""; CH_KV=""; CH_VOICE=""; CH_HISTORY=""; CH_NEED=""; CH_WARN=0
         CH_REASON="low_ram"; return 0
     fi
-    CH_OFFERED=1; CH_BUILD="$(pick_build "$vendor" "$driver")"
+    CH_OFFERED=1; CH_BUILD="$(pick_build "$vendor" "$driver" "$cuda" "$cc")"
 }
 
 # Everything option A downloads (bytes): model + its vision file + llama.cpp.
@@ -428,14 +536,15 @@ free_disk_gb() {
 }
 
 # The biggest graphics card (sets CARD_VENDOR, CARD_NAME, CARD_VRAM_GB,
-# CARD_DRIVER, CARD_CAP). NVIDIA: nvidia-smi (exact memory, driver and
-# generation). AMD / Intel: the kernel's own record in /sys (amdgpu reports
-# the card's memory there). An NVIDIA card the kernel lists but nvidia-smi
-# cannot report has no NVIDIA driver: "nvidia-nodriver". Built-in graphics
-# (little or no memory of their own) count as no card.
+# CARD_DRIVER, CARD_CAP, CARD_CUDA). NVIDIA: nvidia-smi (exact memory,
+# driver, generation and the newest CUDA the driver can run). AMD / Intel:
+# the kernel's own record in /sys (amdgpu reports the card's memory there).
+# An NVIDIA card the kernel lists but nvidia-smi cannot report has no
+# NVIDIA driver: "nvidia-nodriver". Built-in graphics (little or no memory
+# of their own) count as no card.
 detect_card() {
     local out line name mem drv cap gb d vendor_id vendor bytes nv_seen=0
-    CARD_VENDOR=""; CARD_NAME=""; CARD_VRAM_GB=0; CARD_DRIVER=""; CARD_CAP=""
+    CARD_VENDOR=""; CARD_NAME=""; CARD_VRAM_GB=0; CARD_DRIVER=""; CARD_CAP=""; CARD_CUDA=""
     if command -v nvidia-smi >/dev/null 2>&1; then
         out="$(nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader,nounits 2>/dev/null)"
         # A driver too old for the compute_cap field answers with an error.
@@ -453,6 +562,10 @@ detect_card() {
                 case "$CARD_CAP" in [0-9]*.[0-9]*|[0-9]) ;; *) CARD_CAP="" ;; esac
             fi
         done <<< "$out"
+    fi
+    # The newest CUDA the driver can run (decides which CUDA build will run).
+    if [ "$CARD_VENDOR" = "nvidia" ] && [ -z "$CARD_CUDA" ]; then
+        CARD_CUDA="$(detect_cuda_version)"
     fi
     [ -n "$CARD_VENDOR" ] && return 0
     for d in /sys/class/drm/card*; do
@@ -495,17 +608,19 @@ hardware_check() {
     if [ -n "$SIM_GPU" ]; then
         HW_SIMULATED=1
         CARD_VENDOR="$SIM_GPU"; [ "$SIM_GPU" = "none" ] && CARD_VENDOR=""
-        CARD_NAME="(pretend ${SIM_GPU} card)"; CARD_VRAM_GB=0; CARD_DRIVER=""; CARD_CAP=""
+        CARD_NAME="(pretend ${SIM_GPU} card)"; CARD_VRAM_GB=0; CARD_DRIVER=""; CARD_CAP=""; CARD_CUDA=""
         if [ "$SIM_GPU" = "nvidia" ]; then CARD_DRIVER="610.88"; fi
     else
         detect_card
     fi
     if [ "$SIM_VRAM_GB" -ge 0 ] 2>/dev/null; then HW_SIMULATED=1; CARD_VRAM_GB="$SIM_VRAM_GB"; fi
     if [ -n "$SIM_DRIVER" ]; then HW_SIMULATED=1; CARD_DRIVER="$SIM_DRIVER"; fi
+    if [ -n "$SIM_CUDA" ]; then HW_SIMULATED=1; CARD_CUDA="$SIM_CUDA"; fi
+    if [ -n "$SIM_CC" ]; then HW_SIMULATED=1; CARD_CAP="$SIM_CC"; fi
     HW_RAM_GB="$(detect_ram_gb)"
     if [ "$SIM_RAM_GB" -ge 0 ] 2>/dev/null; then HW_SIMULATED=1; HW_RAM_GB="$SIM_RAM_GB"; fi
     HW_DISK_GB="$(free_disk_gb "$INSTALL_DIR")"
-    pc_choose "$CARD_VENDOR" "$CARD_VRAM_GB" "$HW_RAM_GB" "$CARD_DRIVER" "$HW_X64"
+    pc_choose "$CARD_VENDOR" "$CARD_VRAM_GB" "$HW_RAM_GB" "$CARD_DRIVER" "$HW_X64" "${CARD_CUDA:-}" "${CARD_CAP:-}"
     HW_DL_GB=0
     if [ "$CH_OFFERED" = 1 ]; then HW_DL_GB="$(bytes_to_gb_up "$(llm_download_bytes "$CH_MODEL" "$CH_BUILD")")"; fi
 }
@@ -521,7 +636,7 @@ build_label() {
 # Plain-language summary lines of a hardware check (screen + log).
 format_hardware_check() {
     if [ -n "$CARD_VENDOR" ]; then
-        log "  Graphics card : $CARD_NAME$([ "$CARD_VRAM_GB" -gt 0 ] 2>/dev/null && echo " - $CARD_VRAM_GB GB")$([ -n "$CARD_DRIVER" ] && echo ", driver $CARD_DRIVER")"
+        log "  Graphics card : $CARD_NAME$([ "$CARD_VRAM_GB" -gt 0 ] 2>/dev/null && echo " - $CARD_VRAM_GB GB")$([ -n "$CARD_DRIVER" ] && echo ", driver $CARD_DRIVER")$([ -n "${CARD_CUDA:-}" ] && echo ", CUDA $CARD_CUDA")$([ -n "$CARD_CAP" ] && echo ", generation $CARD_CAP")"
     else
         log "  Graphics card : none found (or built-in graphics only)"
     fi
@@ -554,9 +669,9 @@ hardware_json() {
     else
         choice="{\"offered\": false, \"reason\": \"$CH_REASON\"}"
     fi
-    printf '{"x64": %s, "vendor": %s, "card": %s, "vram_gb": %s, "driver": %s, "ram_gb": %s, "disk_free_gb": %s, "simulated": %s, "download_gb": %s, "choice": %s}\n' \
+    printf '{"x64": %s, "vendor": %s, "card": %s, "vram_gb": %s, "driver": %s, "cuda": %s, "cc": %s, "ram_gb": %s, "disk_free_gb": %s, "simulated": %s, "download_gb": %s, "choice": %s}\n' \
         "$(json_bool "$HW_X64")" "$(json_str "$CARD_VENDOR")" "$(json_str "$CARD_NAME")" "$CARD_VRAM_GB" \
-        "$(json_str "$CARD_DRIVER")" "$HW_RAM_GB" "$HW_DISK_GB" "$(json_bool "$HW_SIMULATED")" "$HW_DL_GB" "$choice"
+        "$(json_str "$CARD_DRIVER")" "$(json_str "${CARD_CUDA:-}")" "$(json_str "${CARD_CAP:-}")" "$HW_RAM_GB" "$HW_DISK_GB" "$(json_bool "$HW_SIMULATED")" "$HW_DL_GB" "$choice"
 }
 
 # A value from one of our flat JSON files (one "key": value per line - how
@@ -1314,12 +1429,14 @@ mkdir -p "$INSTALL_DIR"
 : > "$INSTALL_LOG"   # fresh log for this run
 
 if [ "$BRANCH" != "main" ] || [ "$SIM_RAM_GB" != "-1" ] || [ -n "$SIM_GPU" ] || [ "$SIM_VRAM_GB" != "-1" ] \
-        || [ -n "$SIM_DRIVER" ] || [ "$SKIP_LLM_DOWNLOAD" = 1 ]; then
+        || [ -n "$SIM_DRIVER" ] || [ -n "$SIM_CUDA" ] || [ -n "$SIM_CC" ] || [ "$SKIP_LLM_DOWNLOAD" = 1 ]; then
     log "TEST OPTIONS in use:"
     if [ "$BRANCH" != "main" ]; then log "  branch            : $BRANCH"; fi
     if [ -n "$SIM_GPU" ]; then log "  pretend card      : $SIM_GPU"; fi
     if [ "$SIM_VRAM_GB" != "-1" ]; then log "  pretend card mem. : $SIM_VRAM_GB GB"; fi
     if [ -n "$SIM_DRIVER" ]; then log "  pretend driver    : $SIM_DRIVER"; fi
+    if [ -n "$SIM_CUDA" ]; then log "  pretend CUDA      : $SIM_CUDA"; fi
+    if [ -n "$SIM_CC" ]; then log "  pretend generation: $SIM_CC"; fi
     if [ "$SIM_RAM_GB" != "-1" ]; then log "  pretend memory    : $SIM_RAM_GB GB"; fi
     if [ "$SKIP_LLM_DOWNLOAD" = 1 ]; then log "  no local-model downloads (screens + settings file only)"; fi
 fi
@@ -1793,7 +1910,7 @@ if [ "$HAS_NVIDIA" = 1 ]; then
     if [ -z "$CARD_CAP" ] || awk -v c="$CARD_CAP" -v m="$VOICE_MIN_COMPUTE_CAP" 'BEGIN { exit !(c + 0 >= m + 0) }'; then
         VOICE_BUILD="cuda"
     fi
-    log "  Graphics card: $CARD_NAME - $CARD_VRAM_GB GB, driver $CARD_DRIVER, generation ${CARD_CAP:-unknown}"
+    log "  Graphics card: $CARD_NAME - $CARD_VRAM_GB GB, driver $CARD_DRIVER$([ -n "${CARD_CUDA:-}" ] && echo ", CUDA $CARD_CUDA"), generation ${CARD_CAP:-unknown}"
 fi
 torch_probe='
 try:
@@ -2041,6 +2158,7 @@ if [ "$CHOICE_MODE" = "builtin" ]; then
     log "  instead (start_linux_no_model.sh; load her model later in Settings -> Connection)."
     log ""
     log "(Install log saved to: $INSTALL_LOG)"
+    copy_install_log
     printf '%s\n' "" | tee_to
     read -r -p "Press Enter to close this window" _ || true
     exit 0
@@ -2061,6 +2179,7 @@ if [ "$LLM_READY" = 1 ]; then
 fi
 log ""
 log "(Install log saved to: $INSTALL_LOG)"
+copy_install_log
 
 printf '%s\n' "" | tee_to
 read -r -p "Press Enter to close this window" _ || true

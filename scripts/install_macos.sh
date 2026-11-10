@@ -144,7 +144,22 @@ die() {
     if [ -n "${2:-}" ]; then
         printf '%s%s%s\n' "$C_DIM" "$2" "$C_RESET" | tee_to
     fi
+    copy_install_log
     exit 1
+}
+
+# The installer's log, copied into the app's logs folder so it stays with the
+# other logs (the launcher keeps the copy up to date on start). A problem
+# copying it never stops the install.
+copy_install_log() {
+    [ -n "${INSTALL_LOG:-}" ] || return 0
+    [ -f "$INSTALL_LOG" ] || return 0
+    [ -n "${PROJ:-}" ] && [ -d "$PROJ" ] || return 0
+    mkdir -p "$PROJ/logs" 2>/dev/null || return 0
+    if cp -f "$INSTALL_LOG" "$PROJ/logs/install_log.txt" 2>/dev/null; then
+        log "  Install log also copied to: $PROJ/logs/install_log.txt"
+    fi
+    return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -1890,6 +1905,7 @@ if [ "$CHOICE_MODE" = "builtin" ]; then
     log "  (load her model later in Settings -> Connection, or unload it there any time)."
     log ""
     log "(Install log saved to: $INSTALL_LOG)"
+    copy_install_log
     printf '%s\n' "" | tee_to
     read -r -p "Press Enter to close this window" _ || true
     exit 0
@@ -1912,6 +1928,7 @@ if [ "$LLM_READY" = 1 ]; then
 fi
 log ""
 log "(Install log saved to: $INSTALL_LOG)"
+copy_install_log
 
 printf '%s\n' "" | tee_to
 read -r -p "Press Enter to close this window" _ || true

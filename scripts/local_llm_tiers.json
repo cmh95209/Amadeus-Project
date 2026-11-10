@@ -1,6 +1,6 @@
 {
   "version": 5,
-  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it and loaded with the model so she can see pictures (2026-10-26: under 16 GB it runs on the processor; vram_need_gb includes the picture working space: +0.1 GB under 16 GB, +0.5 GB on 16 GB+).",
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it and loaded with the model so she can see pictures (2026-10-26: under 16 GB it runs on the processor; vram_need_gb includes the picture working space: +0.1 GB under 16 GB, +0.5 GB on 16 GB+). native_cc (per CUDA build) = the card compute capabilities for which that build contains native (SASS) machine code, measured from the official b11400 archives; a CUDA build may also be picked when the driver reports a lower CUDA version than the build needs, as long as the card's compute capability is in its native_cc list (CUDA minor-version compatibility).",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
   "disk_headroom_gb": 2,
@@ -29,6 +29,7 @@
     "builds": {
       "cuda-13.4": {
         "min_nvidia_driver": 580,
+        "native_cc": ["8.6", "8.9", "12.0", "12.1"],
         "files": [
           {"name": "llama-b11400-bin-win-cuda-13.4-x64.zip", "bytes": 153112447, "sha256": "872175bf23819d3a72a2bfc54aa21d750f0e020a586d1a6eed79cae585d1d23a"},
           {"name": "cudart-llama-bin-win-cuda-13.4-x64.zip", "bytes": 423535356, "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"}
@@ -36,6 +37,7 @@
       },
       "cuda-12.4": {
         "min_nvidia_driver": 525,
+        "native_cc": ["5.0", "6.1", "7.0", "7.5", "8.0", "9.0"],
         "files": [
           {"name": "llama-b11400-bin-win-cuda-12.4-x64.zip", "bytes": 264160281, "sha256": "b5c185b6b0a87c875a468ff920e20bfcdb82c0a9a7b219cd52c937d461f35d53"},
           {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}
@@ -66,10 +68,11 @@
     ]
   },
   "linux": {
-    "about": "Linux PCs (2026-11-08, MH: install_linux.sh v1.0). The PC tiers above apply (the same rules as Windows: chosen by the graphics card's memory; her voice on NVIDIA cards only). Only llama.cpp's builds differ: the Linux (ubuntu) builds of the same release, the newest CUDA build the NVIDIA driver can run (CUDA 13.x needs driver 580+, 12.8 needs 570+), else Vulkan (AMD / Intel / older NVIDIA drivers). An NVIDIA build is two archives: llama.cpp + NVIDIA's runtime files, unpacked into one folder. scripts/install_linux.sh carries an exact copy (between its LINUX TIER TABLE markers); tests/test_llm_tiers.py keeps the two equal.",
+    "about": "Linux PCs (2026-11-08, MH: install_linux.sh v1.0). The PC tiers above apply (the same rules as Windows: chosen by the graphics card's memory; her voice on NVIDIA cards only). Only llama.cpp's builds differ: the Linux (ubuntu) builds of the same release, the newest CUDA build the NVIDIA driver can run (CUDA 13.x needs driver 580+, 12.8 needs 570+; a build that contains native code for the card's compute capability - its native_cc list - may also run on a driver whose reported CUDA version is lower, CUDA minor-version compatibility), else Vulkan (AMD / Intel / older NVIDIA drivers). An NVIDIA build is two archives: llama.cpp + NVIDIA's runtime files, unpacked into one folder. scripts/install_linux.sh carries an exact copy (between its LINUX TIER TABLE markers); tests/test_llm_tiers.py keeps the two equal.",
     "builds": {
       "cuda-13.4": {
         "min_nvidia_driver": 580,
+        "native_cc": ["8.6", "8.9", "12.0", "12.1"],
         "files": [
           {"name": "llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz", "bytes": 152449896, "sha256": "2e297621e5def65c0f19aa8ee6967b98ee83b359bad7ca000ae3c7908507c81d"},
           {"name": "cudart-llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz", "bytes": 440236489, "sha256": "9d040ad50388ca51b4c43dedf6410b5a37ed01634e14ca9a6cc7131749807b39"}
@@ -77,6 +80,7 @@
       },
       "cuda-12.8": {
         "min_nvidia_driver": 570,
+        "native_cc": ["12.0"],
         "files": [
           {"name": "llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz", "bytes": 171555633, "sha256": "7cc6d9ae0ff51ab91f2ca5a0d57bd79f018258c5c2892947548dc2dc146be101"},
           {"name": "cudart-llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz", "bytes": 594377603, "sha256": "efd4bd1e61d0100e837e129ece19fc0953bd519fde77702ca31a6d54f6afd63a"}

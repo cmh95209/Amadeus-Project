@@ -41,13 +41,15 @@ from test_ceremony import _FreshAppTests  # noqa: E402
 
 # A stand-in for llama-server: answers /health with 503 ("loading") for a
 # moment, then 200; prints a line to its log. argv: port, delay, exit_code
-# (exit_code >= 0 = die at once with that code after printing).
+# (exit_code >= 0 = die at once with that code after printing), error_line
+# (optional: the line it prints instead of the graphics-memory one).
 _FAKE_SERVER = r'''
 import sys, time, http.server
 port, delay, die = int(sys.argv[1]), float(sys.argv[2]), int(sys.argv[3])
+error = sys.argv[4] if len(sys.argv) > 4 else "error: out of graphics memory"
 print("fake llama-server starting", flush=True)
 if die >= 0:
-    print("error: out of graphics memory", flush=True)
+    print(error, flush=True)
     sys.exit(die)
 start = time.time()
 class H(http.server.BaseHTTPRequestHandler):
@@ -86,8 +88,11 @@ class _ServerBase(unittest.TestCase):
         self.fake.write_text(_FAKE_SERVER, encoding="utf-8")
         self.models = self.tmp / "models"
 
-    def use_fake(self, delay=0.5, die=-1):
-        cmd = lambda cfg, model, **_kw: [sys.executable, str(self.fake), str(self.port), str(delay), str(die)]
+    def use_fake(self, delay=0.5, die=-1, error=None):
+        argv = [sys.executable, str(self.fake), str(self.port), str(delay), str(die)]
+        if error:
+            argv += [error]
+        cmd = lambda cfg, model, **_kw: argv
         p = patch.object(self.s, "server_command", side_effect=cmd)
         p.start()
         self.addCleanup(p.stop)
@@ -253,6 +258,44 @@ class LoadTests(_ServerBase):
                 patch.dict(os.environ, {"AMADEUS_LOAD_MODEL": "1"}):
             self.s.start_at_launch()
             load.assert_called_once()
+
+
+class DriverErrorTests(_ServerBase):
+    """A CUDA build the driver cannot run (driver too old for it) dies at
+    first GPU use with CUDA's own error lines. No amount of retrying helps,
+    and the message must say DRIVER - not 'not enough graphics memory'
+    (2026-11-10: the tester's RTX 2060 + driver 58x got cuda-13.4)."""
+
+    def test_driver_error_stops_retries_and_says_driver(self):
+        starts = []
+        argv = [sys.executable, str(self.fake), str(self.port), "0", "1",
+                "CUDA error: the provided PTX was compiled with an unsupported toolchain"]
+        cmd = lambda cfg, model, **_kw: (starts.append(1), argv)[1]
+        p = patch.object(self.s, "server_command", side_effect=cmd)
+        p.start()
+        self.addCleanup(p.stop)
+        self.s.load()
+        st = self.wait_for("failed")
+        self.assertIn("newer NVIDIA graphics driver", st["error"])
+        self.assertIn(str(self.s.LOG_FILE), st["error"])
+        self.assertNotIn("not enough", st["error"])
+        self.assertEqual(len(starts), 1)   # no retrying for a driver problem
+
+    def test_driver_error_second_signature(self):
+        self.use_fake(die=11,
+                      error="CUDA driver version is insufficient for the CUDA runtime version")
+        self.s.load()
+        st = self.wait_for("failed")
+        self.assertIn("newer NVIDIA graphics driver", st["error"])
+        self.assertNotIn("not enough", st["error"])
+
+    def test_crash_without_driver_error_keeps_the_old_message(self):
+        # "out of graphics memory" is NOT one of the driver signatures: the
+        # retry chain runs and the old message stands.
+        self.use_fake(die=1)
+        self.s.load()
+        st = self.wait_for("failed")
+        self.assertIn("not enough", st["error"])
 
 
 class RouteTests(_FreshAppTests):

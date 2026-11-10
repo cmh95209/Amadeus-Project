@@ -486,8 +486,22 @@ function Die($msg){
     Stop-BackgroundDownloads   # its ".part" files stay: the next run continues them
     Log "" "Red"; Log ("INSTALL STOPPED: " + $msg) "Red"
     Log ("Please open and send this file to your helper:  " + $LogPath) "Yellow"
+    Copy-InstallLogToProject (Join-Path $InstallDir "Amadeus-Project")
     Read-Host "Press Enter to close this window" | Out-Null
     exit 1
+}
+# The installer's log, copied into the app's logs folder so it stays with her
+# other logs (the launcher keeps the copy up to date on start). A problem
+# copying it never stops the install.
+function Copy-InstallLogToProject($proj){
+    if (-not $LogPath -or -not (Test-Path $LogPath)) { return }
+    if (-not $proj -or -not (Test-Path $proj)) { return }
+    try {
+        $logsDir = Join-Path $proj "logs"
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        Copy-Item -LiteralPath $LogPath -Destination (Join-Path $logsDir "install_log.txt") -Force
+        Log ("  Install log also copied to: " + (Join-Path $logsDir "install_log.txt"))
+    } catch { }
 }
 function Refresh-Path {
     $m = [Environment]::GetEnvironmentVariable("Path","Machine")
@@ -970,7 +984,7 @@ function Invoke-PipInEnv($name, $pipArgs, $label = "pip", $extraLog = ""){
 $TierTableJson = @'
 {
   "version": 5,
-  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it and loaded with the model so she can see pictures (2026-10-26: under 16 GB it runs on the processor; vram_need_gb includes the picture working space: +0.1 GB under 16 GB, +0.5 GB on 16 GB+).",
+  "about": "Built-in local model: which Gemma 4 model and settings each PC gets (v5, 2026-10-21: 12B QAT for 12 GB+, 12B Q3_K_M for 8-11 GB; 6-7 GB cards may choose the same 12B Q3_K_M after a NOTICE (part of it runs on the processor - slow); no built-in model under 6 GB - the smaller files did not sound like her; 2026-10-22: 12-15 GB cards run her voice on the card too - 12B 7.4 + voice 1.8 GiB measured). scripts/install_windows.ps1 carries an exact copy (between its TIER TABLE markers) because it runs before the project is downloaded; tests/test_llm_tiers.py keeps the two identical. history_default = the conversation memory she starts with (tokens; the context must hold it + about 10,000 for her character and reply). vram_need_gb = graphics memory the tier needs (model + conversation memory + working buffers, + about 2 GB when her voice runs on the card), used by the launcher's free-memory check. mmproj = the model's own vision file, downloaded next to it and loaded with the model so she can see pictures (2026-10-26: under 16 GB it runs on the processor; vram_need_gb includes the picture working space: +0.1 GB under 16 GB, +0.5 GB on 16 GB+). native_cc (per CUDA build) = the card compute capabilities for which that build contains native (SASS) machine code, measured from the official b11400 archives; a CUDA build may also be picked when the driver reports a lower CUDA version than the build needs, as long as the card's compute capability is in its native_cc list (CUDA minor-version compatibility).",
   "dedicated_card_min_gb": 2,
   "voice_on_cpu_min_ram_gb": 16,
   "disk_headroom_gb": 2,
@@ -999,6 +1013,7 @@ $TierTableJson = @'
     "builds": {
       "cuda-13.4": {
         "min_nvidia_driver": 580,
+        "native_cc": ["8.6", "8.9", "12.0", "12.1"],
         "files": [
           {"name": "llama-b11400-bin-win-cuda-13.4-x64.zip", "bytes": 153112447, "sha256": "872175bf23819d3a72a2bfc54aa21d750f0e020a586d1a6eed79cae585d1d23a"},
           {"name": "cudart-llama-bin-win-cuda-13.4-x64.zip", "bytes": 423535356, "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"}
@@ -1006,6 +1021,7 @@ $TierTableJson = @'
       },
       "cuda-12.4": {
         "min_nvidia_driver": 525,
+        "native_cc": ["5.0", "6.1", "7.0", "7.5", "8.0", "9.0"],
         "files": [
           {"name": "llama-b11400-bin-win-cuda-12.4-x64.zip", "bytes": 264160281, "sha256": "b5c185b6b0a87c875a468ff920e20bfcdb82c0a9a7b219cd52c937d461f35d53"},
           {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}
@@ -1036,10 +1052,11 @@ $TierTableJson = @'
     ]
   },
   "linux": {
-    "about": "Linux PCs (2026-11-08, MH: install_linux.sh v1.0). The PC tiers above apply (the same rules as Windows: chosen by the graphics card's memory; her voice on NVIDIA cards only). Only llama.cpp's builds differ: the Linux (ubuntu) builds of the same release, the newest CUDA build the NVIDIA driver can run (CUDA 13.x needs driver 580+, 12.8 needs 570+), else Vulkan (AMD / Intel / older NVIDIA drivers). An NVIDIA build is two archives: llama.cpp + NVIDIA's runtime files, unpacked into one folder. scripts/install_linux.sh carries an exact copy (between its LINUX TIER TABLE markers); tests/test_llm_tiers.py keeps the two equal.",
+    "about": "Linux PCs (2026-11-08, MH: install_linux.sh v1.0). The PC tiers above apply (the same rules as Windows: chosen by the graphics card's memory; her voice on NVIDIA cards only). Only llama.cpp's builds differ: the Linux (ubuntu) builds of the same release, the newest CUDA build the NVIDIA driver can run (CUDA 13.x needs driver 580+, 12.8 needs 570+; a build that contains native code for the card's compute capability - its native_cc list - may also run on a driver whose reported CUDA version is lower, CUDA minor-version compatibility), else Vulkan (AMD / Intel / older NVIDIA drivers). An NVIDIA build is two archives: llama.cpp + NVIDIA's runtime files, unpacked into one folder. scripts/install_linux.sh carries an exact copy (between its LINUX TIER TABLE markers); tests/test_llm_tiers.py keeps the two equal.",
     "builds": {
       "cuda-13.4": {
         "min_nvidia_driver": 580,
+        "native_cc": ["8.6", "8.9", "12.0", "12.1"],
         "files": [
           {"name": "llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz", "bytes": 152449896, "sha256": "2e297621e5def65c0f19aa8ee6967b98ee83b359bad7ca000ae3c7908507c81d"},
           {"name": "cudart-llama-b11400-bin-ubuntu-cuda-13.4-x64.tar.gz", "bytes": 440236489, "sha256": "9d040ad50388ca51b4c43dedf6410b5a37ed01634e14ca9a6cc7131749807b39"}
@@ -1047,6 +1064,7 @@ $TierTableJson = @'
       },
       "cuda-12.8": {
         "min_nvidia_driver": 570,
+        "native_cc": ["12.0"],
         "files": [
           {"name": "llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz", "bytes": 171555633, "sha256": "7cc6d9ae0ff51ab91f2ca5a0d57bd79f018258c5c2892947548dc2dc146be101"},
           {"name": "cudart-llama-b11400-bin-ubuntu-cuda-12.8-x64.tar.gz", "bytes": 594377603, "sha256": "efd4bd1e61d0100e837e129ece19fc0953bd519fde77702ca31a6d54f6afd63a"}
@@ -1082,16 +1100,39 @@ function Round-Gb([double]$gb){ return [int][math]::Floor($gb + 0.5) }
 # Windows figure (Win32_VideoController.AdapterRAM) stops at 4 GB. Built-in
 # graphics report little or no memory of their own (they borrow normal
 # memory) and so count as "no card".
+# The newest CUDA version this PC's NVIDIA driver can run: nvidia-smi's own
+# header line "CUDA Version: X.Y" (newer drivers write "CUDA UMD Version").
+# That is what decides whether a CUDA 13.x build will actually run (a CUDA
+# 13.4 build on a driver that stops at 13.0 crashes at first GPU use).
+# "" when nvidia-smi is missing or can't say (then the driver number alone
+# decides - and no 13.x build is picked).
+function Get-NvidiaCudaVersion {
+    if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { return "" }
+    try {
+        $hdr = (& nvidia-smi 2>$null | Out-String)
+        if ($hdr -match 'CUDA UMD Version:\s*(\d+\.\d+)') { return $Matches[1] }
+        if ($hdr -match 'CUDA Version:\s*(\d+\.\d+)') { return $Matches[1] }
+    } catch {}
+    return ""
+}
+
 function Get-GraphicsCard {
     $best = $null
     if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
         try {
-            foreach ($line in (& nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null)) {
+            # compute_cap first; a driver too old for the field errors, then
+            # the same query without it (the card then counts as not native
+            # to any build - see Select-LlamaBuild).
+            $q = & nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader,nounits 2>$null
+            if (-not $q) { $q = & nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits 2>$null }
+            foreach ($line in $q) {
                 $p = $line -split ',\s*'
                 if ($p.Count -ge 3 -and $p[1].Trim() -match '^\d+$') {
                     $gb = Round-Gb ([double]$p[1].Trim() / 1024)
+                    $cc = ""
+                    if ($p.Count -ge 4 -and $p[3].Trim() -match '^\d+(\.\d+)?$') { $cc = $p[3].Trim() }
                     if (-not $best -or $gb -gt $best.vram_gb) {
-                        $best = [pscustomobject]@{ vendor = "nvidia"; name = $p[0].Trim(); vram_gb = $gb; driver = $p[2].Trim() }
+                        $best = [pscustomobject]@{ vendor = "nvidia"; name = $p[0].Trim(); vram_gb = $gb; driver = $p[2].Trim(); cuda = (Get-NvidiaCudaVersion); cc = $cc }
                     }
                 }
             }
@@ -1128,7 +1169,7 @@ function Get-GraphicsCard {
         else { continue }
         $gb = Round-Gb ($bytes / 1GB)
         if (-not $best -or $gb -gt $best.vram_gb) {
-            $best = [pscustomobject]@{ vendor = $vendor; name = $name; vram_gb = $gb; driver = [string]$props.DriverVersion }
+            $best = [pscustomobject]@{ vendor = $vendor; name = $name; vram_gb = $gb; driver = [string]$props.DriverVersion; cuda = ""; cc = "" }
         }
     }
     if ($best -and $best.vram_gb -lt $TierTable.dedicated_card_min_gb) { return $null }
@@ -1194,18 +1235,59 @@ function Select-VoiceTorchBuild($hasGpu, $computeCap){
 
 # The decision for this hardware - the same rules as scripts/llm_tiers.py
 # (choose); the project's tests run both on the same inputs.
-function Select-LlamaBuild($vendor, $driver){
-    # The newest CUDA build the NVIDIA driver can run; else Vulkan (AMD,
-    # Intel, an old or unreadable NVIDIA driver). Same as pick_build.
+function Select-LlamaBuild($vendor, $driver, $cudaVersion = "", $cc = ""){
+    # The newest CUDA build this card can run. A CUDA build is picked only
+    # when the driver runs it: the driver-number check (min_nvidia_driver)
+    # applies, and EITHER
+    #   (a) the CUDA version the driver supports - the "CUDA (UMD) Version"
+    #       line of nvidia-smi's header (a CUDA 13.4 build on a driver that
+    #       stops at 13.0 crashes at first GPU use) - is >= the build's
+    #       CUDA version,
+    #   or (b) the card's compute capability ($cc) is one of the build's
+    #       NATIVE architectures (the table's native_cc: real GPU code for
+    #       that card, which CUDA's minor-version compatibility runs even on
+    #       a driver that stops at an older 13.x). A card whose compute
+    #       capability we cannot read counts as not native.
+    # When the CUDA version can't be read and no build has the card
+    # natively, the old driver-number rule still applies, but 13.x builds
+    # are left out (a driver we can't verify). Else Vulkan (AMD, Intel, an
+    # old or unreadable NVIDIA driver). Same as pick_build in
+    # scripts/llm_tiers.py.
     if ($vendor -eq "nvidia") {
         $major = 0
         $head = ([string]$driver).Trim().Split(".")[0]
         if ($head -match '^\d+$') { $major = [int]$head }
-        $cuda = @()
+        $have = ""
+        $hv = ([string]$cudaVersion).Trim()
+        if ($hv -match '^\d+(\.\d+)?$') { $have = $hv }
+        $ccv = ([string]$cc).Trim()
+        $eligible = @()
         foreach ($p in $TierTable.llama_cpp.builds.PSObject.Properties) {
-            if ($null -ne $p.Value.min_nvidia_driver) { $cuda += [pscustomobject]@{ name = $p.Name; need = [int]$p.Value.min_nvidia_driver } }
+            $bver = ""
+            if ($p.Name -match '^cuda-(\d+(?:\.\d+)?)$') { $bver = $Matches[1] }
+            if ($bver -eq "") { continue }
+            if ($null -eq $p.Value.min_nvidia_driver -or $major -lt [int]$p.Value.min_nvidia_driver) { continue }
+            $runs = ($have -ne "" -and ([version]$have) -ge ([version]$bver))
+            if (-not $runs -and $ccv -ne "") {
+                if (@($p.Value.native_cc) -contains $ccv) { $runs = $true }
+            }
+            if ($runs) { $eligible += [pscustomobject]@{ name = $p.Name; cuda = $bver } }
         }
-        foreach ($b in ($cuda | Sort-Object need -Descending)) { if ($major -ge $b.need) { return $b.name } }
+        if ($have -eq "") {
+            # CUDA version unreadable: the old driver-number rule, minus 13.x.
+            foreach ($p in $TierTable.llama_cpp.builds.PSObject.Properties) {
+                $bver = ""
+                if ($p.Name -match '^cuda-(\d+(?:\.\d+)?)$') { $bver = $Matches[1] }
+                if ($bver -eq "" -or $bver -like "13*") { continue }
+                if ($null -eq $p.Value.min_nvidia_driver -or $major -lt [int]$p.Value.min_nvidia_driver) { continue }
+                if (-not @($eligible | ForEach-Object { $_.name }) -contains $p.Name) {
+                    $eligible += [pscustomobject]@{ name = $p.Name; cuda = $bver }
+                }
+            }
+        }
+        if ($eligible.Count -gt 0) {
+            return (($eligible | Sort-Object { [version]$_.cuda } -Descending | Select-Object -First 1).name)
+        }
     }
     return "vulkan"
 }
@@ -1219,7 +1301,7 @@ function Get-LlmDownloadBytes($modelKey, $build){
     return $total
 }
 
-function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = ""){
+function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = "", $cuda = "", $cc = ""){
     if (-not $vendor -or $vramGb -lt $TierTable.dedicated_card_min_gb) {
         return [pscustomobject]@{ offered = $false; reason = "no_card" }
     }
@@ -1239,7 +1321,7 @@ function Select-LlmTier($vendor, [int]$vramGb, [int]$ramGb, $driver = ""){
         context = [int]$tier.context; kv_cache = $tier.kv_cache; voice_device = $voice
         history_default = [int]$tier.history_default
         vram_need_gb = [double]$tier.vram_need_gb
-        warning = [bool]$tier.warning; build = (Select-LlamaBuild $vendor $driver)
+        warning = [bool]$tier.warning; build = (Select-LlamaBuild $vendor $driver $cuda $cc)
     }
 }
 
@@ -1251,13 +1333,13 @@ function Invoke-HardwareCheck($dir){
     if ($SimulateVramGB -ge 0) {
         $simulated = $true
         if ($SimulateVramGB -lt $TierTable.dedicated_card_min_gb) { $card = $null }
-        elseif ($card) { $card = [pscustomobject]@{ vendor = $card.vendor; name = $card.name + " (pretending " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = $card.driver } }
-        else { $card = [pscustomobject]@{ vendor = "nvidia"; name = "(pretend NVIDIA card, " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = "" } }
+        elseif ($card) { $card = [pscustomobject]@{ vendor = $card.vendor; name = $card.name + " (pretending " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = $card.driver; cuda = [string]$card.cuda; cc = [string]$card.cc } }
+        else { $card = [pscustomobject]@{ vendor = "nvidia"; name = "(pretend NVIDIA card, " + $SimulateVramGB + " GB)"; vram_gb = $SimulateVramGB; driver = ""; cuda = ""; cc = "" } }
     }
     if ($SimulateRamGB -ge 0) { $simulated = $true; $ram = $SimulateRamGB }
-    $vendor = $null; $vram = 0; $driver = ""
-    if ($card) { $vendor = $card.vendor; $vram = [int]$card.vram_gb; $driver = $card.driver }
-    $choice = Select-LlmTier $vendor $vram $ram $driver
+    $vendor = $null; $vram = 0; $driver = ""; $cudaVer = ""; $ccVer = ""
+    if ($card) { $vendor = $card.vendor; $vram = [int]$card.vram_gb; $driver = $card.driver; $cudaVer = [string]$card.cuda; $ccVer = [string]$card.cc }
+    $choice = Select-LlmTier $vendor $vram $ram $driver $cudaVer $ccVer
     $model = $null; $dlGb = 0
     if ($choice.offered) {
         $model = $TierTable.models.($choice.model)
@@ -1272,7 +1354,13 @@ function Invoke-HardwareCheck($dir){
 # Plain-language summary lines of a hardware check (for the screen + log).
 function Format-HardwareCheck($hw){
     $lines = @()
-    if ($hw.card) { $lines += ("  Graphics card : " + $hw.card.name + " - " + $hw.card.vram_gb + " GB graphics memory") }
+    if ($hw.card) {
+        $extra = ""
+        if ($hw.card.driver) { $extra += ", driver " + $hw.card.driver }
+        if ($hw.card.cuda) { $extra += ", CUDA " + $hw.card.cuda }
+        if ($hw.card.cc) { $extra += ", generation " + $hw.card.cc }
+        $lines += ("  Graphics card : " + $hw.card.name + " - " + $hw.card.vram_gb + " GB graphics memory" + $extra)
+    }
     else          { $lines += "  Graphics card : none found (only built-in graphics)" }
     $lines += ("  Normal memory : " + $(if ($hw.ram_gb -ge 0) { [string]$hw.ram_gb + " GB" } else { "unknown" }))
     $lines += ("  Free disk     : " + $hw.disk_free_gb + " GB")
@@ -1347,6 +1435,7 @@ function Confirm-LocalModel($hw){
         Log ("  Not enough free disk space for the local model: it needs about " + $need + " GB, this drive has " + $hw.disk_free_gb + " GB free.") "Yellow"
         if ((Read-Answer "Type B to continue with option B, or Q to stop here (free up space, then run the installer again)" @("B","Q")) -eq "Q") {
             Log "Stopped - nothing was changed. Free up some space, then run the installer again." "Yellow"
+            Copy-InstallLogToProject (Join-Path $InstallDir "Amadeus-Project")
             Read-Host "Press Enter to close this window" | Out-Null
             exit 0
         }
@@ -1947,6 +2036,7 @@ try {
         $proj = Join-Path $InstallDir "Amadeus-Project"
         Install-LocalLlm $proj $llmChoice $hw | Out-Null
         Log "TEST: -LlmScreensOnly - stopping here (nothing else was installed)." "Magenta"
+        Copy-InstallLogToProject $proj
         exit 0
     }
     # The second question: new default personality + voice rules (only on an
@@ -2353,9 +2443,10 @@ try {
     $nvCard = $null; $nvCap = $null
     if ($hasGpu) {
         $nvCard = Get-NvidiaCardDetails
+        $nvCudaVer = Get-NvidiaCudaVersion
         if ($nvCard) {
             $nvCap = $nvCard.compute_cap
-            Log ("  Graphics card: " + $nvCard.name + " - " + $nvCard.vram_mb + " MiB, driver " + $nvCard.driver + ", generation " + $(if ($null -ne $nvCap) { $nvCap.ToString("0.0", [Globalization.CultureInfo]::InvariantCulture) } else { "unknown" }))
+            Log ("  Graphics card: " + $nvCard.name + " - " + $nvCard.vram_mb + " MiB, driver " + $nvCard.driver + $(if ($nvCudaVer) { ", CUDA " + $nvCudaVer } else { "" }) + ", generation " + $(if ($null -ne $nvCap) { $nvCap.ToString("0.0", [Globalization.CultureInfo]::InvariantCulture) } else { "unknown" }))
         }
     }
     $voiceBuild = Select-VoiceTorchBuild $hasGpu $nvCap
@@ -2598,6 +2689,7 @@ try {
         Log "When a game needs the graphics memory, start her with 'Start Amadeus without her model.bat' instead (load her model later in Settings -> Connection, or unload it there any time)."
         Log ""
         Log ("(Install log saved to: " + $LogPath + ")")
+        Copy-InstallLogToProject $proj
         Offer-StartAmadeus $proj
         exit 0
     }
@@ -2620,6 +2712,7 @@ try {
     }
     Log ""
     Log ("(Install log saved to: " + $LogPath + ")")
+    Copy-InstallLogToProject $proj
     Offer-StartAmadeus $proj
 
 } catch {
