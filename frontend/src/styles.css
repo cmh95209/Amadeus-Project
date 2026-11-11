@@ -1529,6 +1529,24 @@ button {
 .conn-row { display: flex; gap: 8px; align-items: center; }
 .conn-row .model-picker { flex: 1; min-width: 0; }
 
+/* Settings -> Connection -> Custom Model: the Google Vertex JSON key box */
+.vertex-json {
+  width: 100%;
+  min-height: 108px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  outline: none;
+  resize: vertical;
+  color: #edf1f7;
+  background: #0b1017;
+  font-size: 12px;
+}
+.vertex-json:focus { border-color: rgba(115, 151, 201, 0.55); }
+.vertex-region { display: inline-flex; align-items: center; gap: 6px; }
+.vertex-region input { width: 110px; padding: 8px; }
+.file-button { display: inline-flex; align-items: center; cursor: pointer; }
+
 /* Settings -> Connection -> Model: "Get more models" (browser download links) */
 .model-catalog summary { cursor: pointer; color: #c9d2df; font-size: 13px; }
 .model-catalog ul { display: grid; gap: 6px; margin: 10px 0; padding: 0; list-style: none; }

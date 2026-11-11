@@ -56,7 +56,6 @@ import {
   answerDefaultNotice,
   DefaultNotice,
   getApiKeyStatus,
-  setApiKey,
   getMemory,
   MemoryMessage,
   resetMemory,
@@ -64,7 +63,6 @@ import {
   getGreeting,
   getConversationGreeting,
   pokeConversation,
-  setModel,
   getWebAccess,
   setWebAccess,
   getWebReading,
@@ -85,6 +83,12 @@ import {
   getContextBudgetInfo,
   getBrainMode,
   setBrainMode,
+  getProviders,
+  saveProviderKey,
+  probeProvider,
+  revealProviderKey,
+  saveVertex,
+  activateProvider,
   getBuiltinModel,
   loadBuiltinModel,
   unloadBuiltinModel,
@@ -114,7 +118,15 @@ import {
   getStats,
   StatInfo,
 } from "./api";
-import type { NameEntry, ReasoningInfo, ReasoningKey, ReasoningLevel } from "./api";
+import type {
+  NameEntry,
+  ProviderListing,
+  ProviderProbe,
+  ReasoningInfo,
+  ReasoningKey,
+  ReasoningLevel,
+} from "./api";
+import { probeStatus, providerForAddress, shouldAutoProbe } from "./providers";
 
 import { interactions, pokeSpots } from "./interactions";
 import type { InteractionName } from "./interactions";
@@ -263,6 +275,34 @@ export default function App() {
   const [webReading, setWebReadingState] = useState<{ mode: "thorough" | "quick"; reason: string } | null>(null);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [apiKey, setApiKeyInput] = useState("");
+  // Settings -> Connection -> Custom Model: the provider table (GET
+  // /llm/providers), the row the panel shows, and its last check.
+  const [providerListing, setProviderListing] = useState<ProviderListing | null>(null);
+  const [providerId, setProviderId] = useState("");
+  const [providerProbe, setProviderProbe] = useState<ProviderProbe | null>(null);
+  const [providerBusy, setProviderBusy] = useState(false);
+  // The key box: what the user typed (dirty) vs a saved key shown on demand.
+  const [keyDirty, setKeyDirty] = useState(false);
+  const [keyShown, setKeyShown] = useState(false);
+  const [keyRevealing, setKeyRevealing] = useState(false);
+  const [keyHelpError, setKeyHelpError] = useState("");
+  // The Google Vertex JSON-key area (the pass itself never reaches the page).
+  const [vertexJson, setVertexJson] = useState("");
+  const [vertexRegion, setVertexRegion] = useState("global");
+  const [vertexReplacing, setVertexReplacing] = useState(false);
+  const [vertexError, setVertexError] = useState("");
+  // A counter that drops the answer of a check the user outgrew (they
+  // switched provider while it was still running).
+  const providerSeq = useRef(0);
+  const providerIdRef = useRef("");
+  providerIdRef.current = providerId;
+  const selectedProvider = providerListing?.providers.find((r) => r.id === providerId) ?? null;
+  // Custom Model: the status line under the key area (a failed Vertex save
+  // shows its message instead of the last check's words).
+  const providerStatus =
+    providerId === "vertex" && vertexError
+      ? { tone: "fail" as const, text: vertexError }
+      : probeStatus(providerProbe, selectedProvider, providerListing?.vertex ?? null, providerBusy);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
@@ -324,7 +364,18 @@ export default function App() {
   function closeSettings() {
     if (settingsBusy) return;
     if (personalityDirty && !window.confirm("Discard your unsaved personality changes?")) return;
+    // The Custom Model panel starts clean next time it opens.
+    providerSeq.current += 1; // drop any check that is still running
     setApiKeyInput("");
+    setProviderProbe(null);
+    setProviderBusy(false);
+    setKeyDirty(false);
+    setKeyShown(false);
+    setKeyRevealing(false);
+    setKeyHelpError("");
+    setVertexJson("");
+    setVertexReplacing(false);
+    setVertexError("");
     setSettingsError("");
     setSettingsNotice("");
     setSettingsOpen(false);
@@ -654,6 +705,52 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsOpen, builtinMode]);
 
+  // Custom Model: whenever Settings opens in this mode, the provider table
+  // comes back fresh (saved keys, the Vertex pass, the active row); the
+  // active row is selected, its address filled in, and it is checked when a
+  // check makes sense (a local server, or a saved key / pass).
+  useEffect(() => {
+    if (!settingsOpen || builtinMode) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const listing = await getProviders();
+        if (cancelled) return;
+        const id = listing.providers.some((r) => r.id === listing.active)
+          ? listing.active
+          : "custom";
+        const row = listing.providers.find((r) => r.id === id)
+          ?? listing.providers.find((r) => r.id === "custom");
+        if (!row) return;
+        setProviderListing(listing);
+        setProviderId(id);
+        setKeyDirty(false);
+        setKeyShown(false);
+        setApiKeyInput("");
+        setKeyHelpError("");
+        setVertexJson("");
+        setVertexReplacing(false);
+        setVertexError("");
+        setVertexRegion(listing.vertex.region || "global");
+        const address = id === "custom" ? listing.address : id === "auto" ? "" : row.url;
+        if (id !== "vertex") setServerAddressState(address);
+        syncHasApiKey(listing);
+        if (shouldAutoProbe(row, listing.vertex)) {
+          void runProbe(row.id, id === "custom" ? address : "");
+        } else {
+          providerSeq.current += 1;
+          setProviderProbe(null);
+          setProviderBusy(false);
+        }
+      } catch {
+        // The backend is too old for the provider list: the page keeps
+        // working without it (the footer probe still reports the server).
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen, builtinMode]);
+
   useEffect(() => {
     if (!settingsOpen || builtinModel?.state !== "loading") return;
     const timer = window.setInterval(() => {
@@ -973,43 +1070,6 @@ export default function App() {
     return () => window.clearTimeout(id);
   }, [status]);
 
-  // Custom model, "Refresh list": apply the address (and a newly typed key)
-  // first, so the list is the one the server gives with those settings.
-  async function refreshServerModels() {
-    if (connTesting) return;
-    setConnTesting(true);
-    setSettingsError("");
-    try {
-      await setLLMServer(serverAddress);
-      if (apiKey.trim()) {
-        await setApiKey(apiKey.trim());
-        setHasApiKey(true);
-        setApiKeyInput("");
-      }
-      setConnStatus(await testConnection());
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : "Could not reach the server.");
-    } finally {
-      setConnTesting(false);
-    }
-  }
-
-  // Custom model, "Use this model": save the picked model at once.
-  async function applyCustomModel() {
-    const next = model.trim();
-    if (!next) return;
-    setSettingsError("");
-    setSettingsNotice("");
-    try {
-      await setModel(next);
-      setStatus(`Model set to ${next}`);
-      setSettingsNotice(`She now uses ${next}.`);
-      void refreshConnection();
-    } catch (error) {
-      setSettingsError(error instanceof Error ? error.message : "Could not save the model.");
-    }
-  }
-
   async function handleTestConnection() {
     if (connTesting) return;
     setConnTesting(true);
@@ -1024,6 +1084,198 @@ export default function App() {
     } finally {
       setConnTesting(false);
     }
+  }
+
+  // Custom Model: run one provider's check and remember its answer; a
+  // newer check (or closing the panel) drops the older one's answer.
+  async function runProbe(id: string, address: string) {
+    const seq = ++providerSeq.current;
+    setProviderBusy(true);
+    try {
+      const probe = await probeProvider(id, address);
+      if (seq !== providerSeq.current) return;
+      setProviderProbe(probe);
+    } catch (error) {
+      if (seq !== providerSeq.current) return;
+      setProviderProbe({
+        reachable: false,
+        models: [],
+        loading: false,
+        error: error instanceof Error ? error.message : "",
+      });
+    } finally {
+      if (seq === providerSeq.current) setProviderBusy(false);
+    }
+  }
+
+  // Custom Model: switch the row the panel shows (the Provider dropdown, or
+  // a typed address that belongs to another provider). The address box is
+  // filled from the row (unless the typed text is kept); the key box starts
+  // clean; a row a check makes sense for is checked at once.
+  function pickProvider(id: string, address?: string) {
+    const listing = providerListing;
+    if (!listing || providerBusy) return;
+    const row = listing.providers.find((r) => r.id === id);
+    if (!row) return;
+    setProviderId(id);
+    setKeyDirty(false);
+    setKeyShown(false);
+    setApiKeyInput("");
+    setKeyHelpError("");
+    setVertexReplacing(false);
+    setVertexJson("");
+    setVertexError("");
+    const nextAddress = address !== undefined
+      ? address
+      : id === "custom"
+        ? (listing.active === "custom" ? listing.address : "")
+        : id === "auto"
+          ? ""
+          : row.url;
+    if (id !== "vertex") setServerAddressState(nextAddress);
+    if (shouldAutoProbe(row, listing.vertex)) {
+      void runProbe(row.id, id === "custom" ? nextAddress : "");
+    } else {
+      providerSeq.current += 1;
+      setProviderProbe(null);
+      setProviderBusy(false);
+    }
+  }
+
+  // Custom Model: the user typed an address that is not the chosen row's -
+  // the dropdown follows it (usually "Custom address") and the typed text
+  // stays as is.
+  function onAddressEdit(value: string) {
+    setServerAddressState(value);
+    const listing = providerListing;
+    if (!listing) return;
+    const target = providerForAddress(listing.providers, value);
+    if (target === providerId) return;
+    if (!listing.providers.some((r) => r.id === target)) return;
+    pickProvider(target, value);
+  }
+
+  // Custom Model, "Show / Hide": with typed text it only flips the
+  // visibility; with an EMPTY box it asks the backend for the saved key,
+  // shown (not "typed"); a refusal is reported under the box. The key never
+  // reaches a log, a console or local storage.
+  async function toggleKeyVisibility() {
+    if (providerBusy || settingsBusy) return;
+    if (apiKey) {
+      setKeyShown((shown) => !shown);
+      return;
+    }
+    if (keyShown) {
+      // A revealed key: Hide empties the box again.
+      setApiKeyInput("");
+      setKeyShown(false);
+      return;
+    }
+    const row = selectedProvider;
+    if (!row || !row.has_key) return;
+    const id = row.id;
+    setKeyHelpError("");
+    setKeyRevealing(true);
+    try {
+      const key = await revealProviderKey(id);
+      if (providerIdRef.current !== id) return; // the panel moved on
+      setApiKeyInput(key);
+      setKeyShown(true);
+    } catch (error) {
+      if (providerIdRef.current !== id) return;
+      setKeyHelpError(error instanceof Error ? error.message : "Could not show the saved key.");
+    } finally {
+      setKeyRevealing(false);
+    }
+  }
+
+  // Custom Model, "Save key": store the typed key for the chosen provider
+  // (a custom address goes along); the reply's check becomes the status
+  // line, the row's "a key is saved" state - and, for the active provider,
+  // the key in use.
+  async function saveKeyNow() {
+    const row = selectedProvider;
+    if (!row || row.kind === "vertex" || providerBusy || settingsBusy || !keyDirty) return;
+    const key = apiKey.trim();
+    if (!key) return;
+    setProviderBusy(true);
+    setKeyHelpError("");
+    setSettingsError("");
+    try {
+      const probe = await saveProviderKey(row.id, key, row.kind === "custom" ? serverAddress.trim() : "");
+      setProviderListing((current) => current
+        ? { ...current, providers: current.providers.map((r) => (r.id === row.id ? { ...r, has_key: true } : r)) }
+        : current);
+      if (providerListing?.active === row.id) setHasApiKey(true);
+      setProviderProbe(probe);
+      setApiKeyInput("");
+      setKeyDirty(false);
+      setKeyShown(false);
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "Could not save the key.");
+    } finally {
+      setProviderBusy(false);
+    }
+  }
+
+  // Custom Model (Vertex): read a chosen JSON key file into the box.
+  async function loadVertexFile(file: File) {
+    try {
+      const text = await file.text();
+      setVertexJson(text);
+      setVertexError("");
+    } catch {
+      setVertexError("Could not read that file.");
+    }
+  }
+
+  // Custom Model (Vertex): save the JSON key (and its region) - or, once a
+  // key is saved, just a changed region. The reply carries the sign-in state
+  // and a check that the pass works (or why Google refuses it).
+  async function saveVertexNow() {
+    const vertex = providerListing?.vertex;
+    if (!vertex || providerBusy || settingsBusy) return;
+    const hasJson = vertexJson.trim().length > 0;
+    const regionChanged = !!vertexRegion.trim() && vertexRegion.trim() !== vertex.region;
+    if (!hasJson && !(vertex.configured && regionChanged)) return;
+    setProviderBusy(true);
+    setVertexError("");
+    setSettingsError("");
+    try {
+      const result = await saveVertex({
+        ...(hasJson ? { json: vertexJson } : {}),
+        region: vertexRegion.trim(),
+      });
+      setProviderListing((current) => current
+        ? {
+            ...current,
+            vertex: result.vertex,
+            providers: current.providers.map((r) =>
+              r.id === "vertex" ? { ...r, has_key: result.vertex.configured } : r),
+          }
+        : current);
+      if (providerListing?.active === "vertex") setHasApiKey(result.vertex.configured);
+      setProviderProbe({
+        reachable: result.reachable,
+        models: result.models,
+        loading: result.loading,
+        error: result.error,
+      });
+      setVertexJson("");
+      setVertexReplacing(false);
+      setVertexRegion(result.vertex.region || "global");
+    } catch (error) {
+      setVertexError(error instanceof Error ? error.message : "Could not save the JSON key.");
+    } finally {
+      setProviderBusy(false);
+    }
+  }
+
+  // "Is a key in use?" for the rest of the app (sending waits for it): the
+  // active provider's key, or a saved Vertex pass.
+  function syncHasApiKey(listing: ProviderListing) {
+    const row = listing.providers.find((r) => r.id === listing.active);
+    setHasApiKey(row ? row.has_key : listing.vertex.configured);
   }
 
   async function initialize() {
@@ -1353,17 +1605,55 @@ export default function App() {
     setSettingsNotice("");
     let keySaved = false;
     try {
-      if (!builtinMode && apiKey.trim()) {
-        await setApiKey(apiKey.trim());
-        keySaved = true;
-        setHasApiKey(true);
-        setApiKeyInput("");
+      if (!builtinMode) {
+        // The provider row the panel shows (its address is filled from the
+        // table; a custom address rides along). A newly typed key is stored
+        // FIRST, so it is the one the switch goes into use with. A failure
+        // here stops the whole save (the name etc. is not stored either).
+        const row = selectedProvider;
+        if (!row) throw new Error("Choose a model provider first.");
+        if (keyDirty && apiKey.trim()) {
+          await saveProviderKey(row.id, apiKey.trim(), row.kind === "custom" ? serverAddress.trim() : "");
+          keySaved = true;
+          setHasApiKey(true);
+          setApiKeyInput("");
+          setKeyDirty(false);
+          setKeyShown(false);
+        }
+        const addressToSave = row.kind === "custom" ? serverAddress.trim() : "";
+        const activated = await activateProvider(
+          row.id, addressToSave, noModelYet ? "" : nextModel);
+        setModelName(activated.model);
+        // The switch changed what is active: the panel (and the footer dot)
+        // refreshes from the fresh table - the new active row, its address,
+        // who has a key - and is checked again when a check makes sense.
+        const listing = await getProviders();
+        setProviderListing(listing);
+        setProviderId(listing.active);
+        setKeyDirty(false);
+        setKeyShown(false);
+        setVertexJson("");
+        setVertexReplacing(false);
+        setVertexError("");
+        syncHasApiKey(listing);
+        const activeRow = listing.providers.find((r) => r.id === listing.active);
+        const activeAddress = listing.active === "custom"
+          ? listing.address
+          : listing.active === "auto"
+            ? ""
+            : activeRow?.url ?? "";
+        if (listing.active !== "vertex") setServerAddressState(activeAddress);
+        if (activeRow && shouldAutoProbe(activeRow, listing.vertex)) {
+          void runProbe(listing.active, listing.active === "custom" ? activeAddress : "");
+        } else {
+          providerSeq.current += 1;
+          setProviderProbe(null);
+          setProviderBusy(false);
+        }
       }
-      if (!builtinMode && !noModelYet) await setModel(nextModel);
       const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
       setContextBudgetState(await setContextBudget(contextBudget));
-      if (!builtinMode) await setLLMServer(serverAddress);
       // Saved last and never fatal: a backend older than this WebUI has no
       // /setUserProfile yet, and that must not undo the settings above.
       let profileSaved = true;
@@ -2727,47 +3017,207 @@ export default function App() {
                   </p>
                 ) : (<>
                   <p className="settings-intro">
-                    Any OpenAI-compatible model server - local (Unsloth Desktop, Ollama,
-                    llama.cpp, LM Studio, vLLM) or cloud (OpenRouter, OpenAI, and similar).
-                    For a local server, leave the address blank to auto-detect it, or type
-                    the address your app shows (usually http://localhost:8888/v1). For a
-                    cloud server, paste its API base URL and your key.
+                    Pick your model provider. Local servers need no key; for a cloud
+                    provider, paste your API key and press Save key.
                   </p>
                   <label>
-                    Model server address
-                    <input
-                      value={serverAddress}
-                      disabled={settingsBusy}
-                      onChange={(event) => setServerAddressState(event.target.value)}
-                      placeholder="http://localhost:8888/v1  (blank = auto-detect)"
-                      spellCheck={false}
-                      autoComplete="off"
-                      aria-describedby="server-address-help"
-                    />
+                    Provider
+                    <select
+                      value={providerId || (providerListing ? providerListing.active : "")}
+                      disabled={settingsBusy || providerBusy || !providerListing}
+                      onChange={(event) => pickProvider(event.target.value)}
+                    >
+                      {!providerListing && <option value="">Loading...</option>}
+                      {providerListing?.providers.map((row) => (
+                        <option key={row.id} value={row.id}>{row.label}</option>
+                      ))}
+                    </select>
                   </label>
-                  <p className="settings-help" id="server-address-help">
-                    {serverAddress
-                      ? "Requests go to this address."
-                      : "Blank = auto-detect local servers on ports 8888 / 8000."}
-                  </p>
-                  <label>
-                    API key
-                    <input
-                      type="password"
-                      value={apiKey}
-                      onChange={(event) => setApiKeyInput(event.target.value)}
-                      placeholder={hasApiKey ? "Enter a replacement key" : "Enter your API key"}
-                      autoComplete="new-password"
-                      spellCheck={false}
-                      disabled={settingsBusy}
-                      aria-describedby="api-key-help"
-                    />
-                  </label>
-                  <p className="settings-help" id="api-key-help">
-                    {hasApiKey ? "A key is saved. Leave blank to keep it." : "No API key is saved."}
-                    {" "}Local servers usually accept any value; cloud providers (OpenRouter,
-                    OpenAI) require your real key.
-                  </p>
+                  {providerId !== "vertex" ? (
+                    <>
+                      <label>
+                        Model server address
+                        <input
+                          value={serverAddress}
+                          disabled={settingsBusy}
+                          onChange={(event) => onAddressEdit(event.target.value)}
+                          placeholder={
+                            providerId === "auto"
+                              ? "Found automatically (ports 8888 / 8000)"
+                              : providerId === "custom"
+                                ? "http://your-server:8000/v1"
+                                : (selectedProvider?.url || "http://localhost:8888/v1")
+                          }
+                          spellCheck={false}
+                          autoComplete="off"
+                          aria-describedby="server-address-help"
+                        />
+                      </label>
+                      <p className="settings-help" id="server-address-help">
+                        {serverAddress
+                          ? "Requests go to this address."
+                          : providerId === "auto"
+                            ? "Leave it blank: Amadeus finds local servers on ports 8888 / 8000."
+                            : "Type the address your app shows (usually http://localhost:8000/v1)."}
+                      </p>
+                      <label>
+                        API key
+                        <input
+                          type={keyShown ? "text" : "password"}
+                          value={apiKey}
+                          disabled={settingsBusy || providerBusy}
+                          onChange={(event) => {
+                            setApiKeyInput(event.target.value);
+                            setKeyDirty(true);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void saveKeyNow();
+                            }
+                          }}
+                          placeholder={selectedProvider?.has_key
+                            ? "A key is saved - enter a new one to replace it"
+                            : "Enter your API key"}
+                          autoComplete="new-password"
+                          spellCheck={false}
+                          aria-describedby="api-key-help"
+                        />
+                      </label>
+                      <div className="conn-row">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={settingsBusy || providerBusy || keyRevealing ||
+                            (!apiKey && !keyShown && !selectedProvider?.has_key)}
+                          onClick={() => void toggleKeyVisibility()}
+                        >
+                          {keyRevealing ? "Loading..." : keyShown ? "Hide" : "Show"}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={settingsBusy || providerBusy || keyRevealing ||
+                            !keyDirty || !apiKey.trim()}
+                          onClick={() => void saveKeyNow()}
+                        >
+                          Save key
+                        </button>
+                      </div>
+                      <p className="settings-help" id="api-key-help">
+                        {keyHelpError ||
+                          (selectedProvider?.kind === "local"
+                            ? "Local servers usually need no key."
+                            : selectedProvider?.has_key
+                              ? "A key is saved for this provider."
+                              : "No key is saved for this provider yet.")}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      {providerListing?.vertex.configured && !vertexReplacing ? (
+                        <p className="settings-help" id="vertex-key-help">
+                          JSON key saved (project {providerListing.vertex.project}).
+                        </p>
+                      ) : (
+                        <label>
+                          JSON key
+                          <textarea
+                            className="vertex-json"
+                            rows={6}
+                            value={vertexJson}
+                            disabled={settingsBusy || providerBusy}
+                            onChange={(event) => {
+                              setVertexJson(event.target.value);
+                              setVertexError("");
+                            }}
+                            placeholder="Paste the contents of your JSON key file"
+                            spellCheck={false}
+                            aria-describedby="vertex-json-help"
+                          />
+                        </label>
+                      )}
+                      <div className="conn-row">
+                        {!(providerListing?.vertex.configured && !vertexReplacing) && (
+                          <label className="file-button">
+                            Choose file...
+                            <input
+                              type="file"
+                              accept=".json"
+                              hidden
+                              onChange={(event) => {
+                                const file = event.target.files?.[0];
+                                event.target.value = "";
+                                if (file) void loadVertexFile(file);
+                              }}
+                            />
+                          </label>
+                        )}
+                        <label className="vertex-region">
+                          Region
+                          <input
+                            value={vertexRegion}
+                            disabled={settingsBusy || providerBusy}
+                            onChange={(event) => setVertexRegion(event.target.value)}
+                            placeholder="global"
+                            spellCheck={false}
+                            autoComplete="off"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={settingsBusy || providerBusy || (
+                            vertexJson.trim()
+                              ? false
+                              : !(providerListing?.vertex.configured &&
+                                  vertexRegion.trim() &&
+                                  vertexRegion.trim() !== providerListing.vertex.region)
+                          )}
+                          onClick={() => void saveVertexNow()}
+                        >
+                          {vertexJson.trim() ? "Save JSON key" : "Save region"}
+                        </button>
+                        {providerListing?.vertex.configured && !vertexReplacing && (
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={settingsBusy || providerBusy}
+                            onClick={() => setVertexReplacing(true)}
+                          >
+                            Replace
+                          </button>
+                        )}
+                      </div>
+                      {!providerListing?.vertex.configured && (
+                        <p className="settings-help" id="vertex-json-help">
+                          From Google Cloud: enable the Vertex AI API, then create a
+                          service account and download its JSON key file.
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {(selectedProvider || providerBusy) && (
+                    <div
+                      className={`conn-status${providerStatus.tone ? ` ${providerStatus.tone}` : ""}`}
+                      role="status"
+                    >
+                      <span className="conn-dot" aria-hidden="true" />
+                      <span className="conn-text">{providerStatus.text || "\u00A0"}</span>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={settingsBusy || providerBusy || !selectedProvider}
+                        onClick={() => {
+                          const row = selectedProvider;
+                          if (!row) return;
+                          void runProbe(row.id, row.kind === "custom" ? serverAddress.trim() : "");
+                        }}
+                      >
+                        {providerBusy ? "Checking..." : "Check again"}
+                      </button>
+                    </div>
+                  )}
                 </>)}
               </div>
 
@@ -2897,34 +3347,24 @@ export default function App() {
                   <div className="conn-row">
                     <ModelPicker
                       ariaLabel="Model"
-                      options={(connStatus?.reachable ? connStatus.models : []).map((name) => ({ value: name }))}
+                      options={(providerProbe?.reachable ? providerProbe.models : []).map((name) => ({ value: name }))}
                       value={model}
                       onChange={setModelName}
                       allowCustom
-                      disabled={settingsBusy}
-                      emptyText="Press Refresh list to see the server's models"
+                      disabled={settingsBusy || providerBusy}
+                      emptyText="Save your key above to load the model list"
                     />
-                    <button type="button" className="ghost-button" disabled={connTesting || settingsBusy}
-                      onClick={() => void refreshServerModels()}>
-                      {connTesting ? "Refreshing..." : "Refresh list"}
-                    </button>
-                  </div>
-                  <div className="conn-row">
-                    <button type="button" className="ghost-button"
-                      disabled={settingsBusy || !model.trim()}
-                      onClick={() => void applyCustomModel()}>
-                      Use this model
-                    </button>
                   </div>
                   <p className="settings-help">
-                    Type to search the server's models, or type a name it does not
-                    list. Refresh list uses the address and key above. The app talks
-                    to the model you choose; it cannot load or unload models on another
-                    program's server.
+                    Type to search the list, or type a model name it does not
+                    show. Press Save below to use it.
                   </p>
                 </>)}
               </div>
 
+              {/* Custom Model: its status line sits under the key area, so this
+                  section only appears when it has something to say. */}
+              {(builtinMode || (brain?.available && builtinModel)) && (
               <div className="conn-section">
                 <span className="conn-section-title">Status</span>
                 {builtinMode && builtinModel && !brain?.runner_missing ? (
@@ -2955,7 +3395,7 @@ export default function App() {
                       : `Vision: no - ${builtinModel.picturesNote || "she can't see pictures with this model"}.`}
                   </p>
                 )}
-                {builtinMode && builtinModel && !brain?.runner_missing ? null : (
+                {builtinMode && (builtinModel === null || brain?.runner_missing) ? (
                   <div
                     className={`conn-status${
                       !connStatus
@@ -2979,7 +3419,7 @@ export default function App() {
                       {connTesting ? "Testing..." : "Test connection"}
                     </button>
                   </div>
-                )}
+                ) : null}
                 {!builtinMode && brain?.available && builtinModel && (
                   <p className="settings-help">
                     {builtinModel.state === "unloaded"
@@ -2990,6 +3430,7 @@ export default function App() {
                   </p>
                 )}
               </div>
+              )}
 
               <label>
                 Conversation memory (tokens)
@@ -3095,7 +3536,7 @@ export default function App() {
                   onClick={saveModel}
                   disabled={settingsBusy || loading}
                 >
-                  {savingSettings ? "Saving..." : builtinMode ? "Save" : "Save connection"}
+                  {savingSettings ? "Saving..." : "Save"}
                 </button>
               </div>
             </div>

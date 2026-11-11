@@ -927,6 +927,205 @@ export async function setBrainMode(mode: "builtin" | "custom"): Promise<BrainMod
   );
 }
 
+// ---- Model providers (Settings -> Connection -> Custom Model) ----------------
+// The backend keeps a table of well-known providers (backend/providers.py):
+// local servers, OpenAI-compatible cloud providers, Google Vertex AI (JSON
+// key) and a free-form custom address. Keys are stored per provider;
+// api_key.txt stays "the key in use" for the memory sidecar.
+
+export type ProviderKind = "local" | "cloud" | "vertex" | "custom";
+
+export type ProviderRow = {
+  id: string;
+  label: string;
+  kind: ProviderKind;
+  /** The server address this provider uses ("" = auto-detect / none). */
+  url: string;
+  /** A key (or, for Vertex, a JSON pass) is saved for it. */
+  has_key: boolean;
+};
+
+/** Google Vertex AI sign-in state (never the key itself). */
+export type VertexInfo = {
+  configured: boolean;
+  project: string;
+  region: string;
+  address: string;
+};
+
+export type ProviderListing = {
+  providers: ProviderRow[];
+  /** The provider Amadeus is using right now. */
+  active: string;
+  /** The saved server address (the custom one when "custom" is active). */
+  address: string;
+  vertex: VertexInfo;
+  /** This client may see saved keys (the PC / the user's own tunnel). */
+  can_reveal: boolean;
+};
+
+/** What a provider's server answered (or tried to). */
+export type ProviderProbe = {
+  reachable: boolean;
+  models: string[];
+  /** The server is up but says it is still loading its model. */
+  loading: boolean;
+  error: string | null;
+};
+
+function providerRow(data: Record<string, unknown>): ProviderRow | null {
+  if (typeof data.id !== "string" || typeof data.label !== "string") return null;
+  const kind: ProviderKind =
+    data.kind === "local" || data.kind === "cloud" || data.kind === "vertex"
+      ? data.kind
+      : "custom";
+  return {
+    id: data.id,
+    label: data.label,
+    kind,
+    url: typeof data.url === "string" ? data.url : "",
+    has_key: data.has_key === true,
+  };
+}
+
+function vertexInfo(data: unknown): VertexInfo {
+  const d = (typeof data === "object" && data !== null ? data : {}) as Record<string, unknown>;
+  return {
+    configured: d.configured === true,
+    project: typeof d.project === "string" ? d.project : "",
+    region: typeof d.region === "string" && d.region ? d.region : "global",
+    address: typeof d.address === "string" ? d.address : "",
+  };
+}
+
+function probeFrom(data: Record<string, unknown>): ProviderProbe {
+  return {
+    reachable: data.reachable === true,
+    models: Array.isArray(data.models)
+      ? data.models.filter((m): m is string => typeof m === "string")
+      : [],
+    loading: data.loading === true,
+    error: typeof data.error === "string" ? data.error : null,
+  };
+}
+
+/** The provider table, who is active, and Vertex's sign-in state. */
+export async function getProviders(): Promise<ProviderListing> {
+  const data = await parseResponse(await fetch(`${API_BASE}/llm/providers`, { cache: "no-store" }));
+  const providers = (Array.isArray(data.providers) ? (data.providers as Record<string, unknown>[]) : [])
+    .map(providerRow)
+    .filter((r): r is ProviderRow => r !== null);
+  if (providers.length === 0) {
+    throw new Error("Could not read the provider list");
+  }
+  return {
+    providers,
+    active: typeof data.active === "string" ? data.active : "auto",
+    address: typeof data.address === "string" ? data.address : "",
+    vertex: vertexInfo(data.vertex),
+    can_reveal: data.can_reveal === true,
+  };
+}
+
+/** Save one provider's API key. The reply carries a check of its server
+ * (what models it offers), so Settings can show them at once. */
+export async function saveProviderKey(
+  provider: string, key: string, address = "",
+): Promise<ProviderProbe> {
+  const data = await parseResponse(await fetch(`${API_BASE}/llm/key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, key, ...(address ? { address } : {}) }),
+  }));
+  return probeFrom(data);
+}
+
+/** Ask one provider's server which models it offers (no chat, no model call). */
+export async function probeProvider(provider: string, address = ""): Promise<ProviderProbe> {
+  const data = await parseResponse(await fetch(`${API_BASE}/llm/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, ...(address ? { address } : {}) }),
+  }));
+  return probeFrom(data);
+}
+
+/** The saved key for one provider. The backend refuses (with a message)
+ * away from the user's own devices. The caller must never log the key. */
+export async function revealProviderKey(provider: string): Promise<string> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/llm/key?provider=${encodeURIComponent(provider)}`, { cache: "no-store" })
+  );
+  if (typeof data.key !== "string") throw new Error("Could not read the saved key");
+  return data.key;
+}
+
+export type VertexSave = {
+  /** The JSON key file's contents (absent = keep the saved key). */
+  json?: string;
+  /** The region, e.g. "global" (absent = keep the saved one). */
+  region?: string;
+};
+
+export type VertexSaveResult = {
+  status: string;
+  vertex: VertexInfo;
+  reachable: boolean;
+  models: string[];
+  loading: boolean;
+  error: string | null;
+  /** Vertex is active but signing in again failed (the saved key stands). */
+  message?: string;
+};
+
+/** Save Google Vertex's JSON key (or just its region). The reply carries the
+ * sign-in state and a check that the pass works. */
+export async function saveVertex(fields: VertexSave): Promise<VertexSaveResult> {
+  const data = await parseResponse(await fetch(`${API_BASE}/llm/vertex`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...(fields.json ? { json: fields.json } : {}),
+      ...(fields.region ? { region: fields.region } : {}),
+    }),
+  }));
+  if (data.vertex === undefined || data.vertex === null) {
+    throw new Error("Could not confirm the Google Vertex key");
+  }
+  return {
+    status: typeof data.status === "string" ? data.status : "ok",
+    vertex: vertexInfo(data.vertex),
+    ...probeFrom(data),
+    ...(typeof data.message === "string" ? { message: data.message } : {}),
+  };
+}
+
+/** Make one provider the active brain: the address comes from the table
+ * (a custom address may ride along), and - when given - the model name is
+ * saved with it. Omitting the model keeps today's "no model yet" behaviour. */
+export async function activateProvider(
+  id: string, address = "", model = "",
+): Promise<{ status: string; active: string; address: string; model: string }> {
+  const data = await parseResponse(await fetch(`${API_BASE}/llm/provider`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id,
+      ...(address ? { address } : {}),
+      ...(model ? { model } : {}),
+    }),
+  }));
+  if (typeof data.active !== "string") {
+    throw new Error("Could not switch the model provider");
+  }
+  return {
+    status: typeof data.status === "string" ? data.status : "ok",
+    active: data.active,
+    address: typeof data.address === "string" ? data.address : "",
+    model: typeof data.model === "string" ? data.model : "",
+  };
+}
+
 // ---- Her built-in model's server (Settings -> Connection -> Built-in) --------
 export type BuiltinServerState = "unloaded" | "loading" | "loaded" | "failed";
 

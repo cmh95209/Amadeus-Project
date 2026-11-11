@@ -16,6 +16,7 @@ try {
   // motions.test.ts failure stops the run.
   await server.ssrLoadModule("/tests/greeting.test.ts");
   await server.ssrLoadModule("/tests/modelPicker.test.ts");
+  await server.ssrLoadModule("/tests/providers.test.ts");
   await server.ssrLoadModule("/tests/nameList.test.ts");
   await server.ssrLoadModule("/tests/voiceFirst.test.ts");
   await server.ssrLoadModule("/tests/sources.test.ts");
