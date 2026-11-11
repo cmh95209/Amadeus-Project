@@ -172,6 +172,10 @@ def llm_ready(server, model, key, timeout=5.0):
     only when the server answers AND the configured model is actually
     loaded - the guard that prevents hitting a downloaded-but-not-loaded
     model (the 2026-09-26 crash incident)."""
+    if "aiplatform.googleapis.com" in server:
+        # Google Vertex AI has no model list to ask; the app keeps a fresh
+        # sign-in pass in the key file while Vertex is the chosen provider.
+        return bool(model and key), ([model] if model else [])
     req = urllib.request.Request(server.rstrip("/") + "/models",
                                  headers={"Authorization": "Bearer " + key})
     try:
@@ -289,6 +293,8 @@ def _reasoning_body(server: str, level: str) -> dict:
         return body
     if "openrouter.ai" in server:
         return {"reasoning": {"effort": level if thinking else "minimal"}}
+    if "aiplatform.googleapis.com" in server:
+        return {"reasoning_effort": level if thinking else "low"}   # Vertex refuses "minimal"
     if "generativelanguage.googleapis.com" in server:
         return {"reasoning_effort": level if thinking else "minimal"}
     return {"reasoning_effort": level} if thinking else {"chat_template_kwargs": {"enable_thinking": False}}

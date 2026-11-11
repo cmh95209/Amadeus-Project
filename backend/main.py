@@ -19,6 +19,7 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import logging
 from api import application
+import providers
 
 # One-time background job: give old replies their Japanese voice lines.
 # Waits politely for the local model server; never blocks the UI.
@@ -94,6 +95,8 @@ from tqdm import tqdm
 tqdm.disable = True
 
 def run_flask():
+    # Google Vertex: keep the sign-in pass fresh while it is the chosen provider.
+    providers.start_vertex_keeper()
     application.run(port=5050)
 if __name__ == "__main__":
     run_flask()

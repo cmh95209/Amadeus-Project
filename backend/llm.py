@@ -88,6 +88,15 @@ def _server_url() -> str:
     return configured or DEFAULT_SERVER_URL
 
 
+def autodetect_url() -> str:
+    """The first usual local port that answers (Settings -> provider "Local
+    (auto-detect)"), ignoring the saved address; the default when none does."""
+    for port in CANDIDATE_PORTS:
+        if _port_alive("localhost", port):
+            return f"http://localhost:{port}/v1"
+    return DEFAULT_SERVER_URL
+
+
 # One cached client per (model, thinking) pair, so a thinking-enabled client
 # can coexist with the normal fast one. The address (port) each client was
 # built against is tracked separately, because Unsloth picks a NEW port
@@ -161,11 +170,32 @@ class _ThoughtFreeChatOpenAI(ChatOpenAI):
         except Exception as exc:
             softer = _reasoning_fallback(self.extra_body, exc)
             if softer is None:
-                raise
+                return self._retry_without_effort(exc, messages, stop, run_manager, kwargs)
             print(f"[Amadeus] Server refused the reasoning setting {self.extra_body!r} - "
                   f"retrying with {softer!r}.")
             self.extra_body = softer or None
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    def _retry_without_effort(self, exc, messages, stop, run_manager, kwargs):
+        """Safety net for cloud providers nobody has tried yet: a 400/422 that
+        does not say why, while we sent the common reasoning_effort field,
+        gets ONE try without the field. If that works the client keeps the
+        plain request for the session; if not, the setting is put back and the
+        first error surfaces, so every other fallback sees what it saw before."""
+        before = self.extra_body
+        if (getattr(exc, "status_code", None) not in (400, 422)
+                or not isinstance(before, dict) or "reasoning_effort" not in before):
+            raise exc
+        plain = {k: v for k, v in before.items() if k != "reasoning_effort"}
+        self.extra_body = plain or None
+        try:
+            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        except Exception:
+            self.extra_body = before
+            raise exc
+        print("[Amadeus] Server refused the request with a reasoning setting - "
+              "it works without one; keeping it off for this session.")
+        return result
 
     def _create_chat_result(self, response, generation_info=None):
         # Speed log: hand the server's own report (llama-server "timings" /
@@ -244,8 +274,10 @@ def _is_openrouter_host(base_url: str) -> bool:
 
 
 def _is_gemini_host(base_url: str) -> bool:
-    """True for Google's Gemini API (the OpenAI-compat layer)."""
-    return "generativelanguage.googleapis.com" in base_url
+    """True for Google's Gemini API (the OpenAI-compat layer) and for Google
+    Vertex AI (the same models, signed in with a JSON key - vertex_auth)."""
+    return ("generativelanguage.googleapis.com" in base_url
+            or "aiplatform.googleapis.com" in base_url)
 
 
 def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
@@ -263,6 +295,11 @@ def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
     """
     url = base_url.rstrip("/") + "/models"
     headers = {"Authorization": f"Bearer {(api_key or '').strip() or 'unsloth'}"}
+    if "aiplatform.googleapis.com" in base_url:
+        # Google Vertex AI has no model list. Ask a free question instead
+        # (does the sign-in pass work for this project?) and report
+        # "any_model": the callers then accept the model name as typed.
+        return _test_vertex(base_url, headers, timeout)
     try:
         response = requests.get(url, headers=headers, timeout=timeout)
     except Exception as exc:
@@ -276,6 +313,11 @@ def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
             body_text = (response.text or "")[:500].lower()
         except Exception:
             body_text = ""
+        # Some providers (Google Gemini, xAI) answer a wrong key with HTTP 400.
+        if response.status_code == 400 and ("api key" in body_text or "api_key" in body_text
+                                            or "api-key" in body_text):
+            return {"reachable": True, "models": [], "loading": False,
+                    "error": "Server is running but rejected the API key (HTTP 400)"}
         if response.status_code == 503 or "loading" in body_text:
             return {"reachable": True, "models": [], "loading": True,
                     "error": "Server is still loading the model"}
@@ -292,6 +334,24 @@ def test_server(base_url: str, api_key: str = "", timeout: float = 5.0) -> dict:
         if isinstance(mid, str):
             models.append(mid)
     return {"reachable": True, "models": models, "loading": False, "error": None}
+
+
+def _test_vertex(base_url: str, headers: dict, timeout: float) -> dict:
+    url = base_url.rstrip("/").rsplit("/endpoints/openapi", 1)[0] + "/endpoints"
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+    except Exception as exc:
+        return {"reachable": False, "models": [], "loading": False,
+                "error": f"{type(exc).__name__}: {exc}"}
+    if response.status_code == 200:
+        return {"reachable": True, "models": [], "loading": False, "error": None,
+                "any_model": True}
+    if response.status_code in (401, 403):
+        return {"reachable": True, "models": [], "loading": False,
+                "error": f"Google Vertex refused the sign-in (HTTP {response.status_code}) - "
+                         "open Settings and save the JSON key again"}
+    return {"reachable": True, "models": [], "loading": False,
+            "error": f"Server responded with HTTP {response.status_code}"}
 
 
 def _effective_sampling(base_url: str, enable_thinking: bool):
@@ -474,6 +534,11 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: 
         # OpenRouter's unified field. "minimal" = the lowest level; Gemini 3.8
         # Flash refuses to switch reasoning off completely (2026-10-20).
         extra_body["reasoning"] = {"effort": reasoning if thinking else "minimal"}
+    elif "aiplatform.googleapis.com" in base_url:
+        # Google Vertex AI: the same field as the Gemini API, but Gemini 3.8
+        # Flash there refuses "minimal" ("Thinking level is unsupported",
+        # checked live 2026-11-12) - "low" is its lowest level.
+        extra_body["reasoning_effort"] = reasoning if thinking else "low"
     elif _is_gemini_host(base_url):
         # Gemini 3 models take thinking level via the compat layer's
         # reasoning_effort field (verified live 2026-09-14: "high" runs ~1000

@@ -39,6 +39,8 @@ import speech_text
 import stats
 import timing
 import voice_gate
+import providers
+import vertex_auth
 
 from tts import streamVoiceChunks, renderVoiceToPath
 import tts as tts_module
@@ -56,6 +58,21 @@ from pathlib import Path
 
 application = Flask(__name__)
 CORS(application)
+
+
+# LLM provider picker (feature/provider-picker): the provider table and the
+# per-provider keys live in providers.py. Its key hooks hand the chosen key
+# to the running app - api_key.txt (the memory sidecar reads it) plus the
+# in-memory key and a rebuilt client; the clear hook empties it (a provider
+# without a key may still work, e.g. local servers).
+def _clear_llm_key():
+    memory.save_api_key("")
+    chat.API_KEY = ""
+    reset_llm()
+
+
+providers.set_key_hook = setKey
+providers.clear_key_hook = _clear_llm_key
 
 
 # "Last seen" presence (2026-10-15, memory.record_presence): every greeting
@@ -1517,6 +1534,124 @@ def set_llm_server():
     return jsonify({"status": "ok", "address": saved})
 
 
+# LLM provider picker (feature/provider-picker): Settings offers a list of
+# providers; choosing one fills in the server address (for Google Vertex it
+# signs in with the user's JSON key instead). Keys are saved per provider
+# (data/api_keys.json, personal); api_key.txt stays "the key in use" for the
+# memory sidecar.
+def _can_reveal() -> bool:
+    """The saved key may be shown back only on the PC itself or through the
+    user's own Tailscale tunnel: `tailscale serve` adds Tailscale-User-Login
+    for the user's own devices and strips it from public Funnel requests."""
+    return _from_this_pc() or bool(request.headers.get("Tailscale-User-Login"))
+
+
+@application.route("/llm/providers", methods=["GET"])
+def llm_provider_listing():
+    """The provider table (+ has_key per row), the active one, the saved
+    address, Vertex's sign-in state, and whether this client may see keys."""
+    data = providers.listing()
+    data["can_reveal"] = _can_reveal()
+    return jsonify(data)
+
+
+@application.route("/llm/key", methods=["POST"])
+def llm_save_key():
+    """Save one provider's API key. For the ACTIVE provider it also goes
+    into use right away (api_key.txt + rebuilt client); the reply carries a
+    probe of that server so Settings can show which models it offers."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider")
+    key = data.get("key")
+    address = data.get("address")
+    if not isinstance(provider, str) or not isinstance(key, str):
+        return jsonify({"message": "Missing 'provider' or 'key' field"}), 400
+    try:
+        providers.save_provider_key(provider, key)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    probe = providers.probe(provider, address if isinstance(address, str) else "")
+    return jsonify({"status": "ok", "has_key": True, **probe})
+
+
+@application.route("/llm/models", methods=["POST"])
+def llm_provider_models():
+    """Probe one provider's model list (no chat, no model call)."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider")
+    address = data.get("address")
+    if not isinstance(provider, str) or providers.get(provider) is None:
+        return jsonify({"message": "Unknown provider"}), 400
+    return jsonify(providers.probe(provider, address if isinstance(address, str) else ""))
+
+
+@application.route("/llm/key", methods=["GET"])
+def llm_reveal_key():
+    """The saved key for one provider - only on the PC itself or through the
+    user's own Tailscale tunnel (never over a public Funnel)."""
+    provider = request.args.get("provider") or ""
+    row = providers.get(provider)
+    if row is None:
+        return jsonify({"message": "Unknown provider"}), 400
+    if row["id"] == "vertex":
+        return jsonify({"message": "Google Vertex uses a JSON key, not an API key."}), 400
+    if not _can_reveal():
+        return jsonify({"message": "Open Settings on the PC or one of your own devices to view the key."}), 403
+    response = jsonify({"key": providers.key_for(provider)})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@application.route("/llm/vertex", methods=["POST"])
+def llm_save_vertex():
+    """Save the Google Vertex JSON key (or just its region). When Vertex is
+    the active provider, sign in again so the fresh pass + address go into
+    use; a failure there is reported, not raised - the saved key stands."""
+    data = request.get_json(silent=True) or {}
+    key_text = data.get("json")
+    region = data.get("region")
+    try:
+        if isinstance(key_text, str) and key_text.strip():
+            vertex_auth.save_key(key_text, region if isinstance(region, str) else "")
+        elif isinstance(region, str) and region.strip():
+            vertex_auth.save_region(region)
+        else:
+            return jsonify({"message": "Missing 'json' or 'region' field"}), 400
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    body = {"status": "ok", "vertex": vertex_auth.info()}
+    if providers.active_id() == "vertex":
+        try:
+            providers.activate("vertex")
+        except (ValueError, vertex_auth.VertexSignInError) as exc:
+            body["message"] = str(exc)
+    return jsonify({**body, **providers.probe("vertex")})
+
+
+@application.route("/llm/provider", methods=["POST"])
+def llm_set_provider():
+    """Switch the active provider (address auto-filled from the table; an
+    optional custom address / model name may ride along). For Vertex the
+    model is saved as google/<name>."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("id")
+    address = data.get("address")
+    model = data.get("model")
+    if not isinstance(provider, str) or providers.get(provider) is None:
+        return jsonify({"message": "Unknown provider"}), 400
+    try:
+        result = providers.activate(provider, address if isinstance(address, str) else "")
+    except (ValueError, vertex_auth.VertexSignInError) as exc:
+        return jsonify({"message": str(exc)}), 400
+    if isinstance(model, str) and model.strip():
+        saved_model = vertex_auth.model_name(model) if provider == "vertex" else model.strip()
+        setLLMModel(saved_model)
+    else:
+        saved_model = memory.load_llm_model()
+    return jsonify({"status": "ok", "active": result["id"],
+                    "address": result["address"], "model": saved_model})
+
+
 # pre: none
 # post: returns the user's saved name ('' = not set - she may still learn
 #       one from conversation, but the Settings value always outranks it)
@@ -1657,7 +1792,7 @@ def test_connection():
     model_found = (
         bool(probe["reachable"])
         and model_configured
-        and _model_in_list(model_name, probe["models"])
+        and (probe.get("any_model") or _model_in_list(model_name, probe["models"]))
     )
     # The trap that cost an evening on 2026-10-07: a ":batch" name IS in the
     # server's model list, so the test cheerfully says "model found" - but
@@ -1843,7 +1978,7 @@ def model_ready() -> Dict[str, object]:
     if not probe["reachable"]:
         return {"ready": False,
                 "reason": f"model server unreachable at {address}"}
-    if not _model_in_list(model_name, probe["models"]):
+    if not (probe.get("any_model") or _model_in_list(model_name, probe["models"])):
         return {"ready": False,
                 "reason": f"model '{model_name}' not served by {address}"}
     return {"ready": True, "reason": ""}

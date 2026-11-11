@@ -28,6 +28,12 @@ backend/unused_files/
 
 # Secrets
 backend/data/api_key.txt
+# LLM provider picker (feature/provider-picker): per-provider keys, the
+# active provider, and Google Vertex sign-in (all personal, like api_key.txt)
+backend/data/api_keys.json
+backend/data/vertex_key.json
+backend/data/vertex_region.txt
+backend/data/llm_provider.txt
 
 # Persistent / generated runtime data
 backend/data/memory.db
