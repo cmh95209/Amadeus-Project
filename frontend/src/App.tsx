@@ -312,7 +312,6 @@ export default function App() {
   const [keyHelpError, setKeyHelpError] = useState("");
   // The Google Vertex JSON-key area (the pass itself never reaches the page).
   const [vertexJson, setVertexJson] = useState("");
-  const [vertexReplacing, setVertexReplacing] = useState(false);
   const [vertexError, setVertexError] = useState("");
   // A counter that drops the answer of a check the user outgrew (they
   // switched provider while it was still running).
@@ -400,7 +399,6 @@ export default function App() {
     setKeyRevealing(false);
     setKeyHelpError("");
     setVertexJson("");
-    setVertexReplacing(false);
     setVertexError("");
     setSettingsError("");
     setSettingsNotice("");
@@ -756,7 +754,6 @@ export default function App() {
         setApiKeyInput("");
         setKeyHelpError("");
         setVertexJson("");
-        setVertexReplacing(false);
         setVertexError("");
         const address = id === "custom" ? listing.address : id === "auto" ? "" : row.url;
         if (id !== "vertex") setServerAddressState(address);
@@ -1151,7 +1148,6 @@ export default function App() {
     setKeyShown(false);
     setApiKeyInput("");
     setKeyHelpError("");
-    setVertexReplacing(false);
     setVertexJson("");
     setVertexError("");
     setProviderTest(null);
@@ -1322,7 +1318,6 @@ export default function App() {
         error: result.error,
       });
       setVertexJson("");
-      setVertexReplacing(false);
       setProviderTest(null);
       setTestModel("");
     } catch (error) {
@@ -1744,7 +1739,6 @@ export default function App() {
         setKeyDirty(false);
         setKeyShown(false);
         setVertexJson("");
-        setVertexReplacing(false);
         setVertexError("");
         void refreshHasApiKey();
         const activeRow = listing.providers.find((r) => r.id === listing.active);
@@ -3248,12 +3242,7 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      {providerListing?.vertex.configured && !vertexReplacing ? (
-                        <p className="settings-help" id="vertex-key-help">
-                          JSON key saved (project {providerListing.vertex.project}).
-                        </p>
-                      ) : (
-                        <label>
+                      <label>
                           JSON key
                           <textarea
                             className="vertex-json"
@@ -3264,14 +3253,14 @@ export default function App() {
                               setVertexJson(event.target.value);
                               setVertexError("");
                             }}
-                            placeholder="Paste the contents of your JSON key file"
+                            placeholder={providerListing?.vertex.configured
+                              ? `A JSON key is saved (project ${providerListing.vertex.project}) - paste or choose a new one to replace it`
+                              : "Paste the contents of your JSON key file"}
                             spellCheck={false}
                             aria-describedby="vertex-json-help"
                           />
-                        </label>
-                      )}
+                      </label>
                       <div className="conn-row">
-                        {!(providerListing?.vertex.configured && !vertexReplacing) && (
                           <>
                             <button
                               type="button"
@@ -3295,8 +3284,6 @@ export default function App() {
                               }}
                             />
                           </>
-                        )}
-                        {!(providerListing?.vertex.configured && !vertexReplacing) && (
                           <button
                             type="button"
                             className="ghost-button"
@@ -3305,7 +3292,6 @@ export default function App() {
                           >
                             Save JSON key
                           </button>
-                        )}
                         <button
                           type="button"
                           className="ghost-button"
@@ -3314,16 +3300,6 @@ export default function App() {
                         >
                           {providerTestBusy ? "Testing..." : "Test"}
                         </button>
-                        {providerListing?.vertex.configured && !vertexReplacing && (
-                          <button
-                            type="button"
-                            className="ghost-button"
-                            disabled={settingsBusy || providerBusy}
-                            onClick={() => setVertexReplacing(true)}
-                          >
-                            Replace
-                          </button>
-                        )}
                       </div>
                       {!providerListing?.vertex.configured && (
                         <p className="settings-help" id="vertex-json-help">
