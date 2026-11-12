@@ -269,10 +269,14 @@ def activate(pid: str, address: str = "") -> dict:
 # ---------- probes (no chat, no model call) --------------------------------
 
 def probe(pid: str, address: str = "") -> dict:
-    """{"reachable", "models", "loading", "error", "has_key", "key_checked"}
-    for one provider, the same shape llm.test_server returns (+ the key
-    facts). Vertex is checked by signing in and asking one free question
-    (vertex_auth.check_ready); its model list is the fixed VERTEX_MODELS.
+    """{"reachable", "models", "loading", "error", "has_key", "key_checked",
+    "catalogue"} for one provider, the same shape llm.test_server returns
+    (+ the key facts; catalogue is Vertex-only). Vertex is checked by
+    signing in and asking one free question (vertex_auth.check_ready); its
+    model list is the saved endpoint's own catalogue when it could be
+    loaded (catalogue True), else the fixed VERTEX_MODELS - the catalogue
+    over-promises (a listed model can still answer 404), so it is a help
+    for choosing, never the proof: that stays the Test button (any_model).
     key_checked = the model list the probe loaded really needed a key (a
     bogus key is refused); a provider that lists models without a key can
     only be checked with a real test message. Unknown provider -> ValueError."""
@@ -282,11 +286,15 @@ def probe(pid: str, address: str = "") -> dict:
     if pid == "vertex":
         result = vertex_auth.check_ready()
         if result.get("ok"):
-            data = {"reachable": True, "models": list(VERTEX_MODELS),
-                    "loading": False, "error": None}
+            catalogue = vertex_auth.list_models()
+            data = {"reachable": True,
+                    "models": catalogue or list(VERTEX_MODELS),
+                    "loading": False, "error": None,
+                    "catalogue": bool(catalogue)}
         else:
             data = {"reachable": False, "models": [], "loading": False,
-                    "error": result.get("error") or "Google Vertex sign-in failed."}
+                    "error": result.get("error") or "Google Vertex sign-in failed.",
+                    "catalogue": False}
         data["has_key"] = has_key(pid)
         data["key_checked"] = False
         return data

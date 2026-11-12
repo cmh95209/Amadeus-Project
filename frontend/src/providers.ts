@@ -75,7 +75,7 @@ export function probeStatus(
   if (!probe) {
     if (!row) return { tone: "", text: "" };
     if (row.kind === "vertex") {
-      return { tone: "", text: "Paste your JSON key and press Save JSON key." };
+      return { tone: "", text: "Paste or choose your JSON key and press Save." };
     }
     if (row.kind === "cloud") {
       // Only a cloud provider needs a key before it can be checked.
@@ -105,9 +105,20 @@ export function probeStatus(
   }
   if (probe.reachable) {
     if (row?.kind === "vertex") {
+      // Signed in: with the endpoint's own catalogue loaded the list count
+      // is its (a listed model can still 404 - the Test button stays the
+      // proof); without it only the sign-in is known.
+      const region = vertex?.region || "global";
+      if (probe.catalogue) {
+        const count = probe.models.length;
+        return {
+          tone: "ok",
+          text: `Signed in to Google Vertex (${region}), ${count} model${count === 1 ? "" : "s"} listed. Not tested yet - ${nudgeLower}`,
+        };
+      }
       return {
         tone: "ok",
-        text: `Signed in to Google Vertex. Not tested yet - ${nudgeLower}`,
+        text: `Signed in to Google Vertex (${region}). Not tested yet - ${nudgeLower}`,
       };
     }
     const count = probe.models.length;

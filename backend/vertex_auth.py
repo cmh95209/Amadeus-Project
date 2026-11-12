@@ -77,14 +77,16 @@ def clean_region(region: str) -> str:
 
 def save_key(text: str, region: str = "", keep_region: bool = False) -> dict:
     """Validate and store the JSON key (+ region; keep_region leaves the
-    saved region file as it is - the Settings page no longer asks for the
-    region, and a blank one would clobber the saved value). Returns info()."""
+    saved region file as it is - a blank region would clobber the saved
+    value). Both are validated BEFORE anything is written (a refused
+    region changes nothing). Returns info()."""
     parse_key(text)
+    if not keep_region:
+        region = clean_region(region)
     os.makedirs(memory.DATA_DIR, exist_ok=True)
     with open(_key_path(), "w", encoding="utf-8") as f:
         f.write(text.strip())
     if not keep_region:
-        region = clean_region(region)
         with open(_region_path(), "w", encoding="utf-8") as f:
             f.write(region)
     forget_token()
@@ -246,6 +248,11 @@ def forget_token() -> None:
     global _token, _token_time, _token_for
     with _lock:
         _token, _token_time, _token_for = "", 0.0, ""
+    # A new (or no) key: the endpoint list and model catalogues cached for
+    # the previous project no longer belong to anyone.
+    with _cache_lock:
+        _location_cache.clear()
+        _model_cache.clear()
 
 
 def token_age() -> float:
@@ -308,3 +315,160 @@ def check_ready(timeout: float = 15.0) -> dict:
     if response.status_code == 404:
         return {"ok": False, "error": f'Google does not know the region "{region}".'}
     return {"ok": False, "error": f"Google Vertex answered HTTP {response.status_code}."}
+
+
+# ---------- the endpoints and the model catalogues (measured 2026-11-12) --
+
+# The catalogue of a location OVER-PROMISES: a listed model can still
+# answer 404 when it is called (measured: asia-southeast1 lists
+# gemini-2.5-flash, the call says not found). The list is a help for
+# choosing - the Settings "Test" button stays the proof.
+
+# Catalogue models that are NOT chat (their last name part carries one of
+# these words: speech output, pictures, embeddings, transcription,
+# translation, live audio, ...).
+_NON_CHAT_MODEL_WORDS = (
+    "tts", "image", "embedding", "transcribe", "translate",
+    "live", "audio", "banana", "computer-use", "omni",
+)
+
+# The endpoint list (per project) is cached for one hour, a model catalogue
+# (per project + endpoint) for ten minutes; both are cleared by
+# forget_token - that is, whenever the saved key changes.
+LOCATION_CACHE_TTL = 60 * 60
+MODEL_CACHE_TTL = 10 * 60
+_location_cache = {}   # project -> (valid until, [ids])
+_model_cache = {}      # (project, region) -> (valid until, [names])
+_cache_lock = threading.Lock()
+
+
+def _paged_items(url: str, headers: dict, item_key: str,
+                 timeout: float = 15.0, max_pages: int = 5) -> list:
+    """The item dicts of one of Google's paged JSON answers (up to
+    max_pages pages, following nextPageToken; measured today: one page
+    each). Raises on any problem - the message holds only the HTTP status
+    or the error type name, never the pass or the key."""
+    items = []
+    page_token = None
+    for _ in range(max_pages):
+        params = {"pageSize": 200}
+        if page_token:
+            params["nextPageToken"] = page_token
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        except Exception as exc:
+            raise ValueError(f"could not be reached ({type(exc).__name__})")
+        if response.status_code != 200:
+            raise ValueError(f"answered HTTP {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError:
+            raise ValueError("did not answer JSON")
+        if not isinstance(data, dict):
+            raise ValueError("did not answer JSON")
+        batch = data.get(item_key)
+        if isinstance(batch, list):
+            items.extend(item for item in batch if isinstance(item, dict))
+        page_token = data.get("nextPageToken")
+        if not isinstance(page_token, str) or not page_token:
+            break
+    return items
+
+
+def list_locations(timeout: float = 15.0) -> list:
+    """The endpoint (location) ids the user's project may choose from:
+    "global" first, then the ids that contain a dash sorted A-Z - the
+    regions ("us-central1", "asia-southeast1", ...). The dashless
+    multi-regions ("us", "eu", "ca", "in", "gb", "au", "jp") are left
+    out: they REFUSE chat calls (HTTP 400, measured). Raises
+    VertexSignInError when the sign-in to Google fails; any other problem
+    (no key saved, unreachable, a strange reply) -> ["global"] (the
+    endpoint that always exists)."""
+    key = load_key()
+    if key is None:
+        return [DEFAULT_REGION]
+    project = key["project_id"]
+    with _cache_lock:
+        cached = _location_cache.get(project)
+    if cached and cached[0] > time.time():
+        return list(cached[1])
+    try:
+        pass_ = token()
+        items = _paged_items(
+            f"https://{VERTEX_HOST}/v1/projects/{project}/locations",
+            {"Authorization": "Bearer " + pass_}, "locations", timeout)
+    except VertexSignInError:
+        raise
+    except Exception:
+        return [DEFAULT_REGION]
+    ids = {item["locationId"] for item in items
+           if isinstance(item.get("locationId"), str)}
+    result = [DEFAULT_REGION] + sorted(
+        region for region in ids if region != DEFAULT_REGION and "-" in region)
+    if ids:
+        with _cache_lock:
+            _location_cache[project] = (time.time() + LOCATION_CACHE_TTL, result)
+    return result
+
+
+def _model_sort_key(name: str):
+    """Newest first: the version number in the name descending (3.8 > 3.5
+    > 3.1 > 2.5; a plain "4" > "3.8"), then A-Z. Names without a number
+    sort after the numbered ones (A-Z among themselves)."""
+    head = name[len("gemini-"):].split("-", 1)[0] if name.startswith("gemini-") else ""
+    version = [int(piece) for piece in head.split(".") if piece.isdigit()]
+    if not version:
+        return (1, name)
+    # "3" is 3.0: pad, so a plain "3" sorts after "3.8", not before it.
+    version = (version + [0, 0])[:2]
+    return (0, tuple(-part for part in version), name)
+
+
+def list_models(region: str = None, timeout: float = 15.0) -> list:
+    """The chat-capable Gemini model names of one location's catalogue
+    (the last path part of each "publishers/google/models/..." name, kept
+    when it starts with "gemini-" and carries none of the non-chat words
+    in _NON_CHAT_MODEL_WORDS), sorted newest first. region None = the
+    saved endpoint. Any problem (no key, sign-in failure, unreachable, a
+    strange reply) -> [] - the caller falls back to the fixed list. The
+    list over-promises (see the note above): a listed model may still
+    answer 404 when called."""
+    key = load_key()
+    if key is None:
+        return []
+    project = key["project_id"]
+    try:
+        region = clean_region(region) if region is not None else load_region()
+    except ValueError:
+        return []
+    cache_key = (project, region)
+    with _cache_lock:
+        cached = _model_cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return list(cached[1])
+    try:
+        pass_ = token()
+    except VertexSignInError:
+        return []
+    host = VERTEX_HOST if region == DEFAULT_REGION else f"{region}-{VERTEX_HOST}"
+    try:
+        items = _paged_items(
+            f"https://{host}/v1beta1/publishers/google/models",
+            {"Authorization": "Bearer " + pass_}, "publisherModels", timeout)
+    except Exception:
+        return []
+    names = set()
+    for item in items:
+        name = item.get("name")
+        if not isinstance(name, str):
+            continue
+        short = name.rsplit("/", 1)[-1]
+        if not short.startswith("gemini-"):
+            continue
+        if any(word in short for word in _NON_CHAT_MODEL_WORDS):
+            continue
+        names.add(short)
+    result = sorted(names, key=_model_sort_key)
+    with _cache_lock:
+        _model_cache[cache_key] = (time.time() + MODEL_CACHE_TTL, result)
+    return result

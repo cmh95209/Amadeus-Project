@@ -1643,12 +1643,19 @@ def llm_reveal_key():
 
 @application.route("/llm/vertex", methods=["POST"])
 def llm_save_vertex():
-    """Save the Google Vertex JSON key (or just its region). A saved JSON
-    key makes Vertex the ACTIVE provider at once - like the top "Save" for
-    the other providers; a region-only change renews the pass when Vertex
-    is already active. A sign-in failure is reported, not raised - the
-    saved key stands (the connection then keeps the previous provider).
-    The reply carries Vertex's check plus the active provider now."""
+    """Save the Google Vertex JSON key (or just its endpoint = region). A
+    saved key makes Vertex the ACTIVE provider at once - "Save connects at
+    once", like the top "Save" for the other providers; a region-only
+    change does the same when a key is saved (the user chose a new
+    endpoint, so it is used now). A region the clean_region rule refuses is
+    rejected before anything is written. A sign-in failure is reported, not
+    raised - the saved key stands (the connection then keeps the previous
+    provider). The saved model is settled against the new endpoint's
+    catalogue like the top Save does (_settle_model_after_switch): the
+    saved name is compared WITHOUT its "google/" prefix - in the list ->
+    kept, not in it -> cleared, catalogue not loaded -> left as is. The
+    reply carries the model now saved, Vertex's check (catalogue included)
+    and the active provider."""
     data = request.get_json(silent=True) or {}
     key_text = data.get("json")
     region = data.get("region")
@@ -1656,8 +1663,8 @@ def llm_save_vertex():
     key_saved = False
     try:
         if isinstance(key_text, str) and key_text.strip():
-            # No region in the request: keep the saved one (the page no
-            # longer sends it; a blank region would clobber it).
+            # No region in the request: keep the saved one (a blank region
+            # would clobber it).
             key_saved = True
             vertex_auth.save_key(key_text, region if region_given else "",
                                  keep_region=not region_given)
@@ -1668,13 +1675,32 @@ def llm_save_vertex():
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
     body = {"status": "ok", "vertex": vertex_auth.info()}
-    if key_saved or providers.active_id() == "vertex":
+    # With a key saved - just stored, or standing from before - the chosen
+    # endpoint becomes the connection at once.
+    if key_saved or vertex_auth.info()["configured"]:
         try:
             providers.activate("vertex")
         except (ValueError, vertex_auth.VertexSignInError) as exc:
             body["message"] = str(exc)
     body["active"] = providers.active_id()
-    return jsonify({**body, **providers.probe("vertex")})
+    probe = providers.probe("vertex")
+    body["model"] = _settle_model_after_switch("vertex", probe)
+    return jsonify({**body, **probe})
+
+
+@application.route("/llm/vertex/locations", methods=["GET"])
+def llm_vertex_locations():
+    """The Vertex endpoints (locations) Settings may offer: "global" first,
+    then the regions - the multi-regions are left out (they refuse chat
+    calls). Without a saved JSON key only "global" is offered; a sign-in
+    failure is read the same way (the real words then come from the check
+    or the save). Same access as the other listing routes - it holds no
+    key material."""
+    try:
+        locations = vertex_auth.list_locations()
+    except vertex_auth.VertexSignInError:
+        locations = [vertex_auth.DEFAULT_REGION]
+    return jsonify({"locations": locations, "region": vertex_auth.load_region()})
 
 
 @application.route("/llm/provider", methods=["POST"])
@@ -1828,16 +1854,31 @@ def _model_in_list(model_name: str, server_models: list[str]) -> bool:
 
 
 def _settle_model_after_switch(provider: str, probe: dict) -> str:
-    """The saved model after the top "Save" switched the connection: kept
-    when the new server's model list says it is there (the same matching
-    as the /testConnection dot), cleared (the "No Model Selected." state)
-    when the list says it is not - she must not chat with a model name
-    from the previous provider - and left as is when the list could not
-    be loaded (unreachable, key rejected, still loading) or the server
-    takes any model name (Vertex's fixed catalog, "any_model"). Returns
-    the model now saved ("" = none, shown as "No Model Selected.")."""
+    """The saved model after the top "Save" (or a Vertex save) switched the
+    connection: kept when the new server's model list says it is there (the
+    same matching as the /testConnection dot), cleared (the "No Model
+    Selected." state) when the list says it is not - she must not chat with
+    a model name the new server does not list - and left as is when the list
+    could not be loaded (unreachable, key rejected, still loading) or the
+    server takes any model name ("any_model"). For Vertex the list is the
+    endpoint's own catalogue when it loaded (catalogue True): the saved name
+    is compared WITHOUT its leading "google/" prefix - in the list -> kept,
+    not in it -> cleared (the catalogue lists what the endpoint OFFERS; it
+    over-promises in the other direction too, a listed name may still 404,
+    which is why the Test button stays the proof). With the fixed fallback
+    list (the catalogue could not be loaded) the model is left as is.
+    Returns the model now saved ("" = none, shown as "No Model Selected.")."""
     model = memory.load_llm_model()
-    if provider == "vertex" or probe.get("any_model"):
+    if provider == "vertex":
+        if probe.get("catalogue"):
+            bare = (model or "").strip()
+            if bare.startswith("google/"):
+                bare = bare[len("google/"):]
+            if bare and bare not in (probe.get("models") or []):
+                chat.setLLMModel("")
+                return ""
+        return model
+    if probe.get("any_model"):
         return model
     if not probe.get("reachable") or probe.get("error") or probe.get("loading"):
         return model

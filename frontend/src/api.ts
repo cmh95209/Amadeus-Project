@@ -976,6 +976,11 @@ export type ProviderProbe = {
   key_checked?: boolean;
   /** A key is saved for this provider. */
   has_key?: boolean;
+  /** Vertex only: the list came from Google's own catalogue of the chosen
+   * endpoint (true), or from the fixed fallback list the app keeps when
+   * the catalogue could not be loaded (false). A listed model can still
+   * 404 - the Test button stays the proof. */
+  catalogue?: boolean;
 };
 
 function providerRow(data: Record<string, unknown>): ProviderRow | null {
@@ -1013,6 +1018,7 @@ function probeFrom(data: Record<string, unknown>): ProviderProbe {
     error: typeof data.error === "string" ? data.error : null,
     key_checked: data.key_checked === true,
     has_key: data.has_key === true,
+    catalogue: data.catalogue === true,
   };
 }
 
@@ -1134,21 +1140,25 @@ export type VertexSave = {
 export type VertexSaveResult = {
   status: string;
   vertex: VertexInfo;
-  /** The active provider after the save (a saved JSON key makes Vertex
-   * active at once; a sign-in failure keeps the previous one). */
+  /** The active provider after the save (a saved JSON key - or, with a key
+   * standing, a chosen endpoint - makes Vertex active at once; a sign-in
+   * failure keeps the previous one). */
   active: string;
+  /** The model saved after the save, settled against the endpoint's
+   * catalogue ("" = "No Model Selected."). */
+  model: string;
   reachable: boolean;
   models: string[];
   loading: boolean;
   error: string | null;
   /** Signing in failed (the saved key stands; the switch did not happen). */
   message?: string;
-};
+} & ProviderProbe;
 
-/** Save Google Vertex's JSON key (or just its region). A saved JSON key
- * makes Vertex the active provider at once (like the top Save); the reply
- * carries the sign-in state, a check that the pass works, and the active
- * provider now. */
+/** Save Google Vertex's JSON key (or, with a key already saved, just its
+ * endpoint). Either way Vertex becomes the active provider at once (like
+ * the top Save); the reply carries the sign-in state, a check that the
+ * pass works, the model saved after the settle, and the active provider. */
 export async function saveVertex(fields: VertexSave): Promise<VertexSaveResult> {
   const data = await parseResponse(await fetch(`${API_BASE}/llm/vertex`, {
     method: "POST",
@@ -1165,8 +1175,25 @@ export async function saveVertex(fields: VertexSave): Promise<VertexSaveResult> 
     status: typeof data.status === "string" ? data.status : "ok",
     vertex: vertexInfo(data.vertex),
     active: typeof data.active === "string" ? data.active : "vertex",
+    model: typeof data.model === "string" ? data.model : "",
     ...probeFrom(data),
     ...(typeof data.message === "string" ? { message: data.message } : {}),
+  };
+}
+
+/** The Vertex endpoints Settings may offer: "global" first, then the
+ * regions (the multi-regions are left out - they refuse chat calls).
+ * Without a saved key only "global" is offered. `region` is the endpoint
+ * the saved key uses right now. */
+export async function getVertexLocations(): Promise<{ locations: string[]; region: string }> {
+  const data = await parseResponse(
+    await fetch(`${API_BASE}/llm/vertex/locations`, { cache: "no-store" })
+  );
+  return {
+    locations: Array.isArray(data.locations)
+      ? (data.locations as unknown[]).filter((l): l is string => typeof l === "string")
+      : ["global"],
+    region: typeof data.region === "string" && data.region ? data.region : "global",
   };
 }
 

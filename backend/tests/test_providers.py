@@ -373,10 +373,13 @@ class ProbeTests(_TempData):
     OK = {"reachable": True, "models": ["m1"], "loading": False, "error": None}
 
     def test_vertex_maps_check_ready(self):
+        # No key saved here: the catalogue call answers [] before any
+        # network, so the probe falls back to the fixed list.
         with patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
             result = providers.probe("vertex")
         self.assertTrue(result["reachable"])
         self.assertEqual(result["models"], providers.VERTEX_MODELS)
+        self.assertFalse(result["catalogue"])
         self.assertFalse(result["loading"])
         self.assertIsNone(result["error"])
         with patch.object(vertex_auth, "check_ready",
@@ -385,6 +388,25 @@ class ProbeTests(_TempData):
         self.assertFalse(result["reachable"])
         self.assertEqual(result["models"], [])
         self.assertEqual(result["error"], "sign-in refused")
+        self.assertFalse(result["catalogue"])
+
+    def test_vertex_probe_lists_the_endpoints_catalogue_when_it_loads(self):
+        # The endpoint's own catalogue is the model list (catalogue True);
+        # when it could not be loaded the fixed list stands in (False).
+        with patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(vertex_auth, "list_models",
+                          return_value=["gemini-4-argon", "gemini-3.5-flash"]) as models:
+            result = providers.probe("vertex")
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["models"], ["gemini-4-argon", "gemini-3.5-flash"])
+        self.assertTrue(result["catalogue"])
+        # The catalogue is asked for the SAVED endpoint (region=None).
+        models.assert_called_once_with()
+        with patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(vertex_auth, "list_models", return_value=[]):
+            result = providers.probe("vertex")
+        self.assertEqual(result["models"], providers.VERTEX_MODELS)
+        self.assertFalse(result["catalogue"])
 
     def test_cloud_probe_passes_the_table_address_and_key(self):
         memory.save_llm_server("https://api.deepseek.com")
@@ -604,6 +626,266 @@ class TokenTests(_TempData):
         (self.data / "vertex_key.json").unlink()
         with self.assertRaisesRegex(vertex_auth.VertexSignInError, "No Google Vertex JSON key"):
             vertex_auth.token()
+
+
+class _FakeGoogleResponse:
+    """The part of a requests response the two listing functions use."""
+    def __init__(self, status_code=200, body=None):
+        self.status_code = status_code
+        self.body = body if body is not None else {}
+
+    def json(self):
+        if isinstance(self.body, str):
+            raise ValueError("no JSON")
+        return self.body
+
+
+class _FakeGoogle:
+    """A fake for vertex_auth.requests: one prepared page per
+    nextPageToken ({None: first page, "t2": second, ...}). Records every
+    call (url, params, headers) so the URL / page size / pass can be
+    asserted. `exc` makes every call raise it (offline)."""
+    def __init__(self, pages, status=200, exc=None):
+        self.pages = pages if isinstance(pages, dict) else {None: pages}
+        self.status = status
+        self.exc = exc
+        self.calls = []
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        if self.exc is not None:
+            raise self.exc
+        self.calls.append({"url": url, "params": dict(params or {}),
+                           "headers": dict(headers or {})})
+        token = (params or {}).get("nextPageToken")
+        if token not in self.pages:
+            raise AssertionError(f"no page prepared for token {token!r}")
+        return _FakeGoogleResponse(self.status, self.pages[token])
+
+
+class CatalogueTests(_TempData):
+    """list_locations / list_models against a FAKE Google (a fake
+    requests.get - no network; the sign-in is a fake pass)."""
+
+    def setUp(self):
+        super().setUp()
+        vertex_auth.forget_token()
+        n, e, d = rsa_numbers()
+        p = patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d))
+        p.start()
+        self.addCleanup(p.stop)
+        vertex_auth.save_key(fake_vertex_key(), "global")
+        t = patch.object(vertex_auth, "token", return_value="ya29-catalogue-pass")
+        t.start()
+        self.addCleanup(t.stop)
+
+    def _google(self, fake):
+        return patch.object(vertex_auth, "requests", fake)
+
+    # ---------- list_locations ----------
+
+    def test_without_a_key_there_is_nothing_to_list(self):
+        (self.data / "vertex_key.json").unlink()
+        with self._google(_FakeGoogle({None: {"locations": []}})) as fake:
+            self.assertEqual(vertex_auth.list_locations(), ["global"])
+            self.assertEqual(vertex_auth.list_models(), [])
+        self.assertEqual(fake.calls, [])   # never signed in, never asked
+
+    def test_locations_global_first_then_regions_the_multi_regions_are_left_out(self):
+        # Measured 2026-11-12: 54 entries, of which the dashless multi-
+        # regions ("us", "eu", "ca", ...) refuse chat calls (400) - they
+        # must not be offered.
+        fake = _FakeGoogle({None: {"locations": [
+            {"locationId": "global"},
+            {"locationId": "us"},
+            {"locationId": "eu"},
+            {"locationId": "ca"},
+            {"locationId": "in"},
+            {"locationId": "gb"},
+            {"locationId": "au"},
+            {"locationId": "jp"},
+            {"locationId": "us-central1"},
+            {"locationId": "asia-southeast1"},
+            {"locationId": "europe-west1"},
+            {"locationId": "northamerica-northeast1"},
+        ]}})
+        with self._google(fake):
+            self.assertEqual(vertex_auth.list_locations(),
+                             ["global", "asia-southeast1", "europe-west1",
+                              "northamerica-northeast1", "us-central1"])
+        # Asked on the global host, with the pass, pageSize 200.
+        call = fake.calls[0]
+        self.assertEqual(call["url"],
+                         "https://aiplatform.googleapis.com/v1/projects/"
+                         "amadeus-offline-test/locations")
+        self.assertEqual(call["params"], {"pageSize": 200})
+        self.assertEqual(call["headers"],
+                         {"Authorization": "Bearer ya29-catalogue-pass"})
+
+    def test_locations_follow_next_page_tokens(self):
+        fake = _FakeGoogle({
+            None: {"locations": [{"locationId": "global"}], "nextPageToken": "t2"},
+            "t2": {"locations": [{"locationId": "us-central1"}], "nextPageToken": "t3"},
+            "t3": {"locations": [{"locationId": "asia-southeast1"}]},
+        })
+        with self._google(fake):
+            self.assertEqual(vertex_auth.list_locations(),
+                             ["global", "asia-southeast1", "us-central1"])
+        self.assertEqual([c["params"].get("nextPageToken") for c in fake.calls],
+                         [None, "t2", "t3"])
+
+    def test_locations_stops_after_five_pages_even_if_google_keeps_paging(self):
+        # Every page hands out the NEXT prepared token, so the pager walks
+        # None -> p1 -> p2 -> p3 -> p4 and the cap stops it after five
+        # calls (the p5 page is never fetched).
+        fake = _FakeGoogle({token: {"locations": [{"locationId": f"region-{i}"}],
+                                    "nextPageToken": f"p{i + 1}"}
+                            for i, token in enumerate([None, "p1", "p2", "p3", "p4", "p5"])})
+        with self._google(fake):
+            result = vertex_auth.list_locations()
+        self.assertEqual(len(fake.calls), 5)    # the cap, not an infinite loop
+        self.assertEqual(result, ["global", "region-0", "region-1", "region-2",
+                                  "region-3", "region-4"])
+
+    def test_locations_bad_reply_falls_back_to_global(self):
+        with self._google(_FakeGoogle({None: {"locations": []}}, status=500)):
+            self.assertEqual(vertex_auth.list_locations(), ["global"])
+        with self._google(_FakeGoogle({None: "not json"})):
+            self.assertEqual(vertex_auth.list_locations(), ["global"])
+        with self._google(_FakeGoogle({None: {}}, exc=ConnectionError("offline"))):
+            self.assertEqual(vertex_auth.list_locations(), ["global"])
+        with self._google(_FakeGoogle({None: {"models": []}})):   # the wrong item key
+            self.assertEqual(vertex_auth.list_locations(), ["global"])
+
+    def test_locations_a_sign_in_failure_is_raised(self):
+        with patch.object(vertex_auth, "token",
+                          side_effect=vertex_auth.VertexSignInError("no pass")):
+            with self.assertRaises(vertex_auth.VertexSignInError):
+                vertex_auth.list_locations()
+
+    def test_locations_are_cached_for_an_hour_and_cleared_by_a_new_key(self):
+        now = [1000.0]
+        fake = _FakeGoogle({None: {"locations": [{"locationId": "global"},
+                                                 {"locationId": "us-central1"}]}})
+        with patch.object(vertex_auth, "time") as fake_time, self._google(fake):
+            fake_time.time = lambda: now[0]
+            self.assertEqual(vertex_auth.list_locations(), ["global", "us-central1"])
+            now[0] += vertex_auth.LOCATION_CACHE_TTL - 1
+            self.assertEqual(vertex_auth.list_locations(), ["global", "us-central1"])
+            self.assertEqual(len(fake.calls), 1)       # the cache answered
+            now[0] += 2                                # expired
+            vertex_auth.list_locations()
+            self.assertEqual(len(fake.calls), 2)
+            vertex_auth.forget_token()                 # a new key: cache is gone
+            vertex_auth.list_locations()
+            self.assertEqual(len(fake.calls), 3)
+
+    # ---------- list_models ----------
+
+    def test_models_keeps_chat_gemini_models_and_sorts_newest_first(self):
+        fake = _FakeGoogle({None: {"publisherModels": [
+            {"name": "publishers/google/models/gemini-3.8-flash"},
+            {"name": "publishers/google/models/gemini-3.7-flash"},
+            {"name": "publishers/google/models/gemini-3.6-flash"},
+            {"name": "publishers/google/models/gemini-3.5-flash"},
+            {"name": "publishers/google/models/gemini-3.5-flash-lite"},
+            {"name": "publishers/google/models/gemini-3.1-pro-preview"},
+            {"name": "publishers/google/models/gemini-3.1-flash-lite"},
+            {"name": "publishers/google/models/gemini-4-argon"},
+            {"name": "publishers/google/models/gemini-4-carbon"},
+            {"name": "publishers/google/models/gemini-2.5-pro"},
+            {"name": "publishers/google/models/gemini-2.5-flash"},
+            # the non-chat ones are left out:
+            {"name": "publishers/google/models/gemini-3.8-flash-tts"},
+            {"name": "publishers/google/models/gemini-2.5-pro-tts"},
+            {"name": "publishers/google/models/gemini-3-pro-image-preview"},
+            {"name": "publishers/google/models/gemini-3.1-flash-image"},
+            {"name": "publishers/google/models/gemini-embedding-2-preview"},
+            {"name": "publishers/google/models/gemini-3.5-transcribe"},
+            {"name": "publishers/google/models/gemini-3.5-live-translate-preview"},
+            {"name": "publishers/google/models/gemini-live-2.5-flash-native-audio"},
+            {"name": "publishers/google/models/gemini-nano-banana-2.1"},
+            {"name": "publishers/google/models/gemini-omni-1.2-flash"},
+            {"name": "publishers/google/models/gemini-2.5-computer-use-preview-10-2025"},
+            # not Gemini at all:
+            {"name": "publishers/google/models/gemma3-27b"},
+            {"name": "publishers/google/models/text-embedding-005"},
+        ]}})
+        with self._google(fake):
+            self.assertEqual(vertex_auth.list_models(region="global"), [
+                # newest first (a plain "4" > "3.8"), then A-Z:
+                "gemini-4-argon", "gemini-4-carbon",
+                "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+                "gemini-3.5-flash", "gemini-3.5-flash-lite",
+                "gemini-3.1-flash-lite", "gemini-3.1-pro-preview",
+                "gemini-2.5-flash", "gemini-2.5-pro",
+            ])
+        # The GLOBAL host for the "global" endpoint...
+        self.assertEqual(fake.calls[0]["url"],
+                         "https://aiplatform.googleapis.com/v1beta1/publishers/google/models")
+        self.assertEqual(fake.calls[0]["params"], {"pageSize": 200})
+
+    def test_models_asks_the_regional_host_and_the_saved_region_by_default(self):
+        vertex_auth.save_region("us-central1")
+        fake = _FakeGoogle({None: {"publisherModels": [
+            {"name": "publishers/google/models/gemini-3.5-flash"}]}})
+        with self._google(fake):
+            self.assertEqual(vertex_auth.list_models(), ["gemini-3.5-flash"])
+        self.assertEqual(fake.calls[0]["url"],
+                         "https://us-central1-aiplatform.googleapis.com"
+                         "/v1beta1/publishers/google/models")
+
+    def test_models_follow_next_page_tokens_too(self):
+        fake = _FakeGoogle({
+            None: {"publisherModels": [{"name": "publishers/google/models/gemini-3.5-flash"}],
+                   "nextPageToken": "m2"},
+            "m2": {"publisherModels": [
+                {"name": "publishers/google/models/gemini-3.5-flash"},
+                {"name": "publishers/google/models/gemini-2.5-flash"}]},
+        })
+        with self._google(fake):
+            self.assertEqual(vertex_auth.list_models(region="global"),
+                             ["gemini-3.5-flash", "gemini-2.5-flash"])
+        self.assertEqual(len(fake.calls), 2)   # and the name is not listed twice
+
+    def test_models_problems_return_an_empty_list(self):
+        (self.data / "vertex_key.json").unlink()
+        self.assertEqual(vertex_auth.list_models(), [])
+        with patch.object(vertex_auth, "token",
+                          side_effect=vertex_auth.VertexSignInError("no pass")):
+            self.assertEqual(vertex_auth.list_models(), [])
+        with self._google(_FakeGoogle({None: {"publisherModels": []}}, status=500)):
+            self.assertEqual(vertex_auth.list_models(), [])
+        # a region the rule refuses: nothing to list (and nothing written)
+        self.assertEqual(vertex_auth.list_models(region="us_central1"), [])
+
+    def test_models_are_cached_per_endpoint(self):
+        fake = _FakeGoogle({None: {"publisherModels": [
+            {"name": "publishers/google/models/gemini-3.5-flash"}]}})
+        with self._google(fake):
+            self.assertEqual(vertex_auth.list_models(region="global"), ["gemini-3.5-flash"])
+            self.assertEqual(vertex_auth.list_models(region="us-central1"), ["gemini-3.5-flash"])
+            self.assertEqual(vertex_auth.list_models(region="global"), ["gemini-3.5-flash"])
+        self.assertEqual(len(fake.calls), 2)    # one per endpoint, the third is cached
+
+    def test_saving_a_new_key_clears_the_cached_lists(self):
+        fake = _FakeGoogle({None: {"locations": [{"locationId": "global"}]}})
+        with self._google(fake):
+            vertex_auth.list_locations()
+            self.assertTrue(vertex_auth._location_cache)
+            vertex_auth.save_key(fake_vertex_key(), "global")   # a (re)saved key
+        self.assertEqual(vertex_auth._location_cache, {})
+        self.assertEqual(vertex_auth._model_cache, {})
+
+    def test_neither_the_pass_nor_the_key_reaches_the_outputs(self):
+        fake = _FakeGoogle({None: {"locations": [{"locationId": "global"},
+                                                 {"locationId": "us-central1"}],
+                                  "publisherModels": [
+                                      {"name": "publishers/google/models/gemini-3.5-flash"}]}})
+        with self._google(fake):
+            outputs = vertex_auth.list_locations() + vertex_auth.list_models(region="global")
+        for text in outputs:
+            self.assertNotIn("ya29-catalogue-pass", text)
+            self.assertNotIn(fake_vertex_key(), text)
 
 
 class RouteTests(_FreshAppTests):
@@ -829,12 +1111,14 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(self.client.get("/llm/key", query_string={"provider": "nope"}).status_code, 400)
 
     def test_vertex_route_saves_key_region_and_probe(self):
-        # "Save JSON key": the key is stored AND Vertex becomes the active
-        # provider at once (pass + per-project address into use).
+        # "Save": the key is stored AND Vertex becomes the active provider
+        # at once (pass + per-project address into use). The catalogue
+        # could not be loaded -> the fixed fallback list, catalogue False.
         n, e, d = rsa_numbers()
         with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
              patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"), \
-             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(self.vertex_auth, "list_models", return_value=[]):
             res = self.client.post("/llm/vertex",
                                    json={"json": fake_vertex_key(), "region": "us-central1"})
         self.assertEqual(res.status_code, 200)
@@ -846,6 +1130,8 @@ class RouteTests(_FreshAppTests):
         self.assertIn("us-central1-aiplatform", body["vertex"]["address"])
         self.assertTrue(body["reachable"])
         self.assertEqual(body["models"], self.providers.VERTEX_MODELS)
+        self.assertFalse(body["catalogue"])
+        self.assertEqual(body["model"], "")  # nothing was saved before
         self.assertEqual(body["active"], "vertex")
         self.assertEqual(self.providers.active_id(), "vertex")
         self.assertIn("aiplatform.googleapis.com", self.memory.load_llm_server())
@@ -882,11 +1168,173 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(self.client.post("/llm/vertex", json={}).status_code, 400)
 
     def test_vertex_route_region_only(self):
+        # No key saved: the region is stored, but nothing can be activated
+        # (there is nothing to sign in with) - the previous provider stands.
         res = self.client.post("/llm/vertex", json={"region": "europe-west1"})
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json["vertex"]["region"], "europe-west1")
         self.assertFalse(res.json["vertex"]["configured"])
         self.assertFalse(res.json["reachable"])  # no key saved yet (offline)
+        self.assertNotEqual(res.json["active"], "vertex")
+
+    def test_region_only_save_with_a_saved_key_activates_vertex(self):
+        # "Save connects at once": with a key saved, choosing an endpoint
+        # (empty JSON box) and pressing Save uses it at once - the saved
+        # endpoint's pass + address go into use.
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"), \
+             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(self.vertex_auth, "list_models", return_value=[]):
+            res = self.client.post("/llm/vertex", json={"region": "asia-southeast1"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["active"], "vertex")
+        self.assertEqual(self.providers.active_id(), "vertex")
+        self.assertIn("asia-southeast1-aiplatform", self.memory.load_llm_server())
+        self.assertEqual(self.memory.load_api_key(), "ya29-offline-pass")
+
+    def test_vertex_saves_settle_the_saved_model_like_the_top_save(self):
+        # The saved model is settled against the endpoint's catalogue: in
+        # the list -> kept (WITH its "google/" prefix), not in it -> cleared
+        # (the "No Model Selected." state), catalogue not loaded -> left as
+        # is. A key+endpoint save settles through the same code as a
+        # region-only save.
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
+        catalogue = ["gemini-4-argon", "gemini-3.5-flash"]
+
+        def vertex_ok(models):
+            # _rsa_numbers too: the save re-parses the key, and the reply
+            # re-reads it (info) - the placeholder PEM parses only with it.
+            return [patch.object(self.vertex_auth, "_rsa_numbers",
+                                 return_value=(n, e, d)),
+                    patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"),
+                    patch.object(self.vertex_auth, "check_ready",
+                                 return_value={"ok": True, "error": None}),
+                    patch.object(self.vertex_auth, "list_models", return_value=models)]
+
+        # 1. in the catalogue (stored with the prefix) -> kept
+        self.memory.save_llm_model("google/gemini-3.5-flash")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex",
+                               json={"json": fake_vertex_key(), "region": "us-central1"})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["model"], "google/gemini-3.5-flash")
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.5-flash")
+        self.assertEqual(res.json["active"], "vertex")
+
+        # 2. not in the catalogue -> cleared (the bare name is compared, so
+        #    it is also cleared when the user saved it without the prefix)
+        self.memory.save_llm_model("google/gemini-9.9-titanium")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex", json={"region": "us-central1"})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.json["model"], "")
+        self.assertEqual(self.memory.load_llm_model(), "")
+
+        self.memory.save_llm_model("gemini-9.9-titanium")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex", json={"region": "us-central1"})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.json["model"], "")
+
+        # 3. the catalogue could not be loaded -> left as is
+        self.memory.save_llm_model("google/gemini-3.5-flash")
+        patches = vertex_ok([])
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex", json={"region": "asia-southeast1"})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.json["model"], "google/gemini-3.5-flash")
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.5-flash")
+        self.assertTrue(res.json["reachable"])
+        self.assertFalse(res.json["catalogue"])
+
+    def test_vertex_route_rejects_an_invalid_region_before_writing(self):
+        # The clean_region rule, with the existing message - and nothing is
+        # written: a key + invalid region rejects before the key file is
+        # touched, the saved region file is untouched.
+        res = self.client.post("/llm/vertex", json={"region": "us_central1"})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json["message"],
+                         "The region may only hold letters, digits and dashes "
+                         "(for example: global).")
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "us-central1")
+        key_before = Path("data/vertex_key.json").read_text(encoding="utf-8")
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            res = self.client.post("/llm/vertex",
+                                   json={"json": fake_vertex_key(), "region": "us_central1"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("The region may only hold letters, digits and dashes",
+                      res.json["message"])
+        self.assertEqual(Path("data/vertex_key.json").read_text(encoding="utf-8"),
+                         key_before)
+        self.assertEqual(self.vertex_auth.load_region(), "us-central1")
+
+    def test_vertex_locations_route_without_a_key_offers_only_global(self):
+        res = self.client.get("/llm/vertex/locations")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json, {"locations": ["global"], "region": "global"})
+
+    def test_vertex_locations_route_lists_the_endpoints_and_the_saved_region(self):
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "us-central1")
+        with patch.object(self.vertex_auth, "list_locations",
+                          return_value=["global", "asia-southeast1", "us-central1"]):
+            res = self.client.get("/llm/vertex/locations")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["locations"],
+                         ["global", "asia-southeast1", "us-central1"])
+        self.assertEqual(res.json["region"], "us-central1")
+
+    def test_vertex_locations_route_reads_a_sign_in_failure_as_global_only(self):
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
+        with patch.object(self.vertex_auth, "list_locations",
+                          side_effect=self.vertex_auth.VertexSignInError("no pass")):
+            res = self.client.get("/llm/vertex/locations")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["locations"], ["global"])
+        self.assertEqual(res.json["region"], "global")
+
+    def test_models_route_reports_the_catalogue_fact(self):
+        # The probe's catalogue flag: the endpoint's own list when it
+        # loaded (catalogue True), the fixed fallback otherwise (False).
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(self.vertex_auth, "list_models",
+                          return_value=["gemini-4-argon", "gemini-3.5-flash"]):
+            res = self.client.post("/llm/models", json={"provider": "vertex"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["models"], ["gemini-4-argon", "gemini-3.5-flash"])
+        self.assertTrue(res.json["catalogue"])
+        self.assertFalse(res.json["key_checked"])
+        with patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(self.vertex_auth, "list_models", return_value=[]):
+            res = self.client.post("/llm/models", json={"provider": "vertex"})
+        self.assertEqual(res.json["models"], self.providers.VERTEX_MODELS)
+        self.assertFalse(res.json["catalogue"])
 
     def test_provider_route_switches_to_vertex_and_prefixes_the_model(self):
         n, e, d = rsa_numbers()
@@ -1044,12 +1492,13 @@ class RouteTests(_FreshAppTests):
         n, e, d = rsa_numbers()
         with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
              patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"), \
-             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(self.vertex_auth, "list_models", return_value=[]):
             res = self.client.post("/llm/vertex",
                                    json={"json": fake_vertex_key(), "region": "us-central1"})
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.json["active"], "vertex")  # active at once
-            # The page now saves the JSON key WITHOUT a region: the saved
+            # The page saves the JSON key WITHOUT a region: the saved
             # region must survive.
             res = self.client.post("/llm/vertex", json={"json": fake_vertex_key()})
         self.assertEqual(res.status_code, 200)
@@ -1079,7 +1528,11 @@ class SafetyNetTests(unittest.TestCase):
         calls = []
 
         def fake(self_, messages, stop=None, run_manager=None, **kw):
-            calls.append(dict(self_.extra_body or {}))
+            # What the call actually sent: the per-request override (a race
+            # attempt passes its body without touching the shared client's
+            # attribute), else the client's own body.
+            sent = kw.get("extra_body", self_.extra_body)
+            calls.append(dict(sent or {}))
             if len(calls) <= fail_times:
                 raise _Refused()
             return "result"
@@ -1846,12 +2299,14 @@ class KeyCheckedTests(_TempData):
     def test_vertex_is_never_key_checked(self):
         n, e, d = rsa_numbers()
         with patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
-             patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+             patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}), \
+             patch.object(vertex_auth, "list_models", return_value=[]):
             vertex_auth.save_key(fake_vertex_key(), "global")
             result = providers.probe("vertex")
         self.assertFalse(result["key_checked"])
         self.assertTrue(result["has_key"])
         self.assertTrue(result["reachable"])
+        self.assertFalse(result["catalogue"])
 
 
 if __name__ == "__main__":

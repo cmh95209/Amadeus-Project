@@ -89,6 +89,7 @@ import {
   testProviderModel,
   revealProviderKey,
   saveVertex,
+  getVertexLocations,
   activateProvider,
   getBuiltinModel,
   loadBuiltinModel,
@@ -313,6 +314,15 @@ export default function App() {
   // The Google Vertex JSON-key area (the pass itself never reaches the page).
   const [vertexJson, setVertexJson] = useState("");
   const [vertexError, setVertexError] = useState("");
+  // The endpoints the Vertex panel may offer: the project's location list
+  // ("global" first, then the regions - the multi-regions refuse chat
+  // calls, so the backend leaves them out). Reloaded when the panel is
+  // shown, after a big settings save, and after a JSON-key save (a new key
+  // may belong to a project with different endpoints). vertexRegion = the
+  // dropdown's value: the saved region when the panel opens, whatever the
+  // user picks after (it means nothing until Save is pressed).
+  const [vertexRegions, setVertexRegions] = useState<string[]>([]);
+  const [vertexRegion, setVertexRegion] = useState("");
   // A counter that drops the answer of a check the user outgrew (they
   // switched provider while it was still running).
   const providerSeq = useRef(0);
@@ -320,14 +330,28 @@ export default function App() {
   providerIdRef.current = providerId;
   const selectedProvider = providerListing?.providers.find((r) => r.id === providerId) ?? null;
   // Custom Model: the status line under the key area (a failed Vertex save
-  // shows its message instead; a finished Test shows its words).
+  // shows its message instead; a finished Test shows its words). Choosing a
+  // different endpoint in the dropdown saves nothing by itself - the line
+  // then asks for the Save that makes it the connection.
+  const pendingEndpoint =
+    providerId === "vertex" &&
+    vertexRegion !== "" &&
+    vertexRegion !== (providerListing?.vertex?.region ?? "");
   const providerStatus =
     providerId === "vertex" && vertexError
       ? { tone: "fail" as const, text: vertexError }
-      : probeStatus(
-          providerProbe, selectedProvider, providerListing?.vertex ?? null,
-          providerBusy, providerTest, providerTestBusy, testModel,
-          model.trim().length > 0);
+      : pendingEndpoint
+        ? { tone: "warn" as const, text: "Press Save to use this endpoint." }
+        : probeStatus(
+            providerProbe, selectedProvider, providerListing?.vertex ?? null,
+            providerBusy, providerTest, providerTestBusy, testModel,
+            model.trim().length > 0);
+  // What the Endpoint dropdown offers: the list just loaded - and if the
+  // picked region is not in it (an endpoint the list does not hold), that
+  // one comes first, so the dropdown never loses the user's choice.
+  const vertexEndpointOptions = vertexRegions.length > 0
+    ? (vertexRegions.includes(vertexRegion) ? vertexRegions : [vertexRegion, ...vertexRegions])
+    : (vertexRegion ? [vertexRegion] : []);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
@@ -400,6 +424,8 @@ export default function App() {
     setKeyHelpError("");
     setVertexJson("");
     setVertexError("");
+    setVertexRegion("");
+    setVertexRegions([]);
     setSettingsError("");
     setSettingsNotice("");
     setSettingsOpen(false);
@@ -755,6 +781,16 @@ export default function App() {
         setKeyHelpError("");
         setVertexJson("");
         setVertexError("");
+        if (id === "vertex") {
+          // The dropdown shows the saved endpoint; the project's list loads
+          // behind it (before a key exists it holds only "global").
+          setVertexRegion(listing.vertex?.region ?? "global");
+          setVertexRegions([]);
+          void loadVertexLocations();
+        } else {
+          setVertexRegion("");
+          setVertexRegions([]);
+        }
         const address = id === "custom" ? listing.address : id === "auto" ? "" : row.url;
         if (id !== "vertex") setServerAddressState(address);
         if (shouldAutoProbe(row, listing.vertex)) {
@@ -1150,6 +1186,14 @@ export default function App() {
     setKeyHelpError("");
     setVertexJson("");
     setVertexError("");
+    if (id === "vertex") {
+      setVertexRegion(listing.vertex?.region ?? "global");
+      setVertexRegions([]);
+      void loadVertexLocations();
+    } else {
+      setVertexRegion("");
+      setVertexRegions([]);
+    }
     setProviderTest(null);
     setTestModel("");
     const nextAddress = address !== undefined
@@ -1272,6 +1316,24 @@ export default function App() {
     }
   }
 
+  // Custom Model (Vertex): the endpoints the project offers ("global"
+  // first, then the regions - the multi-regions are left out: they refuse
+  // chat calls). Loaded when the Vertex panel is shown, after a settings
+  // save, and after a JSON-key save; a failure keeps the last list, so the
+  // dropdown may then hold only the saved region (Save still works - the
+  // backend answers with the real words if the list is wrong).
+  async function loadVertexLocations() {
+    try {
+      const data = await getVertexLocations();
+      setVertexRegions(data.locations.length > 0 ? data.locations : ["global"]);
+      // The first word from the backend settles the dropdown (the panel
+      // opened with the saved region from the table; this is the proof).
+      setVertexRegion((current) => current || data.region);
+    } catch {
+      // The backend may predate the route: keep what the panel has.
+    }
+  }
+
   // Custom Model (Vertex): read a chosen JSON key file into the box.
   async function loadVertexFile(file: File) {
     try {
@@ -1283,21 +1345,34 @@ export default function App() {
     }
   }
 
-  // Custom Model (Vertex): save the JSON key. The page no longer asks for
-  // the region (the backend keeps the saved one); a saved key makes Vertex
-  // the ACTIVE provider at once (like the top Save), and the reply carries
-  // the sign-in state and a check that the pass works (or why Google
-  // refuses it - then the previous provider stays in use).
+  // Custom Model (Vertex): the "Save" button. With JSON text in the box it
+  // stores the key AND the chosen endpoint in one request; with an empty
+  // box and a key already saved it stores just the chosen endpoint (a key
+  // stands, so the new endpoint goes into use - "Save connects at once");
+  // with an empty box and NO key nothing is sent and the line says so.
+  // A sign-in failure is reported in the line (the saved key stands, the
+  // previous provider stays in use). The saved model is settled against
+  // the endpoint's catalogue like the top Save (kept when listed, cleared
+  // when not, left as is when the catalogue could not be loaded); the
+  // reply's check + model list become the panel's, and the rest of the app
+  // (footer dot, key gate) re-reads from the backend.
   async function saveVertexNow() {
     const vertex = providerListing?.vertex;
     if (!vertex || providerBusy || settingsBusy) return;
     const hasJson = vertexJson.trim().length > 0;
-    if (!hasJson) return;
+    if (!hasJson && !vertex.configured) {
+      setVertexError("Paste or choose your JSON key first.");
+      return;
+    }
     setProviderBusy(true);
     setVertexError("");
     setSettingsError("");
     try {
-      const result = await saveVertex({ json: vertexJson });
+      // A blank endpoint (the list not loaded yet) is left out of the
+      // request, so it keeps the saved one instead of clobbering it.
+      const result = hasJson
+        ? await saveVertex({ json: vertexJson, region: vertexRegion })
+        : await saveVertex({ region: vertexRegion });
       setProviderListing((current) => current
         ? {
             ...current,
@@ -1307,6 +1382,11 @@ export default function App() {
               r.id === "vertex" ? { ...r, has_key: result.vertex.configured } : r),
           }
         : current);
+      // The endpoint the connection now uses: the dropdown settles on it,
+      // and the project's list reloads (a new key may belong to a project
+      // with different endpoints).
+      setVertexRegion(result.vertex.region || "global");
+      void loadVertexLocations();
       // The connection may have changed (Vertex is active now): the
       // footer dot and the key gate re-read from the backend.
       void refreshConnection();
@@ -1316,12 +1396,18 @@ export default function App() {
         models: result.models,
         loading: result.loading,
         error: result.error,
+        key_checked: result.key_checked,
+        has_key: result.has_key,
+        catalogue: result.catalogue,
       });
+      // The model she uses from now on: the one the backend kept, cleared
+      // or left as is against the endpoint's catalogue.
+      setModelName(result.model);
       setVertexJson("");
       setProviderTest(null);
       setTestModel("");
     } catch (error) {
-      setVertexError(error instanceof Error ? error.message : "Could not save the JSON key.");
+      setVertexError(error instanceof Error ? error.message : "Could not save - the server did not answer.");
     } finally {
       setProviderBusy(false);
     }
@@ -1740,6 +1826,14 @@ export default function App() {
         setKeyShown(false);
         setVertexJson("");
         setVertexError("");
+        if (listing.active === "vertex") {
+          setVertexRegion(listing.vertex?.region ?? "global");
+          setVertexRegions([]);
+          void loadVertexLocations();
+        } else {
+          setVertexRegion("");
+          setVertexRegions([]);
+        }
         void refreshHasApiKey();
         const activeRow = listing.providers.find((r) => r.id === listing.active);
         const activeAddress = listing.active === "custom"
@@ -3260,6 +3354,26 @@ export default function App() {
                             aria-describedby="vertex-json-help"
                           />
                       </label>
+                      <label>
+                        Endpoint
+                        <select
+                          value={vertexRegion}
+                          disabled={settingsBusy || providerBusy}
+                          aria-describedby="vertex-endpoint-help"
+                          onChange={(event) => {
+                            setVertexRegion(event.target.value);
+                            setVertexError("");
+                          }}
+                        >
+                          {vertexEndpointOptions.map((region) => (
+                            <option key={region} value={region}>{region}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <p className="settings-help" id="vertex-endpoint-help">
+                        global has the newest models; a regional endpoint can
+                        answer more steadily but offers fewer models.
+                      </p>
                       <div className="conn-row">
                           <>
                             <button
@@ -3287,10 +3401,10 @@ export default function App() {
                           <button
                             type="button"
                             className="ghost-button"
-                            disabled={settingsBusy || providerBusy || !vertexJson.trim()}
+                            disabled={settingsBusy || providerBusy}
                             onClick={() => void saveVertexNow()}
                           >
-                            Save JSON key
+                            Save
                           </button>
                         <button
                           type="button"

@@ -16,6 +16,7 @@ const rows: ProviderRow[] = [
 ];
 const byId = (id: string): ProviderRow => rows.find((r) => r.id === id)!;
 const vertexSaved: VertexInfo = { configured: true, project: "my-project", region: "global", address: "" };
+const vertexUs: VertexInfo = { configured: true, project: "my-project", region: "us-central1", address: "" };
 const vertexNone: VertexInfo = { configured: false, project: "", region: "global", address: "" };
 
 // A Test-button answer (the backend's words, as the page would receive it).
@@ -80,7 +81,7 @@ assert.deepEqual(
 // asks for a key first; local / auto / custom need none (a keyless server
 // is checked with a placeholder).
 assert.deepEqual(probeStatus(null, byId("vertex"), vertexNone, false, null),
-  { tone: "", text: "Paste your JSON key and press Save JSON key." });
+  { tone: "", text: "Paste or choose your JSON key and press Save." });
 assert.deepEqual(probeStatus(null, byId("ollama"), null, false, null),
   { tone: "", text: "Not checked yet." });
 assert.deepEqual(probeStatus(null, byId("custom"), null, false, null),
@@ -96,15 +97,24 @@ assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: true, error: null }, byId("openai"), null, false, null),
   { tone: "warn", text: "The server is still loading its model." });
 
-// Vertex: signed in. The listing lines end with "pick a model and press
-// Save below." while no model is saved (that Save stores it) and with just
-// "press Test." once a model is chosen (the connection is already saved).
+// Vertex: signed in (the saved endpoint is named). The listing lines end
+// with "pick a model and press Save below." while no model is saved (that
+// Save stores it) and with just "press Test." once a model is chosen (the
+// connection is already saved). With the endpoint's own catalogue loaded
+// the count is its (a listed model can still 404 - the Test button stays
+// the proof); without it only the sign-in is known.
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null }, byId("vertex"), vertexSaved, false, null),
-  { tone: "ok", text: "Signed in to Google Vertex. Not tested yet - pick a model and press Save below." });
+  { tone: "ok", text: "Signed in to Google Vertex (global). Not tested yet - pick a model and press Save below." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null }, byId("vertex"), vertexSaved, false, null, false, "", true),
-  { tone: "ok", text: "Signed in to Google Vertex. Not tested yet - press Test." });
+  { tone: "ok", text: "Signed in to Google Vertex (global). Not tested yet - press Test." });
+assert.deepEqual(
+  probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, catalogue: true }, byId("vertex"), vertexUs, false, null),
+  { tone: "ok", text: "Signed in to Google Vertex (us-central1), 2 models listed. Not tested yet - pick a model and press Save below." });
+assert.deepEqual(
+  probeStatus({ reachable: true, models: ["a"], loading: false, error: null, catalogue: true }, byId("vertex"), vertexUs, false, null, false, "", true),
+  { tone: "ok", text: "Signed in to Google Vertex (us-central1), 1 model listed. Not tested yet - press Test." });
 
 // Local: connected - the model count, with the one-model and no-model
 // wordings, and the next step (both wordings: model chosen / not yet).
