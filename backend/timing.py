@@ -66,6 +66,22 @@ def take_reports() -> list:
     return reports
 
 
+def add_reports(reports) -> None:
+    """Re-attach reports collected in ANOTHER thread to this thread's list
+    (the cloud-server re-send runs its attempt in a worker thread and hands
+    its reports back with the result; without this they would be stranded in
+    the worker's thread storage and the stage's "sent N pieces" line would
+    lose them). Same shape as note_server_report: measure-only, never raises."""
+    try:
+        if not reports:
+            return
+        if not hasattr(_local, "reports"):
+            _local.reports = []
+        _local.reports.extend(reports)
+    except Exception:
+        pass
+
+
 def parse_server_report(data) -> dict | None:
     """llama-server "timings" or a cloud "usage" block -> one flat dict."""
     if not isinstance(data, dict):

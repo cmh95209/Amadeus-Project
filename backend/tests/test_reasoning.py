@@ -151,7 +151,11 @@ class FallbackTests(unittest.TestCase):
         calls = []
 
         def fake(self_, messages, stop=None, run_manager=None, **kw):
-            calls.append(dict(self_.extra_body or {}))
+            # What the call actually sent: the per-request override (a race
+            # attempt passes its body without touching the shared client's
+            # attribute), else the client's own body.
+            sent = kw.get("extra_body", self_.extra_body)
+            calls.append(dict(sent or {}))
             if len(calls) == 1:
                 raise FallbackTests.MANDATORY
             return "result"

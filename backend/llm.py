@@ -1,5 +1,8 @@
 import ipaddress
+import os
 import socket
+import threading
+import time
 from pathlib import Path
 
 import requests
@@ -157,45 +160,318 @@ def _reasoning_fallback(extra_body, exc):
     return None
 
 
+# ---------------------------------------------------------------------------
+#  Cloud servers stall: "stalled? send it again" (owner's rule, 2026-11-12)
+#
+#  Measured on the Google Vertex address (aiplatform.googleapis.com, the
+#  "global" region): identical tiny requests answered in ~2.5 s, or only
+#  after 16 / 26 / 45 / 71 s, sometimes not within 200 s - always as a normal
+#  HTTP 200, no 429, no error. A second identical request sent while the
+#  first one hangs usually answers in 2-3 s. The rule is applied to EVERY
+#  cloud server - any address that is NOT localhost / private LAN /
+#  link-local / .local (the _is_local_host check; her built-in model is
+#  127.0.0.1, so the same check excludes it) - and to none of those local
+#  servers: one graphics card, a second copy of the request only makes both
+#  slower, and slow answers are normal there. _ThoughtFreeChatOpenAI._generate
+#  therefore re-sends a stalled cloud request once, after the patience
+#  below; AMADEUS_CLOUD_PATIENCE (seconds) overrides it for tests and
+#  support - 0 or less switches the re-send off.
+# ---------------------------------------------------------------------------
+
+def _prompt_chars(messages) -> int:
+    """Total characters of all message contents (the small/large prompt
+    split for the patience): plain strings and dicts, langchain message
+    objects, and multimodal content lists (their text parts count)."""
+    total = 0
+    for message in messages or []:
+        content = message
+        if not isinstance(message, (str, dict, list)):
+            content = getattr(message, "content", message)
+        if isinstance(content, list):
+            text = []
+            for part in content:
+                text.append(part.get("text", "") if isinstance(part, dict) else str(part))
+            content = "".join(text)
+        elif isinstance(content, dict):
+            # A dict message ("content" key) or a content dict ("text" key).
+            content = content.get("content", content.get("text", ""))
+        total += len(str(content or ""))
+    return total
+
+
+def _effort_level(extra_body) -> str:
+    """The reasoning level this client sends, in whatever shape _build_client
+    wrote it for the host (Settings -> Reasoning): most cloud hosts put it
+    in extra_body["reasoning_effort"] (OpenAI, Gemini API, Vertex: "low",
+    "medium", "high" - the Gemini API also "minimal"); OpenRouter puts it in
+    extra_body["reasoning"] = {"effort": ...} (or {"enabled": False} when
+    thinking is off). Absent or in an unknown shape -> "" (the patience
+    table then waits like "off")."""
+    if not isinstance(extra_body, dict):
+        return ""
+    reasoning = extra_body.get("reasoning")
+    if isinstance(reasoning, dict):
+        if reasoning.get("enabled") is False:
+            return "off"
+        effort = reasoning.get("effort")
+        return str(effort).lower() if isinstance(effort, str) else ""
+    effort = extra_body.get("reasoning_effort")
+    return str(effort).lower() if isinstance(effort, str) else ""
+
+
+def _cloud_patience(messages, effort) -> float:
+    """Seconds to wait for a CLOUD model server before the request is sent
+    again (local / LAN servers never wait - see the note above). 0 = the
+    re-send is off (the call behaves exactly as before).
+    Small prompt (under 8,000 characters of message content - her English
+    line, a helper call): 12 s; a large prompt (her full reply): 30 s.
+    Thinking takes longer: off/minimal/low x1, medium x2, high x3 (the
+    client's own reasoning level, from Settings -> Reasoning - read from
+    whatever shape the host uses, _effort_level; a level the table does not
+    know waits like "off"). A thinking client is built with its own 240 s
+    timeout, but every cloud thinking client carries its level in its
+    extra_body (each per-host field in _build_client), so no separate
+    handling is needed. AMADEUS_CLOUD_PATIENCE (seconds) overrides the whole
+    table; 0 or less (or junk) = off."""
+    override = os.environ.get("AMADEUS_CLOUD_PATIENCE")
+    if override is not None:
+        try:
+            seconds = float(override)
+        except ValueError:
+            seconds = 0.0
+        return seconds if seconds > 0 else 0.0
+    base = 12.0 if _prompt_chars(messages) < 8000 else 30.0
+    mult = {"medium": 2, "high": 3}.get(str(effort or "").lower(), 1)
+    return base * mult
+
+
 class _ThoughtFreeChatOpenAI(ChatOpenAI):
     """ChatOpenAI whose replies never carry an inline Gemma 4 thought block
     (builtin_llm.strip_thoughts). Every Amadeus call - chat, greetings,
-    tools, translations - goes through this one place."""
+    tools, translations - goes through this one place (the app sends no
+    streaming or async calls through this client anywhere in backend/ - only
+    .invoke() - so _generate is the single entry point; _stream/async are
+    left alone).
+
+    Cloud servers stall random requests for tens of seconds (measured 2026-11-12
+    on the Google Vertex global endpoint: identical tiny requests answered in
+    ~2.5 s or only after 16 / 26 / 45 / 71 s, always a normal HTTP 200; a
+    second identical request sent during the stall usually answers in 2-3 s).
+    So for every client whose server is NOT local (not localhost / private
+    LAN / link-local / .local - the same _is_local_host check the client
+    building uses, which also covers her built-in model at 127.0.0.1),
+    _generate re-sends a stalled request once (see _cloud_patience): the
+    call runs in a worker thread, is waited on for a patience limit, and when
+    it is still silent the SAME request goes out a second time; whichever of
+    the two answers first wins, and a third attempt is never started. A local
+    or LAN server keeps today's exact behaviour: one attempt, the calling
+    thread, no waiting (a second copy would only slow both copies down)."""
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        # A server that refuses our reasoning setting gets one retry with a
-        # softer one; the client keeps it for the rest of the session.
+        # `run_manager` is passed through to the worker thread as today. The
+        # app never attaches callbacks to these clients (it does not rely on
+        # streaming callbacks anywhere), so LangChain's empty run manager is
+        # harmless to call from another thread.
+        # The re-send rule covers every CLOUD server - the address is NOT
+        # localhost / private LAN / link-local / .local (it covers all cloud
+        # providers and a custom internet address, and her built-in model's
+        # 127.0.0.1 stays local by the same check). The client's own
+        # reasoning level (Settings -> Reasoning) is read from whatever shape
+        # the host uses: thinking legitimately takes longer, so it waits
+        # longer.
+        patience = 0.0
+        if not _is_local_host(str(self.openai_api_base or "")):
+            patience = _cloud_patience(messages, _effort_level(self.extra_body))
+        if patience <= 0:
+            # A local / LAN server - or AMADEUS_CLOUD_PATIENCE is 0/negative
+            # and the re-send is switched off for support. Exactly today's
+            # behaviour: one attempt in this thread, no waiting (the client
+            # is not shared, so the fallback may mutate it as it always has).
+            committed = {}
+            try:
+                result = self._generate_once(messages, stop, run_manager, committed,
+                                             share_client=True, **kwargs)
+            except Exception:
+                self._apply_extra_body(committed)   # a refused setting sticks, as before
+                raise
+            self._apply_extra_body(committed)
+            return result
+
+        def _spawn(number):
+            box = {}
+            committed = {}
+
+            def worker():
+                # One attempt, in its own daemon thread: if it loses the race
+                # it is left to finish on its own and its result is dropped.
+                # Two things must not leak out of the thread:
+                # - the timing reports (timing keeps them per thread): the
+                #   worker hands them back with its outcome, and _generate
+                #   re-attaches the WINNING attempt's to this thread, so the
+                #   stage's "[Timing] ... sent N pieces" line keeps them;
+                # - the reasoning fallback's session change (self.extra_body,
+                #   a shared value): _generate_once only REPORTS it through
+                #   `committed`; _generate applies it, on this thread, for
+                #   the winning attempt only. That is the choice: a late
+                #   loser can never corrupt the shared client (a lock-guarded
+                #   mutation would still let two interleaved fallbacks settle
+                #   on the wrong value).
+                try:
+                    box["result"] = self._generate_once(messages, stop, run_manager,
+                                                        committed, **kwargs)
+                except Exception as exc:
+                    box["error"] = exc
+                finally:
+                    box["committed"] = committed
+                    box["reports"] = timing.take_reports()
+                    box["done"] = True
+
+            thread = threading.Thread(target=worker, daemon=True,
+                                      name=f"amadeus-cloud-try-{number}")
+            thread.start()
+            return thread, box
+
+        first_thread, first_box = _spawn(1)
+        first_thread.join(timeout=patience)
+        if first_box.get("done"):
+            # The first attempt finished inside the patience: exactly
+            # today's outcome (its answer, or its error) - no re-send.
+            self._apply_extra_body(first_box.get("committed"))
+            timing.add_reports(first_box.get("reports"))
+            if "error" in first_box:
+                raise first_box["error"]
+            return first_box["result"]
+
+        # It has not answered in time: send the same request again.
+        print(f"[Amadeus] The model server has not answered after {patience:g} s - "
+              "sending the request again.")
+        second_thread, second_box = _spawn(2)
+
+        # Whichever of the two finishes first with an answer wins; a finished
+        # FAILURE only wins once the other attempt is also done (it might
+        # still answer). Both attempts keep their normal request timeout, so
+        # the total wait stays bounded like today's single call.
+        while not (first_box.get("done") or second_box.get("done")):
+            first_thread.join(timeout=0.05)
+            second_thread.join(timeout=0.05)
+        if first_box.get("done") and "error" not in first_box:
+            winner = first_box
+        elif second_box.get("done") and "error" not in second_box:
+            winner = second_box
+        else:
+            # Every finished attempt failed; a still-running one might still
+            # answer, so wait for it before giving up.
+            if not first_box.get("done"):
+                first_thread.join()
+            if not second_box.get("done"):
+                second_thread.join()
+            if "error" not in first_box:
+                winner = first_box
+            elif "error" not in second_box:
+                winner = second_box
+            else:
+                # Both attempts failed: the first attempt's error is what the
+                # caller sees, and its fallback (if any) sticks - exactly
+                # what one failed call does to the client today.
+                self._apply_extra_body(first_box.get("committed"))
+                timing.add_reports(first_box.get("reports"))
+                raise first_box["error"]
+        self._apply_extra_body(winner.get("committed"))
+        timing.add_reports(winner.get("reports"))
+        return winner["result"]
+
+    def _generate_once(self, messages, stop, run_manager, committed=None,
+                       share_client=False, **kwargs):
+        """One attempt at the request: the call itself plus the two
+        reasoning fallbacks (a server that refuses our reasoning setting gets
+        one retry with a softer one; an unexplained 400/422 gets one try
+        without the effort field). Raises like the original _generate did.
+
+        `share_client` says whether self.extra_body may be mutated mid-call:
+        - the single-attempt paths (not Vertex, re-send off) run in the
+          calling thread and own the client: exactly today's behaviour, the
+          fallback mutates the client and the retry reads it from there;
+        - the Vertex re-send runs two attempts on the SAME client at once:
+          an attempt must never mutate the shared client (a late loser would
+          corrupt it after the winner settled) - it sends its adjusted body
+          as a per-request extra_body (langchain merges it over the
+          client's own, so the request on the wire is exactly today's) and
+          REPORTS the session-level value through `committed`, which
+          _generate applies, on the calling thread, for the winning attempt
+          only."""
         try:
             return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         except Exception as exc:
             softer = _reasoning_fallback(self.extra_body, exc)
-            if softer is None:
-                return self._retry_without_effort(exc, messages, stop, run_manager, kwargs)
-            print(f"[Amadeus] Server refused the reasoning setting {self.extra_body!r} - "
-                  f"retrying with {softer!r}.")
-            self.extra_body = softer or None
-            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            if softer is not None:
+                # A server that refuses our reasoning setting gets one
+                # retry with a softer one (the client keeps it, like before).
+                print(f"[Amadeus] Server refused the reasoning setting {self.extra_body!r} - "
+                      f"retrying with {softer!r}.")
+                if share_client:
+                    self.extra_body = softer or None
+                elif committed is not None:
+                    committed["value"] = softer or None
+                if share_client:
+                    return super()._generate(messages, stop=stop, run_manager=run_manager,
+                                             **kwargs)
+                retry_kwargs = dict(kwargs)
+                if "extra_body" not in retry_kwargs:
+                    retry_kwargs["extra_body"] = softer or None
+                return super()._generate(messages, stop=stop, run_manager=run_manager,
+                                         **retry_kwargs)
+            return self._retry_without_effort(exc, messages, stop, run_manager, kwargs,
+                                              committed, share_client)
 
-    def _retry_without_effort(self, exc, messages, stop, run_manager, kwargs):
+    def _retry_without_effort(self, exc, messages, stop, run_manager, kwargs,
+                              committed=None, share_client=False):
         """Safety net for cloud providers nobody has tried yet: a 400/422 that
         does not say why, while we sent the common reasoning_effort field,
-        gets ONE try without the field. If that works the client keeps the
-        plain request for the session; if not, the setting is put back and the
-        first error surfaces, so every other fallback sees what it saw before."""
+        gets ONE try without the field. A single (non-shared) attempt mutates
+        the client like before - if that works the client keeps the plain
+        request for the session; if not, the setting is put back and the
+        first error surfaces, so every other fallback sees what it saw
+        before. A shared attempt (the Vertex re-send) sends the plain body
+        per-request and reports it through `committed` instead (see
+        _generate_once)."""
         before = self.extra_body
         if (getattr(exc, "status_code", None) not in (400, 422)
                 or not isinstance(before, dict) or "reasoning_effort" not in before):
             raise exc
         plain = {k: v for k, v in before.items() if k != "reasoning_effort"}
-        self.extra_body = plain or None
-        try:
-            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
-        except Exception:
-            self.extra_body = before
-            raise exc
+        if share_client:
+            self.extra_body = plain or None
+            try:
+                result = super()._generate(messages, stop=stop, run_manager=run_manager,
+                                           **kwargs)
+            except Exception:
+                self.extra_body = before
+                raise exc
+        else:
+            retry_kwargs = dict(kwargs)
+            if "extra_body" not in retry_kwargs:
+                retry_kwargs["extra_body"] = plain or None
+            try:
+                result = super()._generate(messages, stop=stop, run_manager=run_manager,
+                                           **retry_kwargs)
+            except Exception:
+                # The retry failed: the shared client was never touched,
+                # so there is nothing to put back; the first error surfaces
+                # as before.
+                raise exc
+        if committed is not None:
+            committed["value"] = plain or None
         print("[Amadeus] Server refused the request with a reasoning setting - "
               "it works without one; keeping it off for this session.")
         return result
+
+    def _apply_extra_body(self, committed):
+        """The session-level part of a reasoning fallback: what
+        _generate_once reported through `committed` becomes the client's
+        extra_body (the next calls keep the setting the server accepted).
+        Nothing to do when no fallback applied (no "value" key)."""
+        if committed is not None and "value" in committed:
+            self.extra_body = committed["value"]
 
     def _create_chat_result(self, response, generation_info=None):
         # Speed log: hand the server's own report (llama-server "timings" /
