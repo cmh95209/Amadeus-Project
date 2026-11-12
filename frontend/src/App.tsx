@@ -3272,11 +3272,21 @@ export default function App() {
                       )}
                       <div className="conn-row">
                         {!(providerListing?.vertex.configured && !vertexReplacing) && (
-                          <label className="file-button">
-                            Choose file...
+                          <>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              disabled={settingsBusy || providerBusy}
+                              onClick={(event) => {
+                                const picker = event.currentTarget.nextElementSibling;
+                                if (picker instanceof HTMLInputElement) picker.click();
+                              }}
+                            >
+                              Choose file...
+                            </button>
                             <input
                               type="file"
-                              accept=".json"
+                              accept=".json,application/json"
                               hidden
                               onChange={(event) => {
                                 const file = event.target.files?.[0];
@@ -3284,7 +3294,7 @@ export default function App() {
                                 if (file) void loadVertexFile(file);
                               }}
                             />
-                          </label>
+                          </>
                         )}
                         {!(providerListing?.vertex.configured && !vertexReplacing) && (
                           <button

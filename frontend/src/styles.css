@@ -1566,7 +1566,6 @@ button {
   font-size: 12px;
 }
 .vertex-json:focus { border-color: rgba(115, 151, 201, 0.55); }
-.file-button { display: inline-flex; align-items: center; cursor: pointer; }
 
 /* Settings -> Connection -> Model: "Get more models" (browser download links) */
 .model-catalog summary { cursor: pointer; color: #c9d2df; font-size: 13px; }
