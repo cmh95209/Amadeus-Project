@@ -166,5 +166,103 @@ class RightNowNoteTests(PromptOrderTests):
         self.assertTrue(msgs[-1]["content"].startswith(chat._RIGHT_NOW_LABEL))
 
 
+class WhichOrderTests(unittest.TestCase):
+    """Order B on her built-in model and every cloud provider (prompt-cache
+    discount, 2026-11-12); order A on a user's own local / LAN server."""
+
+    def _right_now_for(self, url, builtin=False):
+        # chat looks the helpers up on ITS llm module (some test runs put a
+        # stand-in there), so the stand-in here goes on chat._llm_module.
+        import types
+        import llm
+        fake = types.SimpleNamespace(
+            builtin_llm=types.SimpleNamespace(active=lambda: builtin),
+            _configured_server_url=lambda: url,
+            _is_local_host=llm._is_local_host)
+        with mock.patch.object(chat, "_llm_module", fake):
+            return chat._right_now_note()
+
+    def test_both_copies_of_the_label_match(self):
+        import llm
+        self.assertEqual(chat._RIGHT_NOW_LABEL, llm.RIGHT_NOW_LABEL)
+
+    def test_cloud_providers_use_the_note(self):
+        for url in ("https://openrouter.ai/api/v1",
+                    "https://generativelanguage.googleapis.com/v1beta/openai",
+                    "https://api.groq.com/openai/v1"):
+            self.assertTrue(self._right_now_for(url), url)
+
+    def test_own_local_servers_keep_order_a(self):
+        for url in ("http://localhost:8080/v1", "http://127.0.0.1:1234/v1",
+                    "http://192.168.1.20:8000/v1", "http://amadeus-pc.local:8080/v1"):
+            self.assertFalse(self._right_now_for(url), url)
+
+    def test_built_in_model_uses_the_note(self):
+        self.assertTrue(self._right_now_for("http://127.0.0.1:8090/v1", builtin=True))
+
+
+class NoteAsUserMessageTests(unittest.TestCase):
+    """llm._right_now_note_as_user: cloud calls send the note as a USER
+    message (Gemini folds every system message into its instruction block,
+    which made every prompt new); nothing else changes."""
+
+    def _msgs(self):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        return [SystemMessage(content="FIXED"),
+                HumanMessage(content="hi"), AIMessage(content="やあ"),
+                HumanMessage(content="how are you?"),
+                SystemMessage(content=chat._RIGHT_NOW_LABEL + "TIMING 10:00")]
+
+    def test_note_becomes_a_user_message(self):
+        import llm
+        out = llm._right_now_note_as_user(self._msgs())
+        self.assertEqual([m.type for m in out], ["system", "human", "ai", "human", "human"])
+        self.assertEqual(out[-1].content, chat._RIGHT_NOW_LABEL + "TIMING 10:00")
+        self.assertEqual(out[0].content, "FIXED")
+
+    def test_other_system_messages_untouched(self):
+        import llm
+        from langchain_core.messages import HumanMessage, SystemMessage
+        msgs = [SystemMessage(content=chat._RIGHT_NOW_LABEL + "leading - not a note"),
+                HumanMessage(content="hi"), SystemMessage(content="another note")]
+        out = llm._right_now_note_as_user(msgs)
+        self.assertEqual([m.type for m in out], ["system", "human", "system"])
+
+    def _sent_types(self, base_url):
+        import llm
+        from langchain_openai import ChatOpenAI
+        seen = {}
+
+        def fake_generate(self_, messages, stop=None, run_manager=None, **kw):
+            seen["types"] = [m.type for m in messages]
+            return "ok"
+
+        client = llm._ThoughtFreeChatOpenAI(model="m", api_key="k", base_url=base_url)
+        with mock.patch.object(ChatOpenAI, "_generate", fake_generate):
+            client._generate(self._msgs())
+        return seen["types"]
+
+    def test_cloud_client_sends_the_note_as_user(self):
+        self.assertEqual(self._sent_types("https://openrouter.ai/api/v1")[-1], "human")
+
+    def test_local_client_sends_it_unchanged(self):
+        self.assertEqual(self._sent_types("http://127.0.0.1:8090/v1")[-1], "system")
+
+
+class SummaryBatchTests(unittest.TestCase):
+    def _batches_for(self, url, builtin=False):
+        import llm
+        with mock.patch.object(store, "_builtin_active", lambda: builtin), \
+                mock.patch.object(llm, "_configured_server_url", lambda: url):
+            return store._fold_in_batches()
+
+    def test_cloud_and_built_in_fold_in_batches(self):
+        self.assertTrue(self._batches_for("https://openrouter.ai/api/v1"))
+        self.assertTrue(self._batches_for("http://127.0.0.1:8090/v1", builtin=True))
+
+    def test_own_local_server_folds_turn_by_turn(self):
+        self.assertFalse(self._batches_for("http://localhost:8080/v1"))
+
+
 if __name__ == "__main__":
     unittest.main()

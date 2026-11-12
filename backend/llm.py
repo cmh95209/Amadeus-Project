@@ -148,12 +148,49 @@ def _reasoning_fallback(extra_body, exc):
     return None
 
 
+# The label of her "right now" note (chat.py prompt order B: the blocks that
+# change every reply - time, closeness, memories - sent AFTER the newest user
+# message, so everything before it stays identical between replies).
+# Must equal chat._RIGHT_NOW_LABEL (test_prompt_order checks it); the wording
+# was measured, see there.
+RIGHT_NOW_LABEL = ("RIGHT NOW (what you know at this moment - use it freely; "
+                   "the user did not write this):\n\n")
+
+
+def _right_now_note_as_user(messages):
+    """Cloud servers only: the "right now" note goes out as a USER message.
+
+    Prompt caching (2026-11-12, measured on OpenRouter / Gemini 3.8 Flash):
+    a cloud provider reuses the earlier part of a prompt at a discount, but
+    Gemini folds EVERY system message - also one at the end - into its single
+    instruction block, so a note that changes each reply made the whole
+    prompt new every time (0% reused). Sent as a user message at the end, the
+    instruction block and the chat before it stay identical: 55-68% reused,
+    about half the price per reply. Inside the app the note stays a system
+    message, so the code that looks for the user's newest message (pictures,
+    search intent, links) never mistakes the note for it. Only a system
+    message AFTER the first non-system one that starts with the label is
+    changed; everything else is passed through untouched."""
+    from langchain_core.messages import HumanMessage
+    out, leading = [], True
+    for m in messages:
+        if getattr(m, "type", "") != "system":
+            leading = False
+        elif (not leading and isinstance(m.content, str)
+              and m.content.startswith(RIGHT_NOW_LABEL)):
+            m = HumanMessage(content=m.content)
+        out.append(m)
+    return out
+
+
 class _ThoughtFreeChatOpenAI(ChatOpenAI):
     """ChatOpenAI whose replies never carry an inline Gemma 4 thought block
     (builtin_llm.strip_thoughts). Every Amadeus call - chat, greetings,
     tools, translations - goes through this one place."""
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if not _is_local_host(str(getattr(self, "openai_api_base", None) or "")):
+            messages = _right_now_note_as_user(messages)
         # A server that refuses our reasoning setting gets one retry with a
         # softer one; the client keeps it for the rest of the session.
         try:

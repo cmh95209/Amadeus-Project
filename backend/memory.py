@@ -2102,6 +2102,22 @@ def _builtin_active() -> bool:
         return False
 
 
+def _fold_in_batches() -> bool:
+    """Prompt order B (her built-in model, or a cloud provider): the rolling
+    summary folds SUMMARY_BATCH_TURNS turns at a time. The summary sits in
+    the instruction block, and a cloud provider's prompt-cache discount needs
+    that block unchanged between replies (2026-11-12) - a fold every reply
+    would make every prompt new. A user's own local / LAN server folds turn
+    by turn as before."""
+    if _builtin_active():
+        return True
+    try:
+        import llm   # late import: llm imports this module
+        return not llm._is_local_host(llm._configured_server_url())
+    except Exception:
+        return False
+
+
 def save_context_budget(budget: int) -> int:
     """Persist the history token budget, clamped to [MIN_CONTEXT_BUDGET, MAX_CONTEXT_BUDGET]."""
     value = max(MIN_CONTEXT_BUDGET, min(MAX_CONTEXT_BUDGET, int(budget or 0)))
@@ -2241,7 +2257,8 @@ def estimate_tokens(text: str) -> int:
 # summary lands (still exactly-once, just briefly larger).
 
 SUMMARY_WINDOW_TURNS = 12      # reply turns kept verbatim (a turn = user line + its reply run; a greeting is its own turn)
-# Prompt order B (2026-10-22, built-in model only): fold in batches - the
+# Prompt order B (2026-10-22 built-in model; 2026-11-12 also cloud providers,
+# see _fold_in_batches): fold in batches - the
 # window grows to WINDOW + BATCH turns, then BATCH turns fold in ONE merge
 # call. Her model reuses the prompt only up to the first changed byte, and a
 # fold changes the summary at the top of the chat; one fold per BATCH replies
@@ -2488,7 +2505,7 @@ def maybe_roll_summary(conversation_id=None) -> None:
     overflow = len(verbatim) - SUMMARY_WINDOW_TURNS
     if overflow <= 0:
         return
-    if _builtin_active():
+    if _fold_in_batches():
         if overflow < SUMMARY_BATCH_TURNS:
             return
         batch = {"last_id": verbatim[overflow - 1]["last_id"], "parts": verbatim[:overflow]}

@@ -2544,16 +2544,24 @@ def _merge_leading_system_messages(messages):
 # the conversation. Measured on the built-in model: a changed block at the top
 # re-read all ~7,300 pieces; at the end, ~40.
 #
-# Prompt order B (right_now=True, built-in model only): her model's sliding-
-# window layers can resume only from a point the server saved at the start of
-# the newest user message, so the changing blocks leave the instruction
-# message and become one "right now" note AFTER the newest user message (the
-# next reply then differs only after that point). Measured on a real chat:
-# ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the newest user
-# message re-read the whole chat history).
+# Prompt order B (right_now=True: her built-in model AND cloud providers): her
+# model's sliding-window layers can resume only from a point the server saved
+# at the start of the newest user message, so the changing blocks leave the
+# instruction message and become one "right now" note AFTER the newest user
+# message (the next reply then differs only after that point). Measured on a
+# real chat: ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the
+# newest user message re-read the whole chat history).
+# Cloud providers (2026-11-12): order A got NO prompt-cache discount on
+# Gemini (the changing blocks sit inside the one instruction block, so it is
+# new every reply); order B with the note sent as a user message (llm.py
+# _right_now_note_as_user) reused 55-68% of the prompt. A user's own local /
+# LAN server keeps order A (some chat templates refuse a second system
+# message).
 # The label's wording matters (measured 2026-10-22, "What time is it right
 # now?" x10): "private background" made her refuse to read the clock 4/5 times,
-# "use it freely" answered 10/10.
+# "use it freely" answered 10/10. llm.py holds the SAME text (RIGHT_NOW_LABEL,
+# to recognise the note on its way out; several tests stand in a fake `llm`
+# module, so it is not imported from there) - test_prompt_order checks both match.
 _RIGHT_NOW_LABEL = ("RIGHT NOW (what you know at this moment - use it freely; "
                     "the user did not write this):\n\n")
 
@@ -2581,11 +2589,19 @@ def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
 
 
 def _right_now_note() -> bool:
-    """Order B only on her built-in model (looked up at call time - several
-    tests stand in a fake `llm` module)."""
+    """Order B on her built-in model and on every cloud provider; order A on a
+    user's own local / LAN server (looked up at call time - several tests
+    stand in a fake `llm` module)."""
     builtin = getattr(_llm_module, "builtin_llm", None)
     try:
-        return bool(builtin and builtin.active())
+        if builtin and builtin.active():
+            return True
+    except Exception:
+        return False
+    server = getattr(_llm_module, "_configured_server_url", None)
+    is_local = getattr(_llm_module, "_is_local_host", None)
+    try:
+        return bool(server and is_local and not is_local(server()))
     except Exception:
         return False
 
