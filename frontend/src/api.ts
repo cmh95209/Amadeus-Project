@@ -1034,17 +1034,37 @@ export async function getProviders(): Promise<ProviderListing> {
   };
 }
 
-/** Save one provider's API key. The reply carries a check of its server
- * (what models it offers), so Settings can show them at once. */
+/** The top "Save" (or Enter in the key / address box): stores the key for
+ * the provider (an empty one leaves the saved key untouched) and makes
+ * THAT provider the active connection at once - no half-saved state. The
+ * reply carries the check of its server (what models it offers) plus the
+ * fresh listing fields (active, address, has_key) and the model now saved
+ * (settled against the server's model list). */
+export type ProviderSaveResult = {
+  status: string;
+  /** The provider this save made active. */
+  active: string;
+  /** The server address the active provider now uses. */
+  address: string;
+  /** The model saved after the switch ("" = "No Model Selected."). */
+  model: string;
+} & ProviderProbe;
+
 export async function saveProviderKey(
   provider: string, key: string, address = "",
-): Promise<ProviderProbe> {
+): Promise<ProviderSaveResult> {
   const data = await parseResponse(await fetch(`${API_BASE}/llm/key`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ provider, key, ...(address ? { address } : {}) }),
   }));
-  return probeFrom(data);
+  return {
+    status: typeof data.status === "string" ? data.status : "ok",
+    active: typeof data.active === "string" ? data.active : "",
+    address: typeof data.address === "string" ? data.address : "",
+    model: typeof data.model === "string" ? data.model : "",
+    ...probeFrom(data),
+  };
 }
 
 /** Ask one provider's server which models it offers (no chat, no model call). */
@@ -1114,16 +1134,21 @@ export type VertexSave = {
 export type VertexSaveResult = {
   status: string;
   vertex: VertexInfo;
+  /** The active provider after the save (a saved JSON key makes Vertex
+   * active at once; a sign-in failure keeps the previous one). */
+  active: string;
   reachable: boolean;
   models: string[];
   loading: boolean;
   error: string | null;
-  /** Vertex is active but signing in again failed (the saved key stands). */
+  /** Signing in failed (the saved key stands; the switch did not happen). */
   message?: string;
 };
 
-/** Save Google Vertex's JSON key (or just its region). The reply carries the
- * sign-in state and a check that the pass works. */
+/** Save Google Vertex's JSON key (or just its region). A saved JSON key
+ * makes Vertex the active provider at once (like the top Save); the reply
+ * carries the sign-in state, a check that the pass works, and the active
+ * provider now. */
 export async function saveVertex(fields: VertexSave): Promise<VertexSaveResult> {
   const data = await parseResponse(await fetch(`${API_BASE}/llm/vertex`, {
     method: "POST",
@@ -1139,6 +1164,7 @@ export async function saveVertex(fields: VertexSave): Promise<VertexSaveResult> 
   return {
     status: typeof data.status === "string" ? data.status : "ok",
     vertex: vertexInfo(data.vertex),
+    active: typeof data.active === "string" ? data.active : "vertex",
     ...probeFrom(data),
     ...(typeof data.message === "string" ? { message: data.message } : {}),
   };

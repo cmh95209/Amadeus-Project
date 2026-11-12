@@ -739,6 +739,7 @@ export default function App() {
     if (!settingsOpen || builtinMode) return;
     let cancelled = false;
     void (async () => {
+      void refreshHasApiKey();
       try {
         const listing = await getProviders();
         if (cancelled) return;
@@ -759,7 +760,6 @@ export default function App() {
         setVertexError("");
         const address = id === "custom" ? listing.address : id === "auto" ? "" : row.url;
         if (id !== "vertex") setServerAddressState(address);
-        syncHasApiKey(listing);
         if (shouldAutoProbe(row, listing.vertex)) {
           void runProbe(row.id, id === "custom" ? address : "");
         } else {
@@ -1220,30 +1220,55 @@ export default function App() {
     }
   }
 
-  // Custom Model, "Save key": store the typed key for the chosen provider
-  // (a custom address goes along); the reply's check becomes the status
-  // line, the row's "a key is saved" state - and, for the active provider,
-  // the key in use.
+  // Custom Model, "Save" (or Enter in the key / address box): store the
+  // typed key for the chosen provider (a custom address goes along; an
+  // empty box leaves the saved key untouched), and make it HER ACTIVE
+  // CONNECTION at once - provider, address and key in use, in one backend
+  // call, so nothing is half-saved. The saved model is settled against
+  // the new server's list (kept when it is there, cleared when it is not,
+  // left as is when the list could not be loaded); the reply's check
+  // becomes the status line and loads the model list, and the rest of the
+  // app (footer dot, key gate) re-reads from the backend.
   async function saveKeyNow() {
     const row = selectedProvider;
-    if (!row || row.kind === "vertex" || providerBusy || settingsBusy || !keyDirty) return;
+    if (!row || row.kind === "vertex" || providerBusy || settingsBusy) return;
     const key = apiKey.trim();
-    if (!key) return;
     setProviderBusy(true);
     setKeyHelpError("");
     setSettingsError("");
     try {
-      const probe = await saveProviderKey(row.id, key, row.kind === "custom" ? serverAddress.trim() : "");
+      const result = await saveProviderKey(row.id, key, row.kind === "custom" ? serverAddress.trim() : "");
+      // The switch is done on the backend: mirror who is active now, the
+      // address it uses, and the chosen row's key state in the table.
       setProviderListing((current) => current
-        ? { ...current, providers: current.providers.map((r) => (r.id === row.id ? { ...r, has_key: true } : r)) }
+        ? {
+            ...current,
+            active: result.active || current.active,
+            address: result.address,
+            providers: current.providers.map((r) =>
+              r.id === row.id ? { ...r, has_key: result.has_key === true } : r),
+          }
         : current);
-      if (providerListing?.active === row.id) setHasApiKey(true);
-      setProviderProbe(probe);
+      setProviderProbe({
+        reachable: result.reachable,
+        models: result.models,
+        loading: result.loading,
+        error: result.error,
+        key_checked: result.key_checked,
+        has_key: result.has_key,
+      });
       setProviderTest(null);
       setTestModel("");
       setApiKeyInput("");
       setKeyDirty(false);
       setKeyShown(false);
+      // The model she uses from now on: the one the backend kept or
+      // cleared ("" = "No Model Selected.").
+      setModelName(result.model);
+      // The connection changed underneath the rest of the app: the footer
+      // dot and the key gate re-read from the backend.
+      void refreshConnection();
+      void refreshHasApiKey();
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "Could not save the key.");
     } finally {
@@ -1263,9 +1288,10 @@ export default function App() {
   }
 
   // Custom Model (Vertex): save the JSON key. The page no longer asks for
-  // the region (the backend keeps the saved one); the reply carries the
-  // sign-in state and a check that the pass works (or why Google refuses
-  // it).
+  // the region (the backend keeps the saved one); a saved key makes Vertex
+  // the ACTIVE provider at once (like the top Save), and the reply carries
+  // the sign-in state and a check that the pass works (or why Google
+  // refuses it - then the previous provider stays in use).
   async function saveVertexNow() {
     const vertex = providerListing?.vertex;
     if (!vertex || providerBusy || settingsBusy) return;
@@ -1279,12 +1305,16 @@ export default function App() {
       setProviderListing((current) => current
         ? {
             ...current,
+            active: result.active || current.active,
             vertex: result.vertex,
             providers: current.providers.map((r) =>
               r.id === "vertex" ? { ...r, has_key: result.vertex.configured } : r),
           }
         : current);
-      if (providerListing?.active === "vertex") setHasApiKey(result.vertex.configured);
+      // The connection may have changed (Vertex is active now): the
+      // footer dot and the key gate re-read from the backend.
+      void refreshConnection();
+      void refreshHasApiKey();
       setProviderProbe({
         reachable: result.reachable,
         models: result.models,
@@ -1344,11 +1374,18 @@ export default function App() {
     setTestModel("");
   }
 
-  // "Is a key in use?" for the rest of the app (sending waits for it): the
-  // active provider's key, or a saved Vertex pass.
-  function syncHasApiKey(listing: ProviderListing) {
-    const row = listing.providers.find((r) => r.id === listing.active);
-    setHasApiKey(row ? row.has_key : listing.vertex.configured);
+  // "Is a key in use?" for the rest of the app (the Send gate waits for it):
+  // the backend is the one source of truth - her built-in model needs no
+  // key, and a local / LAN / custom server only needs one if the user
+  // saved one. After anything that may change that (a brain switch, a key
+  // save, the active provider, opening Settings) it is re-read instead of
+  // guessed from the provider table.
+  async function refreshHasApiKey() {
+    try {
+      setHasApiKey(await getApiKeyStatus());
+    } catch {
+      // The backend is briefly unreachable: keep the last known state.
+    }
   }
 
   async function initialize() {
@@ -1688,7 +1725,6 @@ export default function App() {
         if (keyDirty && apiKey.trim()) {
           await saveProviderKey(row.id, apiKey.trim(), row.kind === "custom" ? serverAddress.trim() : "");
           keySaved = true;
-          setHasApiKey(true);
           setApiKeyInput("");
           setKeyDirty(false);
           setKeyShown(false);
@@ -1710,7 +1746,7 @@ export default function App() {
         setVertexJson("");
         setVertexReplacing(false);
         setVertexError("");
-        syncHasApiKey(listing);
+        void refreshHasApiKey();
         const activeRow = listing.providers.find((r) => r.id === listing.active);
         const activeAddress = listing.active === "custom"
           ? listing.address
@@ -1815,6 +1851,10 @@ export default function App() {
       );
       void refreshConnection();
       void refreshBuiltinModel();
+      // The brain changed what a key is needed for: the Send gate re-reads
+      // it from the backend (switching back to custom with a keyless local
+      // server used to leave the gate stuck until a reload - path A).
+      void refreshHasApiKey();
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "Could not switch.");
     } finally {
@@ -3093,7 +3133,8 @@ export default function App() {
                 ) : (<>
                   <p className="settings-intro">
                     Pick your model provider. For a cloud provider, paste your
-                    API key and press Save key.
+                    API key. Press Save to connect - it replaces the
+                    connection she uses now.
                   </p>
                   <label>
                     Provider
@@ -3116,6 +3157,12 @@ export default function App() {
                           value={serverAddress}
                           disabled={settingsBusy}
                           onChange={(event) => onAddressEdit(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void saveKeyNow();
+                            }
+                          }}
                           placeholder={
                             providerId === "auto"
                               ? "Found automatically (ports 8888 / 8000)"
@@ -3177,11 +3224,10 @@ export default function App() {
                         <button
                           type="button"
                           className="ghost-button"
-                          disabled={settingsBusy || providerBusy || keyRevealing ||
-                            !keyDirty || !apiKey.trim()}
+                          disabled={settingsBusy || providerBusy || keyRevealing}
                           onClick={() => void saveKeyNow()}
                         >
-                          Save key
+                          Save
                         </button>
                         <button
                           type="button"
@@ -3192,9 +3238,10 @@ export default function App() {
                           {providerTestBusy ? "Testing..." : "Test"}
                         </button>
                       </div>
-                      {(keyHelpError || selectedProvider?.kind === "local") && (
+                      {(keyHelpError ||
+                        (selectedProvider != null && selectedProvider.kind !== "cloud")) && (
                         <p className="settings-help" id="api-key-help">
-                          {keyHelpError || "Local servers usually accept any key if you have none set."}
+                          {keyHelpError || "No key needed unless your server asks for one."}
                         </p>
                       )}
                     </>
@@ -3418,7 +3465,7 @@ export default function App() {
                       onChange={chooseModel}
                       allowCustom
                       disabled={settingsBusy || providerBusy}
-                      emptyText="Save your key above to load the model list"
+                      emptyText="Press Save above to load the model list"
                     />
                   </div>
                   <p className="settings-help">

@@ -51,6 +51,11 @@ class _FreshAppTests(unittest.TestCase):
         self.previous_cwd = os.getcwd()
         os.chdir(self.directory.name)
         self.addCleanup(os.chdir, self.previous_cwd)
+        def _stub_client_for(*args, **kwargs):
+            # The attribute must exist so tests can patch.object it; an
+            # UNPATCHED call fails loudly instead of pretending to work.
+            raise RuntimeError("llm stub: patch client_for first")
+
         stubs = patch.dict(sys.modules, {
             'llm': SimpleNamespace(
                 get_llm=lambda *a, **k: None,
@@ -58,6 +63,7 @@ class _FreshAppTests(unittest.TestCase):
                 maybe_strip_rejected_params=lambda *a, **k: False,
                 test_server=lambda *a, **k: {"reachable": False, "models": [],
                                              "error": "stub"},
+                client_for=_stub_client_for,
                 _server_url=lambda: "http://127.0.0.1:9",
             ),
             'tts': SimpleNamespace(
@@ -68,8 +74,23 @@ class _FreshAppTests(unittest.TestCase):
         })
         stubs.start()
         self.addCleanup(stubs.stop)
-        for name in ('api', 'chat', 'memory', 'ceremony', 'chat_interactions'):
+        # The whole app stack reimports against the temp dir - providers and
+        # its friends included: chat's key gate (has_api_key) now asks
+        # providers about the active row, and none of these modules may bind
+        # to a copy a sibling test module left behind.
+        for name in ('api', 'chat', 'memory', 'ceremony', 'chat_interactions',
+                     'providers', 'vertex_auth', 'builtin_llm', 'builtin_server'):
             sys.modules.pop(name, None)
+        self.memory = importlib.import_module('memory')
+        # The LLM server file is memory.py's one ABSOLUTE path (its own
+        # backend folder); every other data file is CWD-relative, which the
+        # chdir above already points at the temp dir. Without this patch the
+        # provider table would read the live checkout's llm_server.txt.
+        _llm_server_file = patch.object(
+            self.memory, "PATH_TO_LLM_SERVER",
+            os.path.join(self.directory.name, "llm_server.txt"))
+        _llm_server_file.start()
+        self.addCleanup(_llm_server_file.stop)
         self.api = importlib.import_module('api')
         # Her built-in model's server log goes to the temp folder, never to
         # the project's logs/ (a route that loads her model writes it).
@@ -79,7 +100,6 @@ class _FreshAppTests(unittest.TestCase):
         self.addCleanup(log.stop)
         self.addCleanup(self.api.builtin_server.unload)
         self.chat = importlib.import_module('chat')
-        self.memory = importlib.import_module('memory')
         self.ceremony = importlib.import_module('ceremony')
         self.client = self.api.application.test_client()
         self.ceremony.reset_run_tracker()
@@ -553,10 +573,12 @@ class GreetRouteTests(_FreshAppTests):
         self.assertEqual(self.state(), "done")
 
     def test_first_launch_model_up_but_no_key_stays_in_ceremony(self):
-        # A brand-new install whose model runs but has no API key: she must
-        # NOT jump straight to the normal path (its 400 would end the
-        # ceremony with her unable to talk) - the key gate keeps her on
-        # the waiting story until a key value is present.
+        # A brand-new install on a CLOUD provider that has no key yet: she
+        # must NOT jump straight to the normal path (its 400 would end the
+        # ceremony with her unable to talk) - the key gate keeps her on the
+        # waiting story until a key value is present. (Keyless LOCAL / LAN /
+        # custom servers no longer block the gate - see the next test.)
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
         with self.model(True, "model server unreachable"):
             res = self.greet()
         self.assertEqual(res.status_code, 200)
@@ -566,22 +588,60 @@ class GreetRouteTests(_FreshAppTests):
         self.assertEqual(body["ceremony"], "intro")
         self.assertEqual(self.state(), "intro")
 
+    def test_first_launch_model_up_keyless_local_server_greets(self):
+        # The 2026-11-12 softening (MH: "it doesn't need to be so rigid"):
+        # a keyless local / LAN / custom server can talk without a key (the
+        # client sends a placeholder), so a fresh install on one goes
+        # straight to the normal greeting - no key, no waiting story.
+        self.memory.save_llm_server("http://localhost:11434/v1")
+        self.memory.save_username("Alex")
+        pack = self.chat.AmadeusPack(
+            assistant_reply_ENG="Welcome back.", assistant_reply_JPS="おかえり。")
+        with self.model(True), patch.object(
+                self.api, "generate_greeting",
+                side_effect=lambda **kw: (pack, 7, 1)):
+            res = self.greet()
+        body = res.json
+        self.assertIs(body["ready"], True)
+        self.assertEqual(body["response"], "Welcome back.")
+        self.assertEqual(body["ceremony"], "done")
+        self.assertEqual(self.state(), "done")
+
     def test_done_state_without_key_keeps_the_400(self):
         # Once the ceremony is done the normal path's key gate stands on
-        # its own: no key -> 400, same as before the key gate existed.
+        # its own: a CLOUD provider without a key -> 400, same as before the
+        # key gate existed. (A keyless local / LAN / custom server is a
+        # valid brain now and passes the gate - see the next test.)
         self.memory.save_ceremony_state("done")
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
         with self.model(True):
             res = self.greet()
         self.assertEqual(res.status_code, 400)
         self.assertEqual(self.state(), "done")
 
-    def test_wake_requires_an_api_key(self):
-        # The 2026-10-07 fresh-VM scenario: a keyless local server answers
-        # the readiness probe, so the model is "ready" without a key - she
-        # must NOT wake until a key is present (every conversation needs
-        # one), staying on the "checking the line" story instead.
+    def test_done_state_keyless_local_server_greets(self):
+        # The normal path on a keyless local brain: 200, no key needed
+        # (the client's placeholder is enough for such a server).
+        self.memory.save_ceremony_state("done")
+        self.memory.save_llm_server("http://localhost:11434/v1")
+        pack = self.chat.AmadeusPack(
+            assistant_reply_ENG="Back again?", assistant_reply_JPS="また来たの？")
+        with self.model(True), patch.object(
+                self.api, "generate_greeting",
+                side_effect=lambda **kw: (pack, 7, 1)):
+            res = self.greet()
+        body = res.json
+        self.assertIs(body["ready"], True)
+        self.assertEqual(body["response"], "Back again?")
+        self.assertEqual(body["ceremony"], "done")
+
+    def test_wake_still_requires_a_key_for_cloud(self):
+        # A cloud brain genuinely needs a key: a keyless cloud server keeps
+        # her on the "checking the line" story (the 2026-10-07 fresh-VM
+        # lesson stands for cloud providers).
         with self.model(False, "model server unreachable"):
             self.greet()  # intro
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
         with self.model(True), \
              patch.object(self.chat, "LLM_Model", "qwen3.8-27b"):
             res = self.greet(just_saved=True)  # address + model saved, NO key
@@ -597,15 +657,31 @@ class GreetRouteTests(_FreshAppTests):
         self.assertIs(body["ready"], False)
         self.assertEqual(body["reason"], "API key not set yet")
         self.assertNotIn("kind", body)
-        # The user adds a key value (keyless servers need one too - the
-        # app requires it even though the server ignores it) and a name:
-        # she wakes.
+        # The user adds a key value and a name: she wakes.
         self.chat.setKey("any-value")
         self.memory.save_username("Alex")
         with self.model(True), \
              patch.object(self.chat, "LLM_Model", "qwen3.8-27b"), \
              self._canned_wake():
             res = self.greet()
+        self.assertEqual(res.json["kind"], "wake")
+        self.assertEqual(self.state(), "done")
+
+    def test_wake_on_a_keyless_local_server_needs_no_key(self):
+        # The 2026-10-07 fresh-VM scenario, softened 2026-11-12 (MH: "it
+        # doesn't need to be so rigid"): a keyless local / LAN / custom
+        # server answers the readiness probe AND can talk without a key
+        # (the client sends a placeholder) - she wakes straight away, no
+        # key value needed.
+        with self.model(False, "model server unreachable"):
+            self.greet()  # intro
+        self.memory.save_llm_server("http://localhost:11434/v1")
+        self.memory.save_username("Alex")
+        with self.model(True), \
+             patch.object(self.chat, "LLM_Model", "qwen3.8-27b"), \
+             self._canned_wake():
+            res = self.greet(just_saved=True)  # address + model saved, NO key
+        self.assertIs(res.json["ready"], True)
         self.assertEqual(res.json["kind"], "wake")
         self.assertEqual(self.state(), "done")
 

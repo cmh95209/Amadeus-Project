@@ -42,8 +42,10 @@ export type ProbeStatus = {
  * chosen provider + model (the page forgets it when the provider, key,
  * address or model moves on); `busy` = a check is running right now;
  * `testing` = a test message is on its way to `testModel`; `hasModel` =
- * the Model field is not empty (the line ends with "press Test." instead
- * of "pick a model and press Test." when a model is already chosen). */
+ * a model is saved or chosen in the Model field (the listing lines end
+ * with "press Test." once a model is chosen - the connection is already
+ * saved, so only a test is left; with none saved they end with "pick a
+ * model and press Save below.", which stores it). */
 export function probeStatus(
   probe: ProviderProbe | null,
   row: ProviderRow | null,
@@ -54,10 +56,10 @@ export function probeStatus(
   testModel = "",
   hasModel = false,
 ): ProbeStatus {
-  // The "go test it" tail of the status lines: shorter once a model is
-  // already chosen.
-  const nudgeLower = hasModel ? "press Test." : "pick a model and press Test.";
-  const nudge = hasModel ? "Press Test." : "Pick a model and press Test.";
+  // The "next step" tail of the status lines: with no model saved yet the
+  // next Save stores one, with a model chosen only a Test is left.
+  const nudgeLower = hasModel ? "press Test." : "pick a model and press Save below.";
+  const nudge = hasModel ? "Press Test." : "Pick a model and press Save below.";
   if (busy) return { tone: "", text: "Checking..." };
   if (testing) {
     return { tone: "", text: `Sending a test message to ${testModel || "the model"}...` };
@@ -75,13 +77,15 @@ export function probeStatus(
     if (row.kind === "vertex") {
       return { tone: "", text: "Paste your JSON key and press Save JSON key." };
     }
-    if (row.kind === "local") {
-      return { tone: "", text: "Not checked yet." };
+    if (row.kind === "cloud") {
+      // Only a cloud provider needs a key before it can be checked.
+      return row.has_key
+        ? { tone: "", text: "Not checked yet." }
+        : { tone: "", text: "Enter your API key and press Save." };
     }
-    if (!row.has_key) {
-      return { tone: "", text: "No key saved yet." };
-    }
-    return { tone: "", text: "Enter your API key and press Save key." };
+    // Local, auto and custom servers work without a key (a keyless one is
+    // checked with a placeholder): the line is just "not checked yet".
+    return { tone: "", text: "Not checked yet." };
   }
   if (probe.loading) {
     return { tone: "warn", text: "The server is still loading its model." };
@@ -107,7 +111,9 @@ export function probeStatus(
       };
     }
     const count = probe.models.length;
-    if (row?.kind === "local") {
+    if (row?.kind === "local" || (row?.kind === "custom" && !probe.has_key)) {
+      // Local, auto and keyless custom / LAN servers: connected is good
+      // enough - they take no key at all.
       return {
         tone: "ok",
         text: count === 0
@@ -116,8 +122,8 @@ export function probeStatus(
       };
     }
     if (!probe.has_key) {
-      // A cloud server that lists models without any key: the listing says
-      // nothing about a key - and no key is saved to check.
+      // A cloud provider with no key saved; a server that lists models
+      // without a key says nothing about one either way.
       return {
         tone: "",
         text: count > 0
@@ -133,8 +139,12 @@ export function probeStatus(
     }
     return {
       tone: "",
-      text: `Key saved, ${count} model${count === 1 ? "" : "s"} listed. This provider does not check the key here - ${nudgeLower}`,
+      text: `Key saved, ${count} model${count === 1 ? "" : "s"} listed. This server does not check the key here - ${nudgeLower}`,
     };
+  }
+  if (row?.kind === "custom" && /address/i.test(probe.error ?? "")) {
+    // A custom address is still empty: the fix is to type it in.
+    return { tone: "fail", text: "Enter the server address and press Save." };
   }
   return {
     tone: "fail",

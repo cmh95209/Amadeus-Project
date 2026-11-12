@@ -1380,6 +1380,11 @@ def set_brain_mode():
             print(f"[Flask] /setBrainMode: her model was not loaded: {exc}")
     else:
         builtin_server.unload()
+        # Back on the custom brain: if it is Vertex, renew the pass at once
+        # - the keeper pauses while the built-in model is active, so the
+        # pass in api_key.txt may be expired, and the first chat after the
+        # switch must not race the keeper's next round.
+        providers.refresh_vertex_if_due(force=True)
     info = builtin_llm.describe()
     info["restart_needed"] = False
     info["server"] = builtin_server.status()
@@ -1557,21 +1562,37 @@ def llm_provider_listing():
 
 @application.route("/llm/key", methods=["POST"])
 def llm_save_key():
-    """Save one provider's API key. For the ACTIVE provider it also goes
-    into use right away (api_key.txt + rebuilt client); the reply carries a
-    probe of that server so Settings can show which models it offers."""
+    """The Settings top "Save" (or Enter in the key / address box): store
+    the typed key for the chosen provider (an EMPTY key leaves the saved
+    one, if any, untouched), then make that provider the ACTIVE connection
+    at once - its address, the key in use (api_key.txt) and a rebuilt
+    client - all in this one call, so nothing is half-saved. The saved
+    model is settled against the new server's model list (kept / cleared /
+    left as is - _settle_model_after_switch). The reply carries the probe
+    of that server so Settings can show which models it offers, plus the
+    fresh listing fields (active, address, has_key) and the model now
+    saved."""
     data = request.get_json(silent=True) or {}
     provider = data.get("provider")
     key = data.get("key")
     address = data.get("address")
     if not isinstance(provider, str) or not isinstance(key, str):
         return jsonify({"message": "Missing 'provider' or 'key' field"}), 400
+    address = address if isinstance(address, str) else ""
     try:
-        providers.save_provider_key(provider, key)
+        if key.strip():
+            providers.save_provider_key(provider, key)
+        result = providers.activate(provider, address)
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
-    probe = providers.probe(provider, address if isinstance(address, str) else "")
-    return jsonify({"status": "ok", "has_key": True, **probe})
+    except vertex_auth.VertexSignInError as exc:
+        return jsonify({"message": str(exc)}), 400
+    probe = providers.probe(provider, address)
+    model = _settle_model_after_switch(provider, probe)
+    return jsonify({"status": "ok", "active": result["id"],
+                    "address": result["address"],
+                    "has_key": providers.has_key(provider),
+                    "model": model, **probe})
 
 
 @application.route("/llm/models", methods=["POST"])
@@ -1622,17 +1643,22 @@ def llm_reveal_key():
 
 @application.route("/llm/vertex", methods=["POST"])
 def llm_save_vertex():
-    """Save the Google Vertex JSON key (or just its region). When Vertex is
-    the active provider, sign in again so the fresh pass + address go into
-    use; a failure there is reported, not raised - the saved key stands."""
+    """Save the Google Vertex JSON key (or just its region). A saved JSON
+    key makes Vertex the ACTIVE provider at once - like the top "Save" for
+    the other providers; a region-only change renews the pass when Vertex
+    is already active. A sign-in failure is reported, not raised - the
+    saved key stands (the connection then keeps the previous provider).
+    The reply carries Vertex's check plus the active provider now."""
     data = request.get_json(silent=True) or {}
     key_text = data.get("json")
     region = data.get("region")
     region_given = isinstance(region, str) and region.strip()
+    key_saved = False
     try:
         if isinstance(key_text, str) and key_text.strip():
             # No region in the request: keep the saved one (the page no
             # longer sends it; a blank region would clobber it).
+            key_saved = True
             vertex_auth.save_key(key_text, region if region_given else "",
                                  keep_region=not region_given)
         elif region_given:
@@ -1642,11 +1668,12 @@ def llm_save_vertex():
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
     body = {"status": "ok", "vertex": vertex_auth.info()}
-    if providers.active_id() == "vertex":
+    if key_saved or providers.active_id() == "vertex":
         try:
             providers.activate("vertex")
         except (ValueError, vertex_auth.VertexSignInError) as exc:
             body["message"] = str(exc)
+    body["active"] = providers.active_id()
     return jsonify({**body, **providers.probe("vertex")})
 
 
@@ -1798,6 +1825,28 @@ def _model_in_list(model_name: str, server_models: list[str]) -> bool:
         if isinstance(mid, str) and mid.strip().rsplit("/", 1)[-1] == name_base:
             return True
     return False
+
+
+def _settle_model_after_switch(provider: str, probe: dict) -> str:
+    """The saved model after the top "Save" switched the connection: kept
+    when the new server's model list says it is there (the same matching
+    as the /testConnection dot), cleared (the "No Model Selected." state)
+    when the list says it is not - she must not chat with a model name
+    from the previous provider - and left as is when the list could not
+    be loaded (unreachable, key rejected, still loading) or the server
+    takes any model name (Vertex's fixed catalog, "any_model"). Returns
+    the model now saved ("" = none, shown as "No Model Selected.")."""
+    model = memory.load_llm_model()
+    if provider == "vertex" or probe.get("any_model"):
+        return model
+    if not probe.get("reachable") or probe.get("error") or probe.get("loading"):
+        return model
+    if not model.strip():
+        return model
+    if _model_in_list(model, probe.get("models") or []):
+        return model
+    chat.setLLMModel("")
+    return ""
 
 
 # pre: none
@@ -2112,7 +2161,8 @@ def _serve_wake_up():
 #       need no model at all), the generated wake-up line once the model
 #       answers, or the static fallback if generation fails - adding the
 #       "ceremony" + "kind" fields to the usual response. Once the
-#       ceremony is done it behaves exactly as before: a key is required,
+#       ceremony is done it behaves exactly as before: a key is required
+#       (cloud providers only - keyless local / LAN / custom servers pass),
 #       the model must be ready, and one generated greeting is stored as
 #       a normal assistant message with a single-use speech id minted for
 #       its Japanese line (the same voice mechanism a normal reply uses).
@@ -2132,13 +2182,14 @@ def greet():
 
     if state != memory.CEREMONY_DONE:
         ready = model_ready()
-        # A "ready" brain must also be ABLE TO TALK: every conversation
-        # (and the post-ceremony greeting) requires an API key, so waking
-        # her on a keyless readiness probe would leave a fresh user with
-        # an unlocked box that answers nothing (2026-10-07, fresh en-US
-        # VM: a keyless local server answered the probe, she woke with a
-        # confused line, and every message 400'd until a key value was
-        # added). Until a key is present she stays on the waiting lines.
+        # A "ready" brain must also be ABLE TO TALK: a CLOUD provider
+        # without a key would leave a fresh user with an unlocked box that
+        # answers nothing (2026-10-07, fresh en-US VM: she woke on a
+        # keyless probe and every message 400'd until a key value was
+        # added), so until a key is present she stays on the waiting lines.
+        # Keyless local / LAN / custom servers are NOT gated (2026-11-12,
+        # MH's call): the client sends a placeholder and such a server
+        # answers fine without one.
         if ready["ready"] and not has_api_key():
             ready = {"ready": False, "reason": "API key not set yet"}
         if builtin_llm.active():

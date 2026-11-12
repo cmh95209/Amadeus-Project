@@ -1,5 +1,6 @@
 import memory as store
 import builtin_llm
+import providers
 from llm import get_llm, reset_llm, maybe_strip_rejected_params
 import llm as _llm_module
 from pydantic import BaseModel, Field
@@ -81,9 +82,15 @@ def getPersonality() -> str:
 
 
 def has_api_key() -> bool:
-    # The built-in model's server has no key, so the key gate never applies
-    # to it (and no fake key goes into api_key.txt).
-    return builtin_llm.active() or bool(API_KEY.strip())
+    # A key is only a gate for CLOUD providers. Her built-in model's server
+    # has no key at all (and no fake key goes into api_key.txt); local /
+    # LAN / custom servers take a key only if the user saved one - a
+    # keyless one is fine, the model client sends a placeholder instead
+    # (llm.py). A cloud provider with no key anywhere still answers
+    # "No API key. Add one in Settings."
+    if builtin_llm.active() or bool(API_KEY.strip()):
+        return True
+    return providers.get(providers.active_id())["kind"] != "cloud"
 
 
 #pre:

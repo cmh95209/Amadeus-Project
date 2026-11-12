@@ -7,15 +7,20 @@
      provider file) and which key each provider gets;
   4. switching providers: the old key is stashed per provider, the new
      one goes into use ("" clears it), custom needs an address, Vertex
-     needs a saved JSON key and signs in for its pass;
+     needs a saved JSON key and signs in for its pass - the setup
+     mistakes are refused before anything is written (a failed switch
+     changes nothing);
   5. probes: Vertex via check_ready, everyone else via llm.test_server
      (stubbed - no network, no real keys);
   6. the background renewal: only while Vertex is active, only when due
      or forced, a failed sign-in never kills anything;
-  7. the routes on the real Flask app (temp data folder): listing, saving
-     keys, model probes, key reveal (this PC / own Tailscale tunnel /
-     refused for phones and public funnels), saving the Vertex key, and
-     switching providers (a Vertex model is stored as google/<name>);
+  7. the routes on the real Flask app (temp data folder): listing, the
+     top "Save" (key + making the provider active at once, the saved
+     model settled against the new server's list - kept / cleared /
+     left as is), model probes, key reveal (this PC / own Tailscale
+     tunnel / refused for phones and public funnels), saving the Vertex
+     key (which makes Vertex active at once), and switching providers
+     (a Vertex model is stored as google/<name>);
   8. vertex_auth itself: key validation, addresses, model names, the
      RS256 signature (verified with pow(sig, e, n) against a throwaway
      key built HERE - the repo holds no key file), and pass caching /
@@ -480,6 +485,19 @@ class RefreshTests(_TempData):
             self.assertFalse(providers.refresh_vertex_if_due(force=True))
         self.assertEqual(self.applied, [])
 
+    def test_noop_while_the_builtin_model_is_active(self):
+        # Her built-in brain ignores the custom pass: no renewal at all
+        # while it is active (even forced) - the /setBrainMode route forces
+        # a fresh pass on the switch back to custom mode.
+        self._make_vertex_active()
+        (self.data / "local_llm.json").write_text(
+            json.dumps({"mode": "builtin"}), encoding="utf-8")
+        with patch.object(vertex_auth, "token") as token, \
+              patch.object(vertex_auth, "token_age", return_value=99999.0):
+            self.assertFalse(providers.refresh_vertex_if_due(force=True))
+        token.assert_not_called()
+        self.assertEqual(self.applied, [])
+
 
 class ParseKeyTests(_TempData):
     def test_bad_json(self):
@@ -590,21 +608,27 @@ class TokenTests(_TempData):
 
 class RouteTests(_FreshAppTests):
     """The routes on the real Flask app against a temp data folder (llm
-    stubbed - no network). providers.py imported the ORIGINAL memory module
-    at collection time, so point it - and llm_server.txt - at this test's
-    folder first."""
+    stubbed - no network). The shared harness reimports the whole stack per
+    test, so the routes run on the FRESH modules - and every patch below
+    must target those (self.providers / self.vertex_auth), not the
+    collection-time copies imported at the top of this file."""
 
     def setUp(self):
         super().setUp()
-        p = patch.object(providers, "memory", self.memory)
+        self.providers = self.api.providers
+        self.vertex_auth = self.api.vertex_auth
+        # Belt and braces: the fresh providers already runs against this
+        # test's memory, but pin it (and the one absolute path,
+        # llm_server.txt) explicitly.
+        p = patch.object(self.providers, "memory", self.memory)
         p.start()
         self.addCleanup(p.stop)
         s = patch.object(self.memory, "PATH_TO_LLM_SERVER",
                          str(Path(self.directory.name) / "llm_server.txt"))
         s.start()
         self.addCleanup(s.stop)
-        vertex_auth.forget_token()
-        self.addCleanup(vertex_auth.forget_token)
+        self.vertex_auth.forget_token()
+        self.addCleanup(self.vertex_auth.forget_token)
 
     def test_listing_shape(self):
         res = self.client.get("/llm/providers")
@@ -618,7 +642,7 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(data["active"], "auto")
         self.assertEqual(data["address"], "")
         self.assertFalse(data["vertex"]["configured"])
-        self.assertEqual(data["vertex"]["region"], vertex_auth.DEFAULT_REGION)
+        self.assertEqual(data["vertex"]["region"], self.vertex_auth.DEFAULT_REGION)
         self.assertTrue(data["can_reveal"])  # the test client sits "on the PC"
 
     def test_save_key_stores_and_probes(self):
@@ -630,12 +654,80 @@ class RouteTests(_FreshAppTests):
         self.assertIn("reachable", body)  # the stubbed probe ran, no network
         keys = json.loads(Path("data/api_keys.json").read_text(encoding="utf-8"))
         self.assertEqual(keys, {"groq": "gsk-test"})
+        # The top Save made Groq the active connection at once: its address
+        # + key in use, the reply's listing fields fresh.
+        self.assertEqual(body["active"], "groq")
+        self.assertEqual(body["address"], "https://api.groq.com/openai/v1")
+        self.assertEqual(body["model"], "")  # nothing was saved before
+        self.assertEqual(self.providers.active_id(), "groq")
+        self.assertEqual(self.memory.load_llm_server(), "https://api.groq.com/openai/v1")
+        self.assertEqual(self.memory.load_api_key(), "gsk-test")
+
+    def test_top_save_switches_the_active_provider_with_an_empty_key(self):
+        # OpenRouter active with its key in use: the top Save on Groq (box
+        # empty) switches the connection at once - Groq's address, and no
+        # key in use (it has none saved); OpenRouter's key is stashed under
+        # its own name.
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        res = self.client.post("/llm/key", json={"provider": "groq", "key": ""})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "groq")
+        self.assertFalse(body["has_key"])
+        self.assertEqual(self.providers.active_id(), "groq")
+        self.assertEqual(self.memory.load_llm_server(), "https://api.groq.com/openai/v1")
+        self.assertEqual(self.memory.load_api_key(), "")
+        self.assertEqual(self.providers.saved_keys()["openrouter"], "sk-or")
+
+    def test_top_save_custom_needs_an_address_and_changes_nothing(self):
+        # "Custom address" with an empty address: 400, plain message, and
+        # NOTHING is changed (no provider file, no stash, no key swap).
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        self.memory.save_llm_model("llama-x")
+        res = self.client.post("/llm/key",
+                               json={"provider": "custom", "key": "", "address": ""})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json["message"], "Enter the server address first.")
+        self.assertEqual(self.providers.active_id(), "openrouter")
+        self.assertEqual(self.memory.load_llm_server(), "https://openrouter.ai/api/v1")
+        self.assertEqual(self.memory.load_api_key(), "sk-or")
+        self.assertEqual(self.memory.load_llm_model(), "llama-x")
+        self.assertFalse(Path("data/llm_provider.txt").exists())
+        self.assertFalse(Path("data/api_keys.json").exists())
 
     def test_save_key_rejections(self):
         self.assertEqual(self.client.post("/llm/key", json={"provider": "nope", "key": "x"}).status_code, 400)
         self.assertEqual(self.client.post("/llm/key", json={"provider": "vertex", "key": "x"}).status_code, 400)
-        self.assertEqual(self.client.post("/llm/key", json={"provider": "groq", "key": "   "}).status_code, 400)
         self.assertEqual(self.client.post("/llm/key", json={"provider": "groq"}).status_code, 400)
+
+    def test_save_key_an_empty_key_checks_without_saving(self):
+        # The button may be pressed with an empty box: nothing is stored
+        # (a saved key is left untouched) and the provider is made active
+        # at once (its saved key goes into use); the server is checked
+        # either way.
+        res = self.client.post("/llm/key", json={"provider": "groq", "key": "sk-first"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["active"], "groq")
+        res = self.client.post("/llm/key", json={"provider": "groq", "key": "   "})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["status"], "ok")
+        self.assertTrue(body["has_key"])        # the saved key stays
+        self.assertIn("reachable", body)        # the (stubbed) probe ran
+        self.assertEqual(body["active"], "groq")  # the second press is a no-op switch
+        keys = json.loads(Path("data/api_keys.json").read_text(encoding="utf-8"))
+        self.assertEqual(keys, {"groq": "sk-first"})
+        self.assertEqual(self.memory.load_api_key(), "sk-first")
+
+    def test_save_key_an_empty_key_with_none_saved_stays_none(self):
+        res = self.client.post("/llm/key", json={"provider": "openrouter", "key": ""})
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(res.json["has_key"])
+        self.assertFalse(self.providers.has_key("openrouter"))
+        self.assertEqual(res.json["active"], "openrouter")  # made active anyway
+        self.assertEqual(self.providers.active_id(), "openrouter")
 
     def test_save_key_for_the_active_provider_applies_it(self):
         res = self.client.post("/llm/provider", json={"id": "openrouter"})
@@ -645,6 +737,64 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(self.memory.load_api_key(), "sk-new")
         self.assertEqual(self.chat.API_KEY, "sk-new")
+
+    def _switch_to_groq_with_list(self, models, reachable=True):
+        """OpenRouter active (key in use, model "llama-x" saved - set the
+        way the app saves it: file AND the in-use state); the top Save on
+        Groq, whose server lists `models` (the patched probe)."""
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        self.chat.setLLMModel("llama-x")
+
+        def fake_test_server(base_url, api_key="", timeout=5.0):
+            if not reachable:
+                return {"reachable": False, "models": [], "loading": False,
+                        "error": "ConnectionRefusedError: stub"}
+            if api_key == "invalid-key-check":
+                return {"reachable": True, "models": [], "loading": False,
+                        "error": "Server is running but rejected the API key (HTTP 401)"}
+            return {"reachable": True, "models": list(models),
+                    "loading": False, "error": None}
+        with patch.object(self.providers.llm, "test_server",
+                          side_effect=fake_test_server):
+            res = self.client.post("/llm/key",
+                                   json={"provider": "groq", "key": "gsk-new"})
+        return res
+
+    def test_top_save_keeps_a_model_the_new_server_offers(self):
+        res = self._switch_to_groq_with_list(["llama-x", "other"])
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "groq")
+        self.assertEqual(body["model"], "llama-x")
+        self.assertEqual(self.providers.active_id(), "groq")
+        # Kept: the new server's list offers it, so she keeps talking to it.
+        self.assertEqual(self.memory.load_llm_model(), "llama-x")
+        self.assertEqual(self.chat.LLM_Model, "llama-x")
+
+    def test_top_save_clears_a_model_the_new_server_does_not_offer(self):
+        res = self._switch_to_groq_with_list(["only-this-model"])
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "groq")
+        self.assertEqual(body["model"], "")
+        self.assertEqual(self.providers.active_id(), "groq")
+        # Cleared (the "No Model Selected." state): a model name from the
+        # previous provider must not go to the new server.
+        self.assertEqual(self.memory.load_llm_model(), "")
+        self.assertEqual(self.chat.LLM_Model, "")
+        self.assertEqual(self.chat.getLLMModel(), "No Model Selected.")
+
+    def test_top_save_keeps_the_model_when_the_list_cannot_load(self):
+        # The server never answered: the saved model is left as is (the
+        # footer dot will report the unreachable server).
+        res = self._switch_to_groq_with_list([], reachable=False)
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "groq")
+        self.assertEqual(body["model"], "llama-x")
+        self.assertEqual(self.memory.load_llm_model(), "llama-x")
+        self.assertEqual(self.chat.LLM_Model, "llama-x")
 
     def test_models_route(self):
         res = self.client.post("/llm/models", json={"provider": "deepseek"})
@@ -679,9 +829,12 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(self.client.get("/llm/key", query_string={"provider": "nope"}).status_code, 400)
 
     def test_vertex_route_saves_key_region_and_probe(self):
+        # "Save JSON key": the key is stored AND Vertex becomes the active
+        # provider at once (pass + per-project address into use).
         n, e, d = rsa_numbers()
-        with patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
-             patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"), \
+             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
             res = self.client.post("/llm/vertex",
                                    json={"json": fake_vertex_key(), "region": "us-central1"})
         self.assertEqual(res.status_code, 200)
@@ -692,7 +845,35 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(body["vertex"]["project"], "amadeus-offline-test")
         self.assertIn("us-central1-aiplatform", body["vertex"]["address"])
         self.assertTrue(body["reachable"])
-        self.assertEqual(body["models"], providers.VERTEX_MODELS)
+        self.assertEqual(body["models"], self.providers.VERTEX_MODELS)
+        self.assertEqual(body["active"], "vertex")
+        self.assertEqual(self.providers.active_id(), "vertex")
+        self.assertIn("aiplatform.googleapis.com", self.memory.load_llm_server())
+        self.assertEqual(self.memory.load_api_key(), "ya29-offline-pass")
+
+    def test_vertex_route_sign_in_failure_keeps_the_previous_provider(self):
+        # The key is stored, but Google refuses the sign-in: the switch
+        # does not happen, the saved key stands, and the failure is
+        # reported (not raised).
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token",
+                          side_effect=self.vertex_auth.VertexSignInError(
+                              "Google Vertex refused the sign-in.")), \
+             patch.object(self.vertex_auth, "check_ready",
+                          return_value={"ok": False,
+                                        "error": "Google Vertex refused the sign-in."}):
+            res = self.client.post("/llm/vertex", json={"json": fake_vertex_key()})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertIn("message", body)
+        self.assertIn("refused the sign-in", body["message"])
+        self.assertEqual(body["active"], "openrouter")
+        self.assertEqual(self.providers.active_id(), "openrouter")
+        self.assertEqual(self.memory.load_llm_server(), "https://openrouter.ai/api/v1")
+        self.assertTrue(body["vertex"]["configured"])  # the saved key stands
 
     def test_vertex_route_rejects_bad_input(self):
         res = self.client.post("/llm/vertex", json={"json": "not a JSON key"})
@@ -709,9 +890,9 @@ class RouteTests(_FreshAppTests):
 
     def test_provider_route_switches_to_vertex_and_prefixes_the_model(self):
         n, e, d = rsa_numbers()
-        with patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
-             patch.object(vertex_auth, "token", return_value="ya29-offline-pass") as token:
-            vertex_auth.save_key(fake_vertex_key(), "global")
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass") as token:
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
             res = self.client.post("/llm/provider",
                                    json={"id": "vertex", "model": "gemini-3.8-flash"})
         self.assertEqual(res.status_code, 200)
@@ -741,14 +922,39 @@ class RouteTests(_FreshAppTests):
     def test_provider_route_unknown_is_400(self):
         self.assertEqual(self.client.post("/llm/provider", json={"id": "nope"}).status_code, 400)
 
+    def test_brain_mode_back_to_custom_renews_the_vertex_pass(self):
+        # Path A: her built-in model is active while Vertex is the saved
+        # custom provider - the keeper pauses, so switching back to custom
+        # mode renews the pass at once (the first chat must not race the
+        # keeper's next round).
+        from test_builtin_llm import _config, _write
+        n, e, d = rsa_numbers()
+        _write(Path("data") / "local_llm.json", _config(Path(self.directory.name)))
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
+        self.memory.save_llm_server("https://aiplatform.googleapis.com/v1/projects/"
+                                    "amadeus-offline-test/locations/global/endpoints/openapi")
+        # While her built-in brain is active: even a forced renewal is off.
+        with patch.object(self.vertex_auth, "token") as token:
+            self.assertFalse(self.providers.refresh_vertex_if_due(force=True))
+        token.assert_not_called()
+        # The switch back: one forced renewal, the new pass in use at once.
+        with patch.object(self.vertex_auth, "token", return_value="ya29-fresh") as token:
+            res = self.client.post("/setBrainMode", json={"mode": "custom"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["mode"], "custom")
+        token.assert_called_once_with(force=True)
+        self.assertEqual(self.memory.load_api_key(), "ya29-fresh")
+        self.assertEqual(self.chat.API_KEY, "ya29-fresh")
+
     def test_test_route_ok(self):
         # One message through the model in her own format: 200 + the words.
-        with patch.object(providers.llm, "test_server",
+        with patch.object(self.providers.llm, "test_server",
                           return_value={"reachable": True, "models": ["m1"],
                                         "loading": False, "error": None}):
             self.client.post("/llm/key", json={"provider": "groq", "key": "gsk-test"})
             fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
-            with patch.object(providers.llm, "client_for", return_value=fake):
+            with patch.object(self.providers.llm, "client_for", return_value=fake):
                 res = self.client.post("/llm/test",
                                        json={"provider": "groq", "model": "llama-x"})
         self.assertEqual(res.status_code, 200)
@@ -770,7 +976,7 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(self.client.post("/llm/test", json={}).status_code, 400)
 
     def test_test_route_every_outcome_is_200(self):
-        with patch.object(providers.llm, "test_server",
+        with patch.object(self.providers.llm, "test_server",
                           return_value={"reachable": True, "models": ["m1"],
                                         "loading": False, "error": None}):
             self.client.post("/llm/key", json={"provider": "groq", "key": "gsk-test"})
@@ -783,14 +989,14 @@ class RouteTests(_FreshAppTests):
             (_FakeClient(structured_exc=APIConnectionError("refused")), "unreachable"),
         ]
         for fake, outcome in scenarios:
-            with patch.object(providers.llm, "client_for", return_value=fake):
+            with patch.object(self.providers.llm, "client_for", return_value=fake):
                 res = self.client.post("/llm/test",
                                        json={"provider": "groq", "model": "llama-x"})
             self.assertEqual(res.status_code, 200, outcome)
             self.assertEqual(res.json["outcome"], outcome, outcome)
 
     def test_test_route_changes_nothing_saved(self):
-        with patch.object(providers.llm, "test_server",
+        with patch.object(self.providers.llm, "test_server",
                           return_value={"reachable": True, "models": ["m1"],
                                         "loading": False, "error": None}):
             self.client.post("/llm/key", json={"provider": "groq", "key": "gsk-test"})
@@ -802,7 +1008,7 @@ class RouteTests(_FreshAppTests):
         address_before = self.memory.load_llm_server()
         keys_before = json.loads(Path("data/api_keys.json").read_text(encoding="utf-8"))
         fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
-        with patch.object(providers.llm, "client_for", return_value=fake):
+        with patch.object(self.providers.llm, "client_for", return_value=fake):
             res = self.client.post("/llm/test",
                                    json={"provider": "groq", "model": "llama-x"})
         self.assertEqual(res.status_code, 200)
@@ -821,14 +1027,14 @@ class RouteTests(_FreshAppTests):
         OK = {"reachable": True, "models": ["m1"], "loading": False, "error": None}
         REFUSED = {"reachable": True, "models": [], "loading": False,
                    "error": "Server is running but rejected the API key (HTTP 401)"}
-        with patch.object(providers.llm, "test_server",
+        with patch.object(self.providers.llm, "test_server",
                           side_effect=[dict(OK), dict(OK), dict(OK), dict(REFUSED)]):
             self.client.post("/llm/key", json={"provider": "deepseek", "key": "sk-test"})
             res = self.client.post("/llm/models", json={"provider": "deepseek"})
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.json["has_key"])
         self.assertTrue(res.json["key_checked"])
-        with patch.object(providers.llm, "test_server",
+        with patch.object(self.providers.llm, "test_server",
                           side_effect=[dict(OK), dict(OK), dict(OK), dict(OK)]):
             self.client.post("/llm/key", json={"provider": "openrouter", "key": "sk-or"})
             res = self.client.post("/llm/models", json={"provider": "openrouter"})
@@ -836,11 +1042,13 @@ class RouteTests(_FreshAppTests):
 
     def test_vertex_route_keeps_the_saved_region_when_none_is_sent(self):
         n, e, d = rsa_numbers()
-        with patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
-             patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"), \
+             patch.object(self.vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
             res = self.client.post("/llm/vertex",
                                    json={"json": fake_vertex_key(), "region": "us-central1"})
             self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.json["active"], "vertex")  # active at once
             # The page now saves the JSON key WITHOUT a region: the saved
             # region must survive.
             res = self.client.post("/llm/vertex", json={"json": fake_vertex_key()})
@@ -1107,13 +1315,28 @@ class TestModelTests(_TempData):
         self.assertEqual(result["message"], "Pick a model first.")
         build.assert_not_called()
 
-    def test_cloud_without_a_saved_key(self):
+    def test_cloud_without_a_saved_key_still_sends_the_test(self):
+        # No early refusal anymore: the client sends a placeholder key, so a
+        # model that answers works even before any key is saved.
         memory.save_llm_server("https://api.groq.com/openai/v1")  # no key
-        fake = _FakeClient()
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
         result, build = self._run(fake)
-        self.assertEqual(result["outcome"], "no_key")
-        self.assertEqual(result["message"], "No key saved yet.")
-        build.assert_not_called()
+        build.assert_called_once()
+        args, _ = build.call_args
+        self.assertEqual(args[0], "https://api.groq.com/openai/v1")
+        self.assertEqual(args[1], "")  # the placeholder lives inside client_for
+        self.assertTrue(result["ok"])
+
+    def test_cloud_without_a_saved_key_refusal_names_the_fix(self):
+        # A refusal with no key saved says so: the fix is to save a key,
+        # not to correct one (outcome stays bad_key).
+        memory.save_llm_server("https://api.groq.com/openai/v1")  # no key
+        fake = _FakeClient(structured_exc=_StatusError(401, "Invalid API key"),
+                           plain_exc=_StatusError(403, "permission denied"))
+        result, build = self._run(fake)
+        self.assertEqual(result["outcome"], "bad_key")
+        self.assertEqual(result["message"],
+                         "The provider rejected the request - no key is saved yet.")
 
     def test_local_needs_no_key(self):
         memory.save_llm_server("http://localhost:11434/v1")
@@ -1426,6 +1649,14 @@ class TestModelTests(_TempData):
         result, _ = self._run(fake, pid="ollama", model="ghost")
         self.assertEqual(result["outcome"], "model_missing")
         self.assertEqual(result["message"], "The server does not know the model ghost.")
+        # No key saved: a refusal names that (the client sent a placeholder).
+        fake = _FakeClient(structured_exc=_StatusError(401, "invalid key"))
+        result, _ = self._run(fake, pid="ollama")
+        self.assertEqual(result["outcome"], "bad_key")
+        self.assertEqual(result["message"],
+                         "The server rejected the request - no key is saved yet.")
+        # With a key saved the words go back to the plain rejection.
+        memory.save_api_key("local-key")
         fake = _FakeClient(structured_exc=_StatusError(401, "invalid key"))
         result, _ = self._run(fake, pid="ollama")
         self.assertEqual(result["outcome"], "bad_key")

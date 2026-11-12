@@ -167,17 +167,46 @@ def _read_app_llm():
             _read(KEY_FILE, ""))
 
 
+def _is_local_host(server: str) -> bool:
+    """True for localhost / private-LAN addresses (the same rule as the app
+    backend's llm.py). Such servers usually take no key at all, so an EMPTY
+    key may send the same placeholder the app sends (llm.py, "unsloth").
+    Cloud addresses are the rest - they need a real key."""
+    netloc = server.split("//", 1)[-1].split("/")[0].lower()
+    host = netloc[1:].split("]")[0] if netloc.startswith("[") else netloc.split(":")[0]
+    if not host or host == "localhost" or host.endswith(".local"):
+        return bool(host)
+    try:
+        import ipaddress
+        # Every private range: 10/8, 172.16/12 (Docker, WSL, some routers),
+        # 192.168/16, loopback, link-local, IPv6 private.
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local)
+
+
 def llm_ready(server, model, key, timeout=5.0):
     """Read-only /models probe (the app does the same in test_server). True
     only when the server answers AND the configured model is actually
     loaded - the guard that prevents hitting a downloaded-but-not-loaded
-    model (the 2026-09-26 crash incident)."""
+    model (the 2026-09-26 crash incident).
+
+    A local / LAN / custom server needs no key: with an EMPTY key the probe
+    sends the same placeholder the app sends (llm.py, "unsloth") and stands
+    on its own. A cloud address (and Vertex's aiplatform host) still needs
+    a real key - without one it is never "ready" and learning stays paused.
+    """
+    if not model:
+        return False, []
     if "aiplatform.googleapis.com" in server:
         # Google Vertex AI has no model list to ask; the app keeps a fresh
         # sign-in pass in the key file while Vertex is the chosen provider.
-        return bool(model and key), ([model] if model else [])
+        return bool(key), ([model] if model else [])
+    if not key and not _is_local_host(server):
+        return False, []
     req = urllib.request.Request(server.rstrip("/") + "/models",
-                                 headers={"Authorization": "Bearer " + key})
+                                 headers={"Authorization": "Bearer " + (key or "unsloth")})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             loaded = [m["id"] for m in json.load(r)["data"]]
@@ -336,16 +365,17 @@ _llm_sig = None
 def get_llm():
     """LLM client built from the app's LIVE settings (hot reload: any change
     of server, model or key in the app is picked up on the next learning
-    batch). The key may be empty (no model connected yet): the LLM is
-    OPTIONAL - context serving is pure local retrieval and learning just
-    stays paused (the llm_ready gate) until the user connects a model. A
-    placeholder token keeps the client constructor happy; its requests
-    would 401 and are never sent while the gate says the target is down."""
+    batch). The key may be empty (a keyless local / LAN server is a valid
+    target): the LLM is OPTIONAL - context serving is pure local retrieval
+    and learning just stays paused (the llm_ready gate) until the target
+    answers. A keyless probe and the client both send the same placeholder
+    the app sends (llm.py, "unsloth"); for a cloud target the gate keeps
+    learning paused until a real key is saved."""
     global _llm, _llm_sig
     server, model, key = _read_app_llm()
     sig = (server, model, key)
     if _llm is None or _llm_sig != sig:
-        _llm = NonThinkingLLM(LLMConfig(base_url=server, api_key=key or "not-configured-yet",
+        _llm = NonThinkingLLM(LLMConfig(base_url=server, api_key=key or "unsloth",
                                         model=model, temperature=0.0, max_tokens=2048,
                                         timeout=240.0))
         _llm_sig = sig

@@ -210,10 +210,43 @@ class AppTests(_FreshAppTests):
         _write(self.cfg_path, _config(self.base, **over))
 
     def test_no_key_gate_in_builtin_mode(self):
-        self.assertFalse(self.chat.has_api_key())
-        self.builtin_on()
-        self.assertTrue(self.chat.has_api_key())
-        self.assertEqual(self.chat.API_KEY, "")   # no fake key was stored
+        # A key is only a gate for cloud providers: with a cloud address
+        # and no key the gate is on - until her built-in model takes over,
+        # whose server has no key at all (and no fake key gets stored).
+        import providers
+        server_file = str(self.base / "llm_server_test.txt")
+        with patch.object(self.memory, "PATH_TO_LLM_SERVER", server_file), \
+             patch.object(providers.memory, "PATH_TO_LLM_SERVER", server_file):
+            self.memory.save_llm_server("https://openrouter.ai/api/v1")
+            self.assertFalse(self.chat.has_api_key())
+            self.builtin_on()
+            self.assertTrue(self.chat.has_api_key())
+            self.assertEqual(self.chat.API_KEY, "")   # no fake key was stored
+
+    def test_keyless_local_and_custom_servers_pass_the_gate(self):
+        # Local / LAN / custom servers take a key only if the user saved
+        # one: with none saved they still pass (the model client sends a
+        # placeholder key, llm.py).
+        import providers
+        server_file = str(self.base / "llm_server_test.txt")
+        with patch.object(self.memory, "PATH_TO_LLM_SERVER", server_file), \
+             patch.object(providers.memory, "PATH_TO_LLM_SERVER", server_file):
+            self.memory.save_llm_server("http://localhost:11434/v1")  # Ollama
+            self.assertTrue(self.chat.has_api_key())
+            self.memory.save_llm_server("http://192.168.0.10:8000/v1")  # custom LAN
+            self.assertTrue(self.chat.has_api_key())
+            self.memory.save_llm_server("")  # auto-detect
+            self.assertTrue(self.chat.has_api_key())
+
+    def test_keyless_cloud_provider_still_needs_a_key(self):
+        import providers
+        server_file = str(self.base / "llm_server_test.txt")
+        with patch.object(self.memory, "PATH_TO_LLM_SERVER", server_file), \
+             patch.object(providers.memory, "PATH_TO_LLM_SERVER", server_file):
+            self.memory.save_llm_server("https://openrouter.ai/api/v1")
+            self.assertFalse(self.chat.has_api_key())
+            self.chat.setKey("sk-test")
+            self.assertTrue(self.chat.has_api_key())
 
     def test_model_name_comes_from_builtin(self):
         self.builtin_on()

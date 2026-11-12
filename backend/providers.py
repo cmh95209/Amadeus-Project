@@ -17,6 +17,7 @@ import re
 import threading
 import time
 
+import builtin_llm
 import llm
 import memory
 import vertex_auth
@@ -235,23 +236,26 @@ def activate(pid: str, address: str = "") -> dict:
     The key in use now is stashed under the OLD provider (its own file), so
     switching back keeps it; then the new address + key are persisted
     (api_key.txt stays the key in use) and the app is pointed at the new
-    server. ValueError for the two setup mistakes (custom without an
-    address, Vertex without a saved JSON key); VertexSignInError when
-    signing in to Google fails. Returns {"id", "address"}.
+    server. The setup mistakes (custom without an address, Vertex without a
+    saved JSON key) are refused BEFORE anything is written, so a failed
+    switch changes nothing. ValueError on those mistakes; VertexSignInError
+    when signing in to Google fails (after the stash, which is the old
+    provider's own key under its own name - it stays usable). Returns
+    {"id", "address"}.
     """
     if get(pid) is None:
         raise ValueError(f"Unknown provider: {pid}")
+    if pid == "vertex" and not vertex_auth.info()["configured"]:
+        raise ValueError("Save your Google Vertex JSON key first.")
+    new_address = address_for(pid, address)
+    if pid == "custom" and not new_address:
+        raise ValueError("Enter the server address first.")
     old = active_id()
     current = memory.load_api_key()
     if old != "vertex" and current:
         keys = saved_keys()
         keys[old] = current
         _write_keys(keys)
-    if pid == "vertex" and not vertex_auth.info()["configured"]:
-        raise ValueError("Save your Google Vertex JSON key first.")
-    new_address = address_for(pid, address)
-    if pid == "custom" and not new_address:
-        raise ValueError("Enter the server address first.")
     if pid == "vertex":
         key = vertex_auth.token()
     else:
@@ -463,15 +467,20 @@ def _kind_word(kind: str) -> str:
     return "server" if kind in ("local", "custom") else "provider"
 
 
-def _classify_http(exc, model: str, started: float, kind: str) -> dict:
+def _classify_http(exc, model: str, started: float, kind: str,
+                  no_key_saved: bool = False) -> dict:
     """One HTTP error from the test call -> the outcome the page shows;
-    the same wording checks chat.py uses in her reply ladder."""
+    the same wording checks chat.py uses in her reply ladder. When no key
+    was saved (the client sent a placeholder), a refusal means "no key
+    saved yet", not "wrong key" - that is the fix, so that is what it says."""
     import chat  # lazy, as in test_model
     who = _kind_word(kind)
     status = _http_status(exc)
     text = str(exc).lower()
+    refused = (f"The {who} rejected the request - no key is saved yet."
+               if no_key_saved else f"The {who} rejected this key.")
     if status in (401, 403):
-        return _test_result(False, "bad_key", f"The {who} rejected this key.", model, started)
+        return _test_result(False, "bad_key", refused, model, started)
     if status == 402:
         return _test_result(False, "no_credit",
                             "The provider says this account has no credit or quota left.",
@@ -490,14 +499,15 @@ def _classify_http(exc, model: str, started: float, kind: str) -> dict:
                             f"The {who} does not know the model {model}.", model, started)
     if status in (400, 422):
         if status == 400 and any(word in text for word in ("api key", "api-key", "apikey", "invalid key")):
-            return _test_result(False, "bad_key", f"The {who} rejected this key.", model, started)
+            return _test_result(False, "bad_key", refused, model, started)
         if _says_model_unknown(text):
             return _test_result(False, "model_missing",
                                 f"The {who} does not know the model {model}.", model, started)
     return _test_result(False, "error", f"The test failed: {_test_reason(exc)}", model, started)
 
 
-def _plain_fallback(client, messages, model: str, started: float, kind: str) -> dict:
+def _plain_fallback(client, messages, model: str, started: float, kind: str,
+                    no_key_saved: bool = False) -> dict:
     """The structured call came back empty (or its tool format itself
     failed): one plain call tells "the model answers, but not in the form
     Amadeus needs" apart from "the model does not answer at all"."""
@@ -505,7 +515,7 @@ def _plain_fallback(client, messages, model: str, started: float, kind: str) -> 
         reply = client.invoke(messages)
     except Exception as exc:
         if _http_status(exc) is not None:
-            return _classify_http(exc, model, started, kind)
+            return _classify_http(exc, model, started, kind, no_key_saved)
         if _is_network_error(exc):
             return _test_result(False, "unreachable", "Could not reach the server.", model, started)
         return _test_result(False, "error", f"The test failed: {_test_reason(exc)}", model, started)
@@ -526,7 +536,9 @@ def test_model(pid: str, address: str = "", model: str = "") -> dict:
     changed: no key, provider, model or client of the running app is
     touched. ValueError for an unknown provider id.
 
-    Outcomes (the page shows the matching words): ok, no_model, no_key,
+    Outcomes (the page shows the matching words): ok, no_model, no_key
+    (Vertex without a JSON key - every other provider may be tested with no
+    key: the client sends a placeholder, and a refusal then says so),
     bad_key, model_missing, no_credit, rate_limited, wrong_format,
     unreachable, error.
     """
@@ -539,6 +551,7 @@ def test_model(pid: str, address: str = "", model: str = "") -> dict:
     model = (model or "").strip()
     if not model:
         return _test_result(False, "no_model", "Pick a model first.", "", started)
+    no_key_saved = False
     if row["kind"] == "vertex":
         info = vertex_auth.info()
         if not info["configured"]:
@@ -554,9 +567,11 @@ def test_model(pid: str, address: str = "", model: str = "") -> dict:
         # answers), everyone else their table address (or the typed one).
         base_url = (llm.autodetect_url() if pid == "auto" else address_for(pid, address)
                     or "").strip()
+        # No key saved: the client sends a placeholder anyway, so the test
+        # still goes out - a refusal then means "no key saved yet", not
+        # "wrong key" (no_key_saved turns the words that way).
         key = key_for(pid)
-        if row["kind"] == "cloud" and not key:
-            return _test_result(False, "no_key", "No key saved yet.", "", started)
+        no_key_saved = not key
     if not base_url:
         return _test_result(False, "error",
                             "The test failed: no server address for this provider.",
@@ -572,17 +587,19 @@ def test_model(pid: str, address: str = "", model: str = "") -> dict:
         result = chat._structured(client, chat.AmadeusPack, messages)
     except Exception as exc:
         if _http_status(exc) is not None:
-            return _classify_http(exc, model, started, row["kind"])
+            return _classify_http(exc, model, started, row["kind"], no_key_saved)
         if _is_network_error(exc):
             return _test_result(False, "unreachable", "Could not reach the server.", model, started)
         # A non-HTTP failure (often the tool format itself): the model may
         # still answer in plain text - one plain call tells the two apart.
-        return _plain_fallback(client, messages, model, started, row["kind"])
+        return _plain_fallback(client, messages, model, started, row["kind"],
+                               no_key_saved)
     if result is not None and _pack_speaks(result):
         return _test_result(True, "ok",
                             f"Works with Amadeus. {model} replied in {time.time() - started:.1f} s.",
                             model, started)
-    return _plain_fallback(client, messages, model, started, row["kind"])
+    return _plain_fallback(client, messages, model, started, row["kind"],
+                           no_key_saved)
 
 
 
@@ -600,13 +617,20 @@ def listing() -> dict:
 # ---------- keeping the Vertex pass fresh ----------------------------------
 
 def refresh_vertex_if_due(force: bool = False) -> bool:
-    """Only when Vertex is the active provider: if forced or the pass is
-    older than REFRESH_AFTER, sign in again and hand the fresh pass to the
-    app (it differs from the one in api_key.txt). A failed sign-in is
-    printed (never with the token) and False is returned. True when a new
-    pass was applied."""
+    """Only when Vertex is the active provider AND her built-in model is not
+    in use: if forced or the pass is older than REFRESH_AFTER, sign in again
+    and hand the fresh pass to the app (it differs from the one in
+    api_key.txt). A failed sign-in is printed (never with the token) and
+    False is returned. True when a new pass was applied.
+
+    While the built-in brain is active the custom pass is never used, so a
+    renewal is pointless; the /setBrainMode route forces a fresh pass the
+    moment the user switches back to custom mode, so the first chat after
+    the switch cannot go out with an expired one."""
     try:
         if active_id() != "vertex":
+            return False
+        if builtin_llm.active():
             return False
         if not force and vertex_auth.token_age() < vertex_auth.REFRESH_AFTER:
             return False
