@@ -29,6 +29,7 @@ import webreader
 import websearch
 import weather
 import cm_bridge
+import cross_tab
 import attachments
 
 default_LLM_Model = store.DEFAULT_LLM_MODEL
@@ -2551,25 +2552,38 @@ def _merge_leading_system_messages(messages):
 # the conversation. Measured on the built-in model: a changed block at the top
 # re-read all ~7,300 pieces; at the end, ~40.
 #
-# Prompt order B (right_now=True, built-in model only): her model's sliding-
-# window layers can resume only from a point the server saved at the start of
-# the newest user message, so the changing blocks leave the instruction
-# message and become one "right now" note AFTER the newest user message (the
-# next reply then differs only after that point). Measured on a real chat:
-# ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the newest user
-# message re-read the whole chat history).
+# Prompt order B (right_now=True: her built-in model AND cloud providers): her
+# model's sliding-window layers can resume only from a point the server saved
+# at the start of the newest user message, so the changing blocks leave the
+# instruction message and become one "right now" note AFTER the newest user
+# message (the next reply then differs only after that point). Measured on a
+# real chat: ~850 pieces re-read instead of ~5,000-7,500 (a note BEFORE the
+# newest user message re-read the whole chat history).
+# Cloud providers (2026-11-12): order A got NO prompt-cache discount on
+# Gemini (the changing blocks sit inside the one instruction block, so it is
+# new every reply); order B with the note sent as a user message (llm.py
+# _right_now_note_as_user) reused 55-68% of the prompt. A user's own local /
+# LAN server keeps order A (some chat templates refuse a second system
+# message).
 # The label's wording matters (measured 2026-10-22, "What time is it right
 # now?" x10): "private background" made her refuse to read the clock 4/5 times,
-# "use it freely" answered 10/10.
+# "use it freely" answered 10/10. llm.py holds the SAME text (RIGHT_NOW_LABEL,
+# to recognise the note on its way out; several tests stand in a fake `llm`
+# module, so it is not imported from there) - test_prompt_order checks both match.
 _RIGHT_NOW_LABEL = ("RIGHT NOW (what you know at this moment - use it freely; "
                     "the user did not write this):\n\n")
 
 
-def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
+def _ordered_prompt(rules_block, web_block, changing, context, right_now=False,
+                    conversation_id=None):
+    # Cross-tab catch-up (cross_tab.py): last of the fixed blocks - it changes
+    # only when ANOTHER tab changes, so it keeps the reused prompt start.
+    catch_up = cross_tab.catch_up_block(conversation_id)
     fixed = (store.load_default_personality_messages()
              + [ja_voice.build_voice_rules()]
              + [rules_block]
-             + [web_block])
+             + [web_block]
+             + ([catch_up] if catch_up else []))
     trust = stats.load_stat("trust")
     # Her short-term feelings (2026-10-30): one line after the closeness
     # block, only when one of them is away from normal - otherwise the
@@ -2588,11 +2602,19 @@ def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
 
 
 def _right_now_note() -> bool:
-    """Order B only on her built-in model (looked up at call time - several
-    tests stand in a fake `llm` module)."""
+    """Order B on her built-in model and on every cloud provider; order A on a
+    user's own local / LAN server (looked up at call time - several tests
+    stand in a fake `llm` module)."""
     builtin = getattr(_llm_module, "builtin_llm", None)
     try:
-        return bool(builtin and builtin.active())
+        if builtin and builtin.active():
+            return True
+    except Exception:
+        return False
+    server = getattr(_llm_module, "_configured_server_url", None)
+    is_local = getattr(_llm_module, "_is_local_host", None)
+    try:
+        return bool(server and is_local and not is_local(server()))
     except Exception:
         return False
 
@@ -4639,6 +4661,7 @@ def generate_greeting(mode: str = "startup",
                                                previous_conversation_id
                                                if switch else None))],
             ctx,
+            conversation_id=conversation_id,
         )
         if _is_local(client):
             # Local model: plain Japanese line + translated English line. An
@@ -4932,18 +4955,23 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     # switch while she answers can never mix two chats' pictures.
     picture_conv = store.load_active_conversation()
     picture_index = attachments.picture_index_message(picture_conv)
+    # Cross-tab search (cross_tab.py): other tabs' lines matching what the
+    # user just wrote - this reply only, so it rides in the changing part.
+    found = cross_tab.search_block(_content_text(last_user), picture_conv)
 
     messages = _ordered_prompt(
         pack_rules,
         PROACTIVE_SEARCH_BLOCK if web_on else NO_WEB_BLOCK,
         book_messages
         + ([memory_block] if memory_block else [])
+        + ([found] if found else [])
         + ([lookup_index] if lookup_index else [])
         + ([picture_index] if picture_index else [])
         + ([link_note] if link_note else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
         right_now=_right_now_note(),
+        conversation_id=picture_conv,
     )
     # Her pictures (the newest message's + her desk), in this reply call only;
     # with web ON that includes her search decision (MH P1 b).
@@ -5118,16 +5146,19 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         memory_block = None
     picture_conv = store.load_active_conversation()   # once for this reply's pictures
     picture_index = attachments.picture_index_message(picture_conv)
+    found = cross_tab.search_block(_content_text(last_user), picture_conv)   # cross_tab.py
 
     messages = _ordered_prompt(
         _PLAIN_RULES_JA if plain else _PACK_RULES_JA_ONLY,
         NO_WEB_BLOCK,
         book_messages
         + ([memory_block] if memory_block else [])
+        + ([found] if found else [])
         + ([picture_index] if picture_index else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
         right_now=_right_now_note(),
+        conversation_id=picture_conv,
     )
     messages = attachments.with_pictures(messages, picture_conv)   # her pictures (reply call only)
 

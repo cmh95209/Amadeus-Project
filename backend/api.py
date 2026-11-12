@@ -29,6 +29,7 @@ import builtin_llm
 import builtin_server
 import ceremony
 import concerns
+import cross_tab
 import defaults_refresh
 import feelings
 import llm
@@ -1065,6 +1066,25 @@ def set_web_reading():
     return jsonify({"status": "ok", "mode": mode})
 
 
+@application.route("/crossTab", methods=["GET"])
+def get_cross_tab():
+    """Settings -> Preferences: "Remember my other chats" (catch_up) and
+    "Search old chats" (search) - cross_tab.py."""
+    return jsonify(cross_tab.load_settings())
+
+
+@application.route("/crossTab", methods=["POST"])
+def set_cross_tab():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data:
+        return jsonify({"message": "Send catch_up and/or search as true or false"}), 400
+    try:
+        saved = cross_tab.save_settings(data)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    return jsonify({"status": "ok", **saved})
+
+
 @application.route("/setWebAccess", methods=["POST"])
 def set_web_access():
     """Turn the web-access toggle on or off (persisted)."""
@@ -2044,17 +2064,21 @@ def list_conversations():
 def create_conversation():
     data = request.get_json(silent=True)
     title = data.get("title") if isinstance(data, dict) else None
+    previous = memory.load_active_conversation()
     conv_id = memory.create_conversation(title if isinstance(title, str) else None)
+    cross_tab.on_tab_left(previous, conv_id)   # memory service learns the tab left
     return jsonify({"status": "ok", "id": conv_id})
 
 
 # post: the given session becomes active (its messages then come from /getMemory)
 @application.route("/conversations/<int:conversation_id>/activate", methods=["POST"])
 def activate_conversation(conversation_id):
+    previous = memory.load_active_conversation()
     try:
         active = memory.set_active_conversation(conversation_id)
     except ValueError:
         return jsonify({"message": "Conversation not found"}), 404
+    cross_tab.on_tab_left(previous, active)   # memory service learns the tab left
     return jsonify({"status": "ok", "active_id": active})
 
 

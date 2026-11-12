@@ -759,14 +759,17 @@ def context(chat_id: str, user: str = USER_ID,
 
 
 @app.post("/extract")
-def extract_now(chat_id: Optional[str] = None):
+def extract_now(chat_id: Optional[str] = None, min_new: int = 0):
+    """Learn now. min_new (cross-tab learn-on-leave, 2026-11-12): skip a chat
+    with fewer than that many messages not learned from yet."""
     if not _engine_state["ready"]:
         return {"ok": False, "targets": [chat_id] if chat_id else [],
                 "started": 0, "note": "memory engine still loading"}
     targets = [chat_id] if chat_id else [c.id for c in agent.list_chats()]
     started = 0
     for t in targets:
-        if agent.load_chat(t) is not None:
+        chat = agent.load_chat(t)
+        if chat is not None and len(chat.unextracted()) >= max(0, int(min_new)):
             started += 1 if _start_background_extract(t) else 0
     return {"ok": True, "targets": targets, "started": started}
 

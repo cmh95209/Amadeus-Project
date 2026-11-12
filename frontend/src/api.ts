@@ -638,6 +638,23 @@ export async function setWebReading(mode: "thorough" | "quick"): Promise<void> {
   }));
 }
 
+/** Settings -> Preferences: cross-tab memory (backend cross_tab.py). */
+export type CrossTab = { catch_up: boolean; search: boolean };
+
+export async function getCrossTab(): Promise<CrossTab> {
+  const data = await parseResponse(await fetch(`${API_BASE}/crossTab`, { cache: "no-store" }));
+  return { catch_up: data.catch_up !== false, search: data.search !== false };
+}
+
+export async function setCrossTab(changes: Partial<CrossTab>): Promise<CrossTab> {
+  const data = await parseResponse(await fetch(`${API_BASE}/crossTab`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  }));
+  return { catch_up: data.catch_up !== false, search: data.search !== false };
+}
+
 export type ReasoningLevel = "off" | "low" | "medium" | "high";
 export type ReasoningKey = "replies_builtin" | "replies_custom" | "translations";
 export type ReasoningInfo = Record<ReasoningKey, ReasoningLevel> & {

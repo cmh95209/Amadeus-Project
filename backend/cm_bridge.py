@@ -87,6 +87,21 @@ def save_turn(chat_id, role: str, content: str) -> None:
                      name="cm-sidecar-save").start()
 
 
+def learn_now(chat_id, min_new: int = 0) -> None:
+    """Fire-and-forget: ask the memory service to learn from one chat now
+    (cross-tab learn-on-leave) - it skips the chat when fewer than min_new
+    messages wait to be learned. Silent failure, never blocks."""
+    def _work() -> None:
+        try:
+            query = urllib.parse.urlencode({"chat_id": str(chat_id),
+                                            "min_new": int(min_new)})
+            _post_json("/extract?" + query, {}, CM_TIMEOUT_SAVE)
+        except Exception as e:
+            print("[Amadeus] cm-sidecar learn-now skipped:", repr(e))
+
+    threading.Thread(target=_work, daemon=True, name="cm-sidecar-learn").start()
+
+
 def fetch_memory_block(chat_id) -> dict | None:
     """One labeled system section for her prompt, or None = the prompt stays
     byte-identical (service down, error, unknown chat, or nothing learned)."""

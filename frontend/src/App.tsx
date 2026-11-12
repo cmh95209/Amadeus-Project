@@ -65,6 +65,8 @@ import {
   pokeConversation,
   getWebAccess,
   setWebAccess,
+  getCrossTab,
+  setCrossTab,
   getWebReading,
   setWebReading,
   getReasoning,
@@ -293,6 +295,8 @@ export default function App() {
   }, [settingsOpen]);
   // Settings -> Preferences -> "Read pages thoroughly" (saved at once).
   const [webReading, setWebReadingState] = useState<{ mode: "thorough" | "quick"; reason: string } | null>(null);
+  // Settings -> Preferences -> cross-tab memory (saved at once).
+  const [crossTab, setCrossTabState] = useState<{ catch_up: boolean; search: boolean } | null>(null);
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [apiKey, setApiKeyInput] = useState("");
   // Settings -> Connection -> Custom Model: the provider table (GET
@@ -727,6 +731,24 @@ export default function App() {
       .catch(() => { if (!cancelled) setWebReadingState(null); });
     return () => { cancelled = true; };
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let cancelled = false;
+    getCrossTab()
+      .then((c) => { if (!cancelled) setCrossTabState(c); })
+      .catch(() => { if (!cancelled) setCrossTabState(null); });
+    return () => { cancelled = true; };
+  }, [settingsOpen]);
+
+  async function toggleCrossTab(key: "catch_up" | "search") {
+    if (!crossTab) return;
+    try {
+      setCrossTabState(await setCrossTab({ [key]: !crossTab[key] }));
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save the chat memory setting");
+    }
+  }
 
   async function toggleWebReading() {
     if (!webReading) return;
@@ -4010,6 +4032,48 @@ export default function App() {
                     One short line from her when you attach a picture, before you
                     send it (she hasn't seen it yet). Saved at once.
                   </p>
+                </div>
+
+                <div className="settings-toggle-row" aria-label="Remember my other chats">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Remember my other chats</span>
+                    <span className="settings-toggle-desc">
+                      She keeps up with your other chat tabs: what each was about
+                      and how it ended, newest first. Off: she only knows this tab
+                      (plus her long-term memories and what she knows about you).
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${crossTab?.catch_up ? " on" : ""}`}
+                    onClick={() => void toggleCrossTab("catch_up")}
+                    aria-pressed={!!crossTab?.catch_up}
+                    disabled={!crossTab}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{crossTab?.catch_up ? "On" : "Off"}</span>
+                  </button>
+                </div>
+
+                <div className="settings-toggle-row" aria-label="Search old chats">
+                  <div className="settings-toggle-text">
+                    <span className="settings-toggle-title">Search old chats</span>
+                    <span className="settings-toggle-desc">
+                      Each time you write, she looks through all your other chats
+                      for the same topic and remembers the best matches. Works in
+                      any language; no extra cost.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`settings-toggle${crossTab?.search ? " on" : ""}`}
+                    onClick={() => void toggleCrossTab("search")}
+                    aria-pressed={!!crossTab?.search}
+                    disabled={!crossTab}
+                  >
+                    <span className="settings-toggle-knob" aria-hidden="true" />
+                    <span>{crossTab?.search ? "On" : "Off"}</span>
+                  </button>
                 </div>
 
                 <div className="settings-toggle-row" aria-label="Read pages thoroughly">
