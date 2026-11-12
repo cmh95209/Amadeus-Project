@@ -1,4 +1,9 @@
-import type { ProviderProbe, ProviderRow, VertexInfo } from "./api";
+import type {
+  ProviderProbe,
+  ProviderRow,
+  ProviderTestResult,
+  VertexInfo,
+} from "./api";
 
 // Settings -> Connection -> Custom Model: pure helpers around the provider
 // table (no React, no fetch) - which row a typed address belongs to, which
@@ -32,15 +37,39 @@ export type ProbeStatus = {
   text: string;
 };
 
-/** The status line under the key area: what the last check (or its absence)
- * says in plain words. `busy` = a check is running right now. */
+/** The status line under the key area: what the last check or Test says in
+ * plain words. `test` = the last Test-button answer still valid for the
+ * chosen provider + model (the page forgets it when the provider, key,
+ * address or model moves on); `busy` = a check is running right now;
+ * `testing` = a test message is on its way to `testModel`; `hasModel` =
+ * the Model field is not empty (the line ends with "press Test." instead
+ * of "pick a model and press Test." when a model is already chosen). */
 export function probeStatus(
   probe: ProviderProbe | null,
   row: ProviderRow | null,
   vertex: VertexInfo | null,
   busy: boolean,
+  test: ProviderTestResult | null,
+  testing = false,
+  testModel = "",
+  hasModel = false,
 ): ProbeStatus {
+  // The "go test it" tail of the status lines: shorter once a model is
+  // already chosen.
+  const nudgeLower = hasModel ? "press Test." : "pick a model and press Test.";
+  const nudge = hasModel ? "Press Test." : "Pick a model and press Test.";
   if (busy) return { tone: "", text: "Checking..." };
+  if (testing) {
+    return { tone: "", text: `Sending a test message to ${testModel || "the model"}...` };
+  }
+  if (test) {
+    // The last thing that happened was a Test: its words stand (the
+    // "no model chosen" nudge stays neutral - nothing is wrong yet).
+    return {
+      tone: test.ok ? "ok" : test.outcome === "no_model" ? "" : "fail",
+      text: test.message,
+    };
+  }
   if (!probe) {
     if (!row) return { tone: "", text: "" };
     if (row.kind === "vertex") {
@@ -49,6 +78,9 @@ export function probeStatus(
     if (row.kind === "local") {
       return { tone: "", text: "Not checked yet." };
     }
+    if (!row.has_key) {
+      return { tone: "", text: "No key saved yet." };
+    }
     return { tone: "", text: "Enter your API key and press Save key." };
   }
   if (probe.loading) {
@@ -56,27 +88,52 @@ export function probeStatus(
   }
   if (probe.reachable && probe.error) {
     // The server answered but said no (a wrong key, most of the time).
+    // Local and custom rows say "server" (a custom address is usually
+    // someone's own server); cloud and Vertex keep "provider".
     return {
       tone: "fail",
       text: /rejected the API key/i.test(probe.error)
-        ? "The provider did not accept this key. Check it and save it again."
+        ? (row && (row.kind === "local" || row.kind === "custom")
+          ? "The server rejected this key."
+          : "The provider rejected this key.")
         : `The server answered, but: ${probe.error}`,
     };
   }
   if (probe.reachable) {
     if (row?.kind === "vertex") {
-      const project = vertex?.project || "";
       return {
         tone: "ok",
-        text: project
-          ? `Signed in to Google Vertex (project ${project}).`
-          : "Signed in to Google Vertex.",
+        text: `Signed in to Google Vertex. Not tested yet - ${nudgeLower}`,
       };
     }
     const count = probe.models.length;
+    if (row?.kind === "local") {
+      return {
+        tone: "ok",
+        text: count === 0
+          ? `Connected. ${nudge}`
+          : `Connected, ${count} model${count === 1 ? "" : "s"}. ${nudge}`,
+      };
+    }
+    if (!probe.has_key) {
+      // A cloud server that lists models without any key: the listing says
+      // nothing about a key - and no key is saved to check.
+      return {
+        tone: "",
+        text: count > 0
+          ? "Model list loaded. This provider shows it without a key - no key saved yet."
+          : "No key saved yet.",
+      };
+    }
+    if (probe.key_checked) {
+      return {
+        tone: "ok",
+        text: `Key accepted, ${count} model${count === 1 ? "" : "s"} listed. Not tested yet - ${nudgeLower}`,
+      };
+    }
     return {
-      tone: "ok",
-      text: count === 0 ? "Connected." : `Connected - ${count} model${count === 1 ? "" : "s"}.`,
+      tone: "",
+      text: `Key saved, ${count} model${count === 1 ? "" : "s"} listed. This provider does not check the key here - ${nudgeLower}`,
     };
   }
   return {

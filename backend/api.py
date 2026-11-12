@@ -1585,6 +1585,24 @@ def llm_provider_models():
     return jsonify(providers.probe(provider, address if isinstance(address, str) else ""))
 
 
+@application.route("/llm/test", methods=["POST"])
+def llm_test_model():
+    """The Settings "Test" button: one short message through the chosen
+    model in Amadeus's own reply format (it proves the provider, the key
+    and the model for HER - the model list alone does not). Nothing is
+    saved or changed. 200 for every outcome; 400 only for an unknown
+    provider."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider")
+    address = data.get("address")
+    model = data.get("model")
+    if not isinstance(provider, str) or providers.get(provider) is None:
+        return jsonify({"message": "Unknown provider"}), 400
+    return jsonify(providers.test_model(
+        provider, address if isinstance(address, str) else "",
+        model if isinstance(model, str) else ""))
+
+
 @application.route("/llm/key", methods=["GET"])
 def llm_reveal_key():
     """The saved key for one provider - only on the PC itself or through the
@@ -1610,10 +1628,14 @@ def llm_save_vertex():
     data = request.get_json(silent=True) or {}
     key_text = data.get("json")
     region = data.get("region")
+    region_given = isinstance(region, str) and region.strip()
     try:
         if isinstance(key_text, str) and key_text.strip():
-            vertex_auth.save_key(key_text, region if isinstance(region, str) else "")
-        elif isinstance(region, str) and region.strip():
+            # No region in the request: keep the saved one (the page no
+            # longer sends it; a blank region would clobber it).
+            vertex_auth.save_key(key_text, region if region_given else "",
+                                 keep_region=not region_given)
+        elif region_given:
             vertex_auth.save_region(region)
         else:
             return jsonify({"message": "Missing 'json' or 'region' field"}), 400

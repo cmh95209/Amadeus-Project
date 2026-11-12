@@ -971,6 +971,11 @@ export type ProviderProbe = {
   /** The server is up but says it is still loading its model. */
   loading: boolean;
   error: string | null;
+  /** The listing the check loaded really needed a key (a bogus key is
+   * refused by the same /models endpoint). */
+  key_checked?: boolean;
+  /** A key is saved for this provider. */
+  has_key?: boolean;
 };
 
 function providerRow(data: Record<string, unknown>): ProviderRow | null {
@@ -1006,6 +1011,8 @@ function probeFrom(data: Record<string, unknown>): ProviderProbe {
       : [],
     loading: data.loading === true,
     error: typeof data.error === "string" ? data.error : null,
+    key_checked: data.key_checked === true,
+    has_key: data.has_key === true,
   };
 }
 
@@ -1048,6 +1055,43 @@ export async function probeProvider(provider: string, address = ""): Promise<Pro
     body: JSON.stringify({ provider, ...(address ? { address } : {}) }),
   }));
   return probeFrom(data);
+}
+
+/** The Settings "Test" button's answer: how one short message through the
+ * chosen model went, in plain words. */
+export type ProviderTestResult = {
+  ok: boolean;
+  /** ok | no_model | no_key | bad_key | model_missing | no_credit |
+   * rate_limited | wrong_format | unreachable | error */
+  outcome: string;
+  message: string;
+  model: string;
+  seconds: number;
+};
+
+function testResultFrom(data: Record<string, unknown>): ProviderTestResult {
+  return {
+    ok: data.ok === true,
+    outcome: typeof data.outcome === "string" ? data.outcome : "error",
+    message: typeof data.message === "string" ? data.message : "The test could not be run.",
+    model: typeof data.model === "string" ? data.model : "",
+    seconds: typeof data.seconds === "number" ? data.seconds : 0,
+  };
+}
+
+/** The Settings "Test" button: one short message through the chosen model
+ * in Amadeus's own reply format (proves the provider, the key and the
+ * model for her - the model list alone does not). The reply says how it
+ * went in plain words. */
+export async function testProviderModel(
+  provider: string, model: string, address = "",
+): Promise<ProviderTestResult> {
+  const data = await parseResponse(await fetch(`${API_BASE}/llm/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, model, ...(address ? { address } : {}) }),
+  }));
+  return testResultFrom(data);
 }
 
 /** The saved key for one provider. The backend refuses (with a message)

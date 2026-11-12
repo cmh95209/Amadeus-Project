@@ -86,6 +86,7 @@ import {
   getProviders,
   saveProviderKey,
   probeProvider,
+  testProviderModel,
   revealProviderKey,
   saveVertex,
   activateProvider,
@@ -122,11 +123,29 @@ import type {
   NameEntry,
   ProviderListing,
   ProviderProbe,
+  ProviderTestResult,
   ReasoningInfo,
   ReasoningKey,
   ReasoningLevel,
 } from "./api";
 import { probeStatus, providerForAddress, shouldAutoProbe } from "./providers";
+
+// Settings -> Connection: the key box's show/hide eye (inline, two states:
+// the open eye = the key is visible, the slashed one = it is hidden).
+const eyeIcon = (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+const eyeOffIcon = (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" opacity="0.4" />
+    <path d="M4 20 20 4" />
+  </svg>
+);
 
 import { interactions, pokeSpots } from "./interactions";
 import type { InteractionName } from "./interactions";
@@ -281,6 +300,11 @@ export default function App() {
   const [providerId, setProviderId] = useState("");
   const [providerProbe, setProviderProbe] = useState<ProviderProbe | null>(null);
   const [providerBusy, setProviderBusy] = useState(false);
+  // The last "Test" answer, still valid for the chosen provider + model (a
+  // new check, key, address or model forgets it).
+  const [providerTest, setProviderTest] = useState<ProviderTestResult | null>(null);
+  const [providerTestBusy, setProviderTestBusy] = useState(false);
+  const [testModel, setTestModel] = useState("");
   // The key box: what the user typed (dirty) vs a saved key shown on demand.
   const [keyDirty, setKeyDirty] = useState(false);
   const [keyShown, setKeyShown] = useState(false);
@@ -288,7 +312,6 @@ export default function App() {
   const [keyHelpError, setKeyHelpError] = useState("");
   // The Google Vertex JSON-key area (the pass itself never reaches the page).
   const [vertexJson, setVertexJson] = useState("");
-  const [vertexRegion, setVertexRegion] = useState("global");
   const [vertexReplacing, setVertexReplacing] = useState(false);
   const [vertexError, setVertexError] = useState("");
   // A counter that drops the answer of a check the user outgrew (they
@@ -298,11 +321,14 @@ export default function App() {
   providerIdRef.current = providerId;
   const selectedProvider = providerListing?.providers.find((r) => r.id === providerId) ?? null;
   // Custom Model: the status line under the key area (a failed Vertex save
-  // shows its message instead of the last check's words).
+  // shows its message instead; a finished Test shows its words).
   const providerStatus =
     providerId === "vertex" && vertexError
       ? { tone: "fail" as const, text: vertexError }
-      : probeStatus(providerProbe, selectedProvider, providerListing?.vertex ?? null, providerBusy);
+      : probeStatus(
+          providerProbe, selectedProvider, providerListing?.vertex ?? null,
+          providerBusy, providerTest, providerTestBusy, testModel,
+          model.trim().length > 0);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsNotice, setSettingsNotice] = useState("");
@@ -731,7 +757,6 @@ export default function App() {
         setVertexJson("");
         setVertexReplacing(false);
         setVertexError("");
-        setVertexRegion(listing.vertex.region || "global");
         const address = id === "custom" ? listing.address : id === "auto" ? "" : row.url;
         if (id !== "vertex") setServerAddressState(address);
         syncHasApiKey(listing);
@@ -1095,6 +1120,8 @@ export default function App() {
       const probe = await probeProvider(id, address);
       if (seq !== providerSeq.current) return;
       setProviderProbe(probe);
+      setProviderTest(null);
+      setTestModel("");
     } catch (error) {
       if (seq !== providerSeq.current) return;
       setProviderProbe({
@@ -1103,6 +1130,8 @@ export default function App() {
         loading: false,
         error: error instanceof Error ? error.message : "",
       });
+      setProviderTest(null);
+      setTestModel("");
     } finally {
       if (seq === providerSeq.current) setProviderBusy(false);
     }
@@ -1125,6 +1154,8 @@ export default function App() {
     setVertexReplacing(false);
     setVertexJson("");
     setVertexError("");
+    setProviderTest(null);
+    setTestModel("");
     const nextAddress = address !== undefined
       ? address
       : id === "custom"
@@ -1208,6 +1239,8 @@ export default function App() {
         : current);
       if (providerListing?.active === row.id) setHasApiKey(true);
       setProviderProbe(probe);
+      setProviderTest(null);
+      setTestModel("");
       setApiKeyInput("");
       setKeyDirty(false);
       setKeyShown(false);
@@ -1229,23 +1262,20 @@ export default function App() {
     }
   }
 
-  // Custom Model (Vertex): save the JSON key (and its region) - or, once a
-  // key is saved, just a changed region. The reply carries the sign-in state
-  // and a check that the pass works (or why Google refuses it).
+  // Custom Model (Vertex): save the JSON key. The page no longer asks for
+  // the region (the backend keeps the saved one); the reply carries the
+  // sign-in state and a check that the pass works (or why Google refuses
+  // it).
   async function saveVertexNow() {
     const vertex = providerListing?.vertex;
     if (!vertex || providerBusy || settingsBusy) return;
     const hasJson = vertexJson.trim().length > 0;
-    const regionChanged = !!vertexRegion.trim() && vertexRegion.trim() !== vertex.region;
-    if (!hasJson && !(vertex.configured && regionChanged)) return;
+    if (!hasJson) return;
     setProviderBusy(true);
     setVertexError("");
     setSettingsError("");
     try {
-      const result = await saveVertex({
-        ...(hasJson ? { json: vertexJson } : {}),
-        region: vertexRegion.trim(),
-      });
+      const result = await saveVertex({ json: vertexJson });
       setProviderListing((current) => current
         ? {
             ...current,
@@ -1263,12 +1293,55 @@ export default function App() {
       });
       setVertexJson("");
       setVertexReplacing(false);
-      setVertexRegion(result.vertex.region || "global");
+      setProviderTest(null);
+      setTestModel("");
     } catch (error) {
       setVertexError(error instanceof Error ? error.message : "Could not save the JSON key.");
     } finally {
       setProviderBusy(false);
     }
+  }
+
+  // Custom Model, "Test": one short message through the chosen model in
+  // Amadeus's own reply format - it proves the provider, the key and the
+  // model for her (the model list alone does not). The answer lands in the
+  // status line; with no model chosen it says so without sending anything.
+  async function runTest() {
+    const row = selectedProvider;
+    if (!row || settingsBusy || providerBusy || providerTestBusy) return;
+    const modelName = model.trim();
+    if (!modelName) {
+      setProviderTest({
+        ok: false, outcome: "no_model", message: "Pick a model first.",
+        model: "", seconds: 0,
+      });
+      setTestModel("");
+      return;
+    }
+    setProviderTest(null);
+    setTestModel(modelName);
+    setProviderTestBusy(true);
+    try {
+      const result = await testProviderModel(
+        row.id, modelName, row.kind === "custom" ? serverAddress.trim() : "");
+      setProviderTest(result);
+    } catch (error) {
+      setProviderTest({
+        ok: false, outcome: "error",
+        message: error instanceof Error ? error.message : "Could not run the test.",
+        model: modelName, seconds: 0,
+      });
+    } finally {
+      setProviderTestBusy(false);
+    }
+  }
+
+  // The Model section's picker: choosing a model forgets the last Test
+  // answer (it was about the model the user just moved away from).
+  function chooseModel(name: string) {
+    setModelName(name);
+    setProviderTest(null);
+    setTestModel("");
   }
 
   // "Is a key in use?" for the rest of the app (sending waits for it): the
@@ -1624,6 +1697,8 @@ export default function App() {
         const activated = await activateProvider(
           row.id, addressToSave, noModelYet ? "" : nextModel);
         setModelName(activated.model);
+        setProviderTest(null);
+        setTestModel("");
         // The switch changed what is active: the panel (and the footer dot)
         // refreshes from the fresh table - the new active row, its address,
         // who has a key - and is checked again when a check makes sense.
@@ -3017,8 +3092,8 @@ export default function App() {
                   </p>
                 ) : (<>
                   <p className="settings-intro">
-                    Pick your model provider. Local servers need no key; for a cloud
-                    provider, paste your API key and press Save key.
+                    Pick your model provider. For a cloud provider, paste your
+                    API key and press Save key.
                   </p>
                   <label>
                     Provider
@@ -3062,38 +3137,43 @@ export default function App() {
                       </p>
                       <label>
                         API key
-                        <input
-                          type={keyShown ? "text" : "password"}
-                          value={apiKey}
-                          disabled={settingsBusy || providerBusy}
-                          onChange={(event) => {
-                            setApiKeyInput(event.target.value);
-                            setKeyDirty(true);
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              void saveKeyNow();
-                            }
-                          }}
-                          placeholder={selectedProvider?.has_key
-                            ? "A key is saved - enter a new one to replace it"
-                            : "Enter your API key"}
-                          autoComplete="new-password"
-                          spellCheck={false}
-                          aria-describedby="api-key-help"
-                        />
+                        <span className="key-field">
+                          <input
+                            type={keyShown ? "text" : "password"}
+                            value={apiKey}
+                            disabled={settingsBusy || providerBusy}
+                            onChange={(event) => {
+                              setApiKeyInput(event.target.value);
+                              setKeyDirty(true);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void saveKeyNow();
+                              }
+                            }}
+                            placeholder={selectedProvider?.has_key
+                              ? "A key is saved - enter a new one to replace it"
+                              : "Enter your API key"}
+                            autoComplete="new-password"
+                            spellCheck={false}
+                            aria-describedby="api-key-help"
+                          />
+                          <button
+                            type="button"
+                            className="key-visibility"
+                            title={keyShown ? "Hide key" : "Show key"}
+                            aria-label={keyShown ? "Hide key" : "Show key"}
+                            aria-pressed={keyShown}
+                            disabled={settingsBusy || providerBusy || keyRevealing ||
+                              (!apiKey && !keyShown && !selectedProvider?.has_key)}
+                            onClick={() => void toggleKeyVisibility()}
+                          >
+                            {keyShown ? eyeIcon : eyeOffIcon}
+                          </button>
+                        </span>
                       </label>
                       <div className="conn-row">
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          disabled={settingsBusy || providerBusy || keyRevealing ||
-                            (!apiKey && !keyShown && !selectedProvider?.has_key)}
-                          onClick={() => void toggleKeyVisibility()}
-                        >
-                          {keyRevealing ? "Loading..." : keyShown ? "Hide" : "Show"}
-                        </button>
                         <button
                           type="button"
                           className="ghost-button"
@@ -3103,15 +3183,20 @@ export default function App() {
                         >
                           Save key
                         </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={settingsBusy || providerBusy || providerTestBusy}
+                          onClick={() => void runTest()}
+                        >
+                          {providerTestBusy ? "Testing..." : "Test"}
+                        </button>
                       </div>
-                      <p className="settings-help" id="api-key-help">
-                        {keyHelpError ||
-                          (selectedProvider?.kind === "local"
-                            ? "Local servers usually need no key."
-                            : selectedProvider?.has_key
-                              ? "A key is saved for this provider."
-                              : "No key is saved for this provider yet.")}
-                      </p>
+                      {(keyHelpError || selectedProvider?.kind === "local") && (
+                        <p className="settings-help" id="api-key-help">
+                          {keyHelpError || "Local servers usually accept any key if you have none set."}
+                        </p>
+                      )}
                     </>
                   ) : (
                     <>
@@ -3153,30 +3238,23 @@ export default function App() {
                             />
                           </label>
                         )}
-                        <label className="vertex-region">
-                          Region
-                          <input
-                            value={vertexRegion}
-                            disabled={settingsBusy || providerBusy}
-                            onChange={(event) => setVertexRegion(event.target.value)}
-                            placeholder="global"
-                            spellCheck={false}
-                            autoComplete="off"
-                          />
-                        </label>
+                        {!(providerListing?.vertex.configured && !vertexReplacing) && (
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            disabled={settingsBusy || providerBusy || !vertexJson.trim()}
+                            onClick={() => void saveVertexNow()}
+                          >
+                            Save JSON key
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="ghost-button"
-                          disabled={settingsBusy || providerBusy || (
-                            vertexJson.trim()
-                              ? false
-                              : !(providerListing?.vertex.configured &&
-                                  vertexRegion.trim() &&
-                                  vertexRegion.trim() !== providerListing.vertex.region)
-                          )}
-                          onClick={() => void saveVertexNow()}
+                          disabled={settingsBusy || providerBusy || providerTestBusy}
+                          onClick={() => void runTest()}
                         >
-                          {vertexJson.trim() ? "Save JSON key" : "Save region"}
+                          {providerTestBusy ? "Testing..." : "Test"}
                         </button>
                         {providerListing?.vertex.configured && !vertexReplacing && (
                           <button
@@ -3204,18 +3282,6 @@ export default function App() {
                     >
                       <span className="conn-dot" aria-hidden="true" />
                       <span className="conn-text">{providerStatus.text || "\u00A0"}</span>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        disabled={settingsBusy || providerBusy || !selectedProvider}
-                        onClick={() => {
-                          const row = selectedProvider;
-                          if (!row) return;
-                          void runProbe(row.id, row.kind === "custom" ? serverAddress.trim() : "");
-                        }}
-                      >
-                        {providerBusy ? "Checking..." : "Check again"}
-                      </button>
                     </div>
                   )}
                 </>)}
@@ -3349,7 +3415,7 @@ export default function App() {
                       ariaLabel="Model"
                       options={(providerProbe?.reachable ? providerProbe.models : []).map((name) => ({ value: name }))}
                       value={model}
-                      onChange={setModelName}
+                      onChange={chooseModel}
                       allowCustom
                       disabled={settingsBusy || providerBusy}
                       emptyText="Save your key above to load the model list"

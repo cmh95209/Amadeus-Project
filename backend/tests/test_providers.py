@@ -119,7 +119,8 @@ class _TempData(unittest.TestCase):
         self.data.mkdir()
         for name, path in (("DATA_DIR", str(self.data)),
                            ("PATH_TO_API_KEY", str(self.data / "api_key.txt")),
-                           ("PATH_TO_LLM_SERVER", str(d / "llm_server.txt"))):
+                           ("PATH_TO_LLM_SERVER", str(d / "llm_server.txt")),
+                           ("PATH_TO_LLM_MODEL", str(self.data / "llm_model.txt"))):
             p = patch.object(memory, name, path)
             p.start()
             self.addCleanup(p.stop)
@@ -383,10 +384,17 @@ class ProbeTests(_TempData):
     def test_cloud_probe_passes_the_table_address_and_key(self):
         memory.save_llm_server("https://api.deepseek.com")
         memory.save_api_key("sk-ds")
-        with patch.object(llm, "test_server", return_value=dict(self.OK)) as probe:
+        refused = {"reachable": True, "models": [], "loading": False,
+                   "error": "Server is running but rejected the API key (HTTP 401)"}
+        with patch.object(llm, "test_server",
+                          side_effect=[dict(self.OK), dict(refused)]) as probe:
             result = providers.probe("deepseek")
         self.assertEqual(result["models"], ["m1"])
-        probe.assert_called_once_with("https://api.deepseek.com", "sk-ds")
+        self.assertTrue(result["has_key"])
+        self.assertTrue(result["key_checked"])
+        self.assertEqual(probe.call_args_list[0][0], ("https://api.deepseek.com", "sk-ds"))
+        self.assertEqual(probe.call_args_list[1][0],
+                         ("https://api.deepseek.com", "invalid-key-check"))
 
     def test_auto_probe_uses_autodetect(self):
         with patch.object(llm, "autodetect_url", return_value="http://localhost:8080/v1"), \
@@ -733,7 +741,113 @@ class RouteTests(_FreshAppTests):
     def test_provider_route_unknown_is_400(self):
         self.assertEqual(self.client.post("/llm/provider", json={"id": "nope"}).status_code, 400)
 
+    def test_test_route_ok(self):
+        # One message through the model in her own format: 200 + the words.
+        with patch.object(providers.llm, "test_server",
+                          return_value={"reachable": True, "models": ["m1"],
+                                        "loading": False, "error": None}):
+            self.client.post("/llm/key", json={"provider": "groq", "key": "gsk-test"})
+            fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+            with patch.object(providers.llm, "client_for", return_value=fake):
+                res = self.client.post("/llm/test",
+                                       json={"provider": "groq", "model": "llama-x"})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        for field in ("ok", "outcome", "message", "model", "seconds"):
+            self.assertIn(field, body)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["outcome"], "ok")
+        self.assertEqual(body["model"], "llama-x")
+        self.assertIn("Works with Amadeus", body["message"])
 
+    def test_test_route_no_model_and_unknown_provider(self):
+        res = self.client.post("/llm/test", json={"provider": "groq", "model": ""})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["outcome"], "no_model")
+        self.assertEqual(res.json["message"], "Pick a model first.")
+        self.assertEqual(self.client.post("/llm/test",
+                                          json={"provider": "nope"}).status_code, 400)
+        self.assertEqual(self.client.post("/llm/test", json={}).status_code, 400)
+
+    def test_test_route_every_outcome_is_200(self):
+        with patch.object(providers.llm, "test_server",
+                          return_value={"reachable": True, "models": ["m1"],
+                                        "loading": False, "error": None}):
+            self.client.post("/llm/key", json={"provider": "groq", "key": "gsk-test"})
+        scenarios = [
+            (_FakeClient(structured_exc=_StatusError(401, "invalid key")), "bad_key"),
+            (_FakeClient(structured_exc=_StatusError(404, "model not found")), "model_missing"),
+            (_FakeClient(structured_exc=_StatusError(402, "no credit")), "no_credit"),
+            (_FakeClient(structured_exc=_StatusError(429, "Too many requests")), "rate_limited"),
+            (_FakeClient(structured=None, plain=_FakePlain("hi")), "wrong_format"),
+            (_FakeClient(structured_exc=APIConnectionError("refused")), "unreachable"),
+        ]
+        for fake, outcome in scenarios:
+            with patch.object(providers.llm, "client_for", return_value=fake):
+                res = self.client.post("/llm/test",
+                                       json={"provider": "groq", "model": "llama-x"})
+            self.assertEqual(res.status_code, 200, outcome)
+            self.assertEqual(res.json["outcome"], outcome, outcome)
+
+    def test_test_route_changes_nothing_saved(self):
+        with patch.object(providers.llm, "test_server",
+                          return_value={"reachable": True, "models": ["m1"],
+                                        "loading": False, "error": None}):
+            self.client.post("/llm/key", json={"provider": "groq", "key": "gsk-test"})
+            res = self.client.post("/llm/provider",
+                                   json={"id": "groq", "model": "llama-x"})
+        self.assertEqual(res.status_code, 200)
+        api_key_before = self.memory.load_api_key()
+        model_before = self.memory.load_llm_model()
+        address_before = self.memory.load_llm_server()
+        keys_before = json.loads(Path("data/api_keys.json").read_text(encoding="utf-8"))
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+        with patch.object(providers.llm, "client_for", return_value=fake):
+            res = self.client.post("/llm/test",
+                                   json={"provider": "groq", "model": "llama-x"})
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.json["ok"])
+        self.assertEqual(self.memory.load_api_key(), api_key_before)
+        self.assertEqual(self.memory.load_llm_model(), model_before)
+        self.assertEqual(self.memory.load_llm_server(), address_before)
+        self.assertEqual(json.loads(Path("data/api_keys.json").read_text(encoding="utf-8")),
+                         keys_before)
+        self.assertEqual(self.chat.API_KEY, api_key_before)
+
+    def test_models_route_reports_the_key_facts(self):
+        # The reply carries has_key + key_checked: a refused bogus key proves
+        # the saved one; a provider that lists models with any key proves
+        # nothing (one extra /models call with a bogus key).
+        OK = {"reachable": True, "models": ["m1"], "loading": False, "error": None}
+        REFUSED = {"reachable": True, "models": [], "loading": False,
+                   "error": "Server is running but rejected the API key (HTTP 401)"}
+        with patch.object(providers.llm, "test_server",
+                          side_effect=[dict(OK), dict(OK), dict(OK), dict(REFUSED)]):
+            self.client.post("/llm/key", json={"provider": "deepseek", "key": "sk-test"})
+            res = self.client.post("/llm/models", json={"provider": "deepseek"})
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.json["has_key"])
+        self.assertTrue(res.json["key_checked"])
+        with patch.object(providers.llm, "test_server",
+                          side_effect=[dict(OK), dict(OK), dict(OK), dict(OK)]):
+            self.client.post("/llm/key", json={"provider": "openrouter", "key": "sk-or"})
+            res = self.client.post("/llm/models", json={"provider": "openrouter"})
+        self.assertFalse(res.json["key_checked"])
+
+    def test_vertex_route_keeps_the_saved_region_when_none_is_sent(self):
+        n, e, d = rsa_numbers()
+        with patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+            res = self.client.post("/llm/vertex",
+                                   json={"json": fake_vertex_key(), "region": "us-central1"})
+            self.assertEqual(res.status_code, 200)
+            # The page now saves the JSON key WITHOUT a region: the saved
+            # region must survive.
+            res = self.client.post("/llm/vertex", json={"json": fake_vertex_key()})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["vertex"]["region"], "us-central1")
+        self.assertIn("us-central1-aiplatform", res.json["vertex"]["address"])
+        self.assertTrue(res.json["vertex"]["configured"])
 
 
 # ---------- llm.py: the pieces this feature added ----------
@@ -857,6 +971,656 @@ class VertexConnectionTests(unittest.TestCase):
         result, _url = self._probe(401)
         self.assertFalse(result.get("any_model"))
         self.assertIn("save the JSON key again", result["error"])
+
+
+# ---------- the Settings "Test" button (providers.test_model) --------------
+
+class _FakePack:
+    """Stands in for a structured reply (anything with her two lines)."""
+
+    def __init__(self, jps="", eng=""):
+        self.assistant_reply_JPS = jps
+        self.assistant_reply_ENG = eng
+
+
+class _FakePlain:
+    """A plain (non-structured) reply."""
+
+    def __init__(self, content=""):
+        self.content = content
+
+
+class _StatusError(Exception):
+    """An API error with an HTTP status (like openai.APIStatusError)."""
+
+    def __init__(self, status, text=""):
+        super().__init__(text or f"HTTP {status}")
+        self.status_code = status
+
+
+class APIConnectionError(Exception):
+    """A connection-level failure: the class name is what is read."""
+
+
+class _BodyStatusError(_StatusError):
+    """An API error that keeps the provider's parsed body (the openai SDK
+    errors do: .body = {"error": {"message": ...}}, {"message": ...} or a
+    list of such objects)."""
+
+    def __init__(self, status, body=None, text=None):
+        if text is None:
+            text = f"Error code: {status} - {body!r}"
+        super().__init__(status, text)
+        self.body = body
+
+
+class _FakeBound:
+    def __init__(self, run):
+        self._run = run
+
+    def invoke(self, messages):
+        return self._run(messages)
+
+    def bind(self, **kwargs):
+        return self
+
+
+class _FakeClient:
+    """The shape llm.client_for returns: both structured paths (cloud
+    with_structured_output, local bind_tools) and the plain call. No
+    network - the scenarios are scripted per call kind."""
+
+    def __init__(self, base_url="https://api.groq.com/openai/v1",
+                 structured=None, structured_exc=None,
+                 plain=None, plain_exc=None):
+        self.openai_api_base = base_url
+        self.base_url = base_url
+        self.api_key = ""
+        self._structured, self._structured_exc = structured, structured_exc
+        self._plain, self._plain_exc = plain, plain_exc
+        self.calls = []
+
+    def _run(self, which, messages):
+        self.calls.append(which)
+        if which == "structured":
+            exc, value = self._structured_exc, self._structured
+        else:
+            exc, value = self._plain_exc, self._plain
+        if exc is not None:
+            raise exc
+        return value
+
+    def with_structured_output(self, schema, method=None):
+        return _FakeBound(lambda messages: self._run("structured", messages))
+
+    def bind_tools(self, tools, tool_choice=None):
+        return _FakeBound(lambda messages: self._run("structured", messages))
+
+    def invoke(self, messages):
+        return self._run("plain", messages)
+
+
+class TestModelTests(_TempData):
+    """The Settings "Test" button: one message in Amadeus's own reply
+    format, every outcome in the right words, no key anywhere in the
+    reply, and nothing saved touched. All calls are faked - no network."""
+
+    CLOUD = "groq"
+
+    def _set_cloud(self, key="gsk-test"):
+        memory.save_llm_server("https://api.groq.com/openai/v1")
+        if key:
+            memory.save_api_key(key)
+
+    def _run(self, fake, pid=None, address="", model="gpt-test", patches=()):
+        import contextlib
+        with contextlib.ExitStack() as stack:
+            build = stack.enter_context(
+                patch.object(providers.llm, "client_for", return_value=fake))
+            for p in patches:
+                stack.enter_context(p)
+            return providers.test_model(pid or self.CLOUD, address, model), build
+
+    def test_ok_reports_the_model_and_the_seconds(self):
+        self._set_cloud()
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+        result, build = self._run(fake, model="llama-x")
+        build.assert_called_once()
+        args, _ = build.call_args
+        # the client it asked for: the table address, the saved key, the model
+        self.assertEqual(args[0], "https://api.groq.com/openai/v1")
+        self.assertEqual(args[1], "gsk-test")
+        self.assertEqual(args[2], "llama-x")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["outcome"], "ok")
+        self.assertEqual(result["model"], "llama-x")
+        self.assertRegex(result["message"],
+                         r"^Works with Amadeus\. llama-x replied in \d+\.\d s\.$")
+        self.assertIsInstance(result["seconds"], (int, float))
+        self.assertLessEqual(result["seconds"], 5)
+
+    def test_no_model_asks_for_a_model(self):
+        self._set_cloud()
+        fake = _FakeClient()
+        result, build = self._run(fake, model="")
+        self.assertEqual(result["outcome"], "no_model")
+        self.assertEqual(result["message"], "Pick a model first.")
+        build.assert_not_called()
+
+    def test_cloud_without_a_saved_key(self):
+        memory.save_llm_server("https://api.groq.com/openai/v1")  # no key
+        fake = _FakeClient()
+        result, build = self._run(fake)
+        self.assertEqual(result["outcome"], "no_key")
+        self.assertEqual(result["message"], "No key saved yet.")
+        build.assert_not_called()
+
+    def test_local_needs_no_key(self):
+        memory.save_llm_server("http://localhost:11434/v1")
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+        result, build = self._run(fake, pid="ollama")
+        self.assertTrue(result["ok"])
+        args, _ = build.call_args
+        self.assertEqual(args[0], "http://localhost:11434/v1")
+        self.assertEqual(args[1], "")  # the placeholder lives inside client_for
+
+    def test_vertex_without_a_json_key(self):
+        fake = _FakeClient()
+        result, build = self._run(
+            fake, pid="vertex",
+            patches=(patch.object(providers.vertex_auth, "info",
+                                  return_value={"configured": False, "project": "",
+                                                "region": "global", "address": ""}),))
+        self.assertEqual(result["outcome"], "no_key")
+        self.assertEqual(result["message"], "No JSON key saved yet.")
+        build.assert_not_called()
+
+    def test_vertex_sign_in_refused_shows_googles_words(self):
+        fake = _FakeClient()
+        words = "Google refused the JSON key (HTTP 400)."
+        result, build = self._run(
+            fake, pid="vertex",
+            patches=(
+                patch.object(providers.vertex_auth, "info",
+                             return_value={"configured": True, "project": "p",
+                                           "region": "global", "address": ""}),
+                patch.object(providers.vertex_auth, "token",
+                             side_effect=vertex_auth.VertexSignInError(words))))
+        self.assertEqual(result["outcome"], "bad_key")
+        self.assertEqual(result["message"], words)
+        build.assert_not_called()
+
+    def test_vertex_model_gets_the_google_prefix_and_project_address(self):
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+        result, build = self._run(
+            fake, pid="vertex", model="gemini-3.8-flash",
+            patches=(
+                patch.object(providers.vertex_auth, "info",
+                             return_value={"configured": True, "project": "my-project",
+                                           "region": "global", "address": ""}),
+                patch.object(providers.vertex_auth, "token", return_value="ya29-pass")))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "google/gemini-3.8-flash")
+        args, _ = build.call_args
+        self.assertIn("aiplatform.googleapis.com", args[0])
+        self.assertIn("projects/my-project", args[0])
+        self.assertEqual(args[2], "google/gemini-3.8-flash")
+
+    def test_bad_key_401_never_leaks_the_key(self):
+        key = "sk-SECRET-1234567890"
+        self._set_cloud(key=key)
+        fake = _FakeClient(structured_exc=_StatusError(401, f"Invalid API key provided: {key}"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "bad_key")
+        self.assertEqual(result["message"], "The provider rejected this key.")
+        self.assertNotIn(key, json.dumps(result))
+        self.assertNotIn("SECRET", json.dumps(result))
+
+    def test_bad_key_403(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(403, "permission denied"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "bad_key")
+
+    def test_bad_key_http_400_about_the_api_key(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(400, "Please pass a valid API key"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "bad_key")
+
+    def test_model_missing_404(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(404, "model not found"))
+        result, _ = self._run(fake, model="ghost-model")
+        self.assertEqual(result["outcome"], "model_missing")
+        self.assertEqual(result["message"], "The provider does not know the model ghost-model.")
+
+    def test_model_missing_http_400(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(400, "The model 'ghost' does not exist."))
+        result, _ = self._run(fake, model="ghost")
+        self.assertEqual(result["outcome"], "model_missing")
+
+    def test_no_credit_402(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(402, "insufficient credits"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "no_credit")
+        self.assertEqual(result["message"],
+                         "The provider says this account has no credit or quota left.")
+
+    def test_no_credit_429_billing_wording(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(429, "Billing hard limit exceeded"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "no_credit")
+
+    def test_no_credit_429_daily_quota(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(429, "You have exceeded your daily quota"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "no_credit")
+
+    def test_rate_limited_429(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(429, "Too many requests"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "rate_limited")
+        self.assertEqual(result["message"],
+                         "The provider is rate-limiting right now. Try again in a minute.")
+
+    def test_wrong_format_cloud(self):
+        # The structured call came back empty; the plain call does answer.
+        self._set_cloud()
+        fake = _FakeClient(structured=None, plain=_FakePlain("Hello!"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "wrong_format")
+        self.assertEqual(result["message"],
+                         "The model answers, but not in the form Amadeus needs.")
+        self.assertEqual(fake.calls, ["structured", "plain"])
+
+    def test_wrong_format_local_server(self):
+        # Local servers take the tool_choice="required" branch: the answer
+        # carries no usable tool call, but the plain call answers.
+        memory.save_llm_server("http://localhost:11434/v1")
+        fake = _FakeClient(base_url="http://localhost:11434/v1",
+                           structured=_FakePlain("hi"), plain=_FakePlain("hi there"))
+        result, _ = self._run(fake, pid="ollama")
+        self.assertEqual(result["outcome"], "wrong_format")
+
+    def test_unreachable_after_a_network_failure(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=APIConnectionError("Connection refused"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "unreachable")
+        self.assertEqual(result["message"], "Could not reach the server.")
+        self.assertEqual(fake.calls, ["structured"])  # no plain retry after this
+
+    def test_unreachable_for_the_openai_sdk_errors(self):
+        # The openai SDK's own connection/timeout errors (they carry no
+        # status_code): a closed port must read "Could not reach the
+        # server.", not "The test failed: Connection error."
+        import httpx
+        import openai
+        self._set_cloud()
+        request = httpx.Request("POST", "http://localhost:19999/v1/chat/completions")
+        for error in (openai.APIConnectionError(request=request),
+                      openai.APITimeoutError(request=request)):
+            fake = _FakeClient(structured_exc=error)
+            result, _ = self._run(fake)
+            self.assertEqual(result["outcome"], "unreachable", type(error).__name__)
+            self.assertEqual(result["message"], "Could not reach the server.")
+            self.assertEqual(fake.calls, ["structured"])
+
+    def test_unreachable_for_a_wrapped_network_error(self):
+        # A wrapper exception (a framework class, or a renamed one) still
+        # counts: the openai error is found through __cause__ and
+        # __context__.
+        import httpx
+        import openai
+        self._set_cloud()
+        request = httpx.Request("POST", "http://localhost:19999/v1/chat/completions")
+        try:
+            raise openai.APIConnectionError(request=request)
+        except Exception as inner:
+            wrapper = RuntimeError("wrapped by the framework")
+            wrapper.__cause__ = inner
+        fake = _FakeClient(structured_exc=wrapper)
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "unreachable")
+        # A __context__-only chain: the wrapper is RAISED inside the handler
+        # (only a raised exception gets its __context__ set, __cause__ None).
+        try:
+            try:
+                raise openai.APITimeoutError(request=request)
+            except Exception:
+                raise RuntimeError("chained")
+        except RuntimeError as chained:
+            fake = _FakeClient(structured_exc=chained)
+            result, _ = self._run(fake)
+            self.assertEqual(result["outcome"], "unreachable")
+
+    def test_test_client_never_retries_and_connects_fast(self):
+        # The one-off client the page asks for: zero SDK retries (even with
+        # a reasoning level that gives the real clients one) and a ~5 s
+        # connect ceiling, so a dead server cannot hold the test for ~30 s.
+        for level in ("off", "high"):
+            client = llm.client_for("http://localhost:19999/v1", "k", "m",
+                                    reasoning=level)
+            root = client.root_client
+            self.assertEqual(root.max_retries, 0, level)
+            connect = root._client.timeout
+            while not isinstance(connect, (int, float)):
+                connect = getattr(connect, "connect", None)
+                if connect is None:
+                    break
+            self.assertIsNotNone(connect, level)
+            self.assertLessEqual(connect, 5.5, level)
+
+    def test_auto_uses_autodetect_like_the_probe(self):
+        # "auto" asks autodetect_url (the first live local port) - not a
+        # "no server address" error like a table row without a URL.
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+        result, build = self._run(
+            fake, pid="auto",
+            patches=(patch.object(providers.llm, "autodetect_url",
+                                  return_value="http://localhost:8888/v1"),))
+        self.assertTrue(result["ok"])
+        args, _ = build.call_args
+        self.assertEqual(args[0], "http://localhost:8888/v1")
+
+    def test_unknown_model_http_400_openrouter_shape(self):
+        # OpenRouter answers an unknown model with HTTP 400 and a body that
+        # also carries the caller's account id: it must read as "unknown
+        # model", never show the raw body.
+        self._set_cloud()
+        body = {"error": {"message": "no-such/model-xyz is not a valid model ID",
+                          "code": 400}, "user_id": "user_123"}
+        fake = _FakeClient(structured_exc=_BodyStatusError(400, body=body))
+        result, _ = self._run(fake, model="no-such/model-xyz")
+        self.assertEqual(result["outcome"], "model_missing")
+        self.assertEqual(result["message"],
+                         "The provider does not know the model no-such/model-xyz.")
+        self.assertNotIn("user_123", result["message"])
+
+    def test_unknown_model_phrases_read_as_model_missing(self):
+        # Every phrase a provider uses to say "we do not know that model",
+        # on the 400/422 answers; 404 stays model_missing whatever its text.
+        self._set_cloud()
+        phrases = (
+            "no-such/model-xyz is not a valid model ID",
+            "Invalid model 'gpt-x' for this endpoint",
+            "Model not found: gpt-x",
+            "model_not_found",
+            "The model 'gpt-x' does not exist.",
+            "No such model: gpt-x",
+            "Unknown model 'gpt-x'",
+            "The model gpt-x is not supported.",
+        )
+        for status in (400, 422):
+            for phrase in phrases:
+                fake = _FakeClient(structured_exc=_StatusError(status, phrase))
+                result, _ = self._run(fake, model="gpt-x")
+                self.assertEqual(result["outcome"], "model_missing",
+                                 f"{status}: {phrase!r}")
+        fake = _FakeClient(structured_exc=_StatusError(404, "whatever"))
+        result, _ = self._run(fake, model="gpt-x")
+        self.assertEqual(result["outcome"], "model_missing")
+
+    def test_error_outcome_shows_the_providers_own_sentence(self):
+        # The "error" outcome shows just the provider's sentence from the
+        # error body (dict, message-only and list shapes) - never the raw
+        # body with its ids.
+        self._set_cloud()
+        shapes = (
+            ({"error": {"message": "Something went wrong on our side", "code": 500},
+              "user_id": "user_1"}, "Something went wrong on our side"),
+            ({"message": "Something went wrong on our side"},
+             "Something went wrong on our side"),
+            ([{"error": {"message": "Something went wrong on our side"}}],
+             "Something went wrong on our side"),
+        )
+        for body, sentence in shapes:
+            fake = _FakeClient(structured_exc=_BodyStatusError(500, body=body))
+            result, _ = self._run(fake)
+            self.assertEqual(result["outcome"], "error", repr(body))
+            self.assertEqual(result["message"], f"The test failed: {sentence}",
+                             repr(body))
+            self.assertNotIn("user_1", result["message"])
+
+    def test_error_reason_from_the_text_message_field(self):
+        # No body kept (older SDKs): the first 'message': '...' out of the
+        # error text is the provider's sentence; the ids around it stay out.
+        self._set_cloud()
+        text = ("Error code: 400 - {'error': {'message': 'We could not process that', "
+                "'code': 400}, 'user_id': 'user_9', 'request_id': 'req_7'}")
+        fake = _FakeClient(structured_exc=_StatusError(400, text))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["message"], "The test failed: We could not process that")
+
+    def test_error_reason_never_carries_ids_keys_or_bearers(self):
+        self._set_cloud()
+        body = {"error": {"message":
+                          "Refused for user_abc123 (org-42) request req_55 "
+                          "Bearer sk-supersecret123456"}}
+        fake = _FakeClient(structured_exc=_BodyStatusError(500, body=body))
+        result, _ = self._run(fake)
+        self.assertEqual(result["message"],
+                         "The test failed: Refused for <id> (<id>) request <id> "
+                         "Bearer <key>")
+
+    def test_error_reason_caps_at_120_chars(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(500, ("word " * 40).strip()))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "error")
+        reason = result["message"][len("The test failed: "):]
+        self.assertLessEqual(len(reason), 120)
+
+    def test_local_wording_says_server_not_provider(self):
+        # Local rows are "the server" (cloud and Vertex keep "the
+        # provider"): the unknown-model and rejected-key words both.
+        memory.save_llm_server("http://localhost:11434/v1")
+        fake = _FakeClient(structured_exc=_StatusError(404, "model not found"))
+        result, _ = self._run(fake, pid="ollama", model="ghost")
+        self.assertEqual(result["outcome"], "model_missing")
+        self.assertEqual(result["message"], "The server does not know the model ghost.")
+        fake = _FakeClient(structured_exc=_StatusError(401, "invalid key"))
+        result, _ = self._run(fake, pid="ollama")
+        self.assertEqual(result["outcome"], "bad_key")
+        self.assertEqual(result["message"], "The server rejected this key.")
+
+    def test_custom_wording_says_server_too(self):
+        # A custom address is usually someone's own server.
+        memory.save_llm_server("http://myown:8000/v1")
+        fake = _FakeClient(structured_exc=_StatusError(404, "model 'ghost' does not exist"))
+        result, _ = self._run(fake, pid="custom",
+                              address="http://myown:8000/v1", model="ghost")
+        self.assertEqual(result["message"], "The server does not know the model ghost.")
+
+    def test_vertex_wording_stays_provider(self):
+        fake = _FakeClient(structured_exc=_StatusError(403, "forbidden"))
+        result, _ = self._run(
+            fake, pid="vertex",
+            patches=(
+                patch.object(providers.vertex_auth, "info",
+                             return_value={"configured": True, "project": "p",
+                                           "region": "global", "address": ""}),
+                patch.object(providers.vertex_auth, "token", return_value="ya29-pass")))
+        self.assertEqual(result["outcome"], "bad_key")
+        self.assertEqual(result["message"], "The provider rejected this key.")
+
+    def test_error_keeps_a_short_provider_reason(self):
+        self._set_cloud()
+        fake = _FakeClient(structured_exc=_StatusError(500, "Internal server error at the provider"))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["message"],
+                         "The test failed: Internal server error at the provider")
+
+    def test_error_when_the_model_does_not_answer_at_all(self):
+        self._set_cloud()
+        fake = _FakeClient(structured=None, plain=_FakePlain("   "))
+        result, _ = self._run(fake)
+        self.assertEqual(result["outcome"], "error")
+        self.assertEqual(result["message"], "The test failed: the model did not answer.")
+
+    def test_custom_without_an_address(self):
+        fake = _FakeClient()
+        result, build = self._run(fake, pid="custom", address="")
+        self.assertEqual(result["outcome"], "error")
+        self.assertIn("no server address", result["message"])
+        build.assert_not_called()
+
+    def test_unknown_provider_raises(self):
+        with self.assertRaisesRegex(ValueError, "Unknown provider"):
+            providers.test_model("nope", "", "m")
+
+    def test_the_test_changes_nothing_saved(self):
+        import chat
+        self._set_cloud("gsk-live")
+        memory.save_llm_model("gpt-live")
+        (self.data / "llm_provider.txt").write_text(self.CLOUD, encoding="utf-8")
+        keys_before = providers.saved_keys()
+        cache_before = dict(providers.llm._LLM_CACHE)
+        url_before = dict(providers.llm._LLM_CACHE_URL)
+        api_key_before = chat.API_KEY
+        model_before = chat.LLM_Model
+        fake = _FakeClient(structured=_FakePack("やあ。", "Hello."))
+        result, _ = self._run(fake)
+        self.assertTrue(result["ok"])
+        self.assertEqual(providers.saved_keys(), keys_before)
+        self.assertEqual(memory.load_api_key(), "gsk-live")
+        self.assertEqual(memory.load_llm_model(), "gpt-live")
+        self.assertEqual((self.data / "llm_provider.txt").read_text(encoding="utf-8"), self.CLOUD)
+        # the test client never enters the app's client cache
+        self.assertEqual(dict(providers.llm._LLM_CACHE), cache_before)
+        self.assertEqual(dict(providers.llm._LLM_CACHE_URL), url_before)
+        self.assertEqual(chat.API_KEY, api_key_before)
+        self.assertEqual(chat.LLM_Model, model_before)
+
+
+class NetworkErrorDetectionTests(unittest.TestCase):
+    """The "the server never answered at all" check: the openai SDK's own
+    classes, a wrapper exception (via __cause__ / __context__), a renamed
+    class, and the plain errors that must NOT count as unreachable."""
+
+    def test_openai_connection_and_timeout_errors(self):
+        import httpx
+        import openai
+        request = httpx.Request("POST", "http://localhost:19999/v1/chat/completions")
+        self.assertTrue(providers._is_network_error(
+            openai.APIConnectionError(request=request)))
+        self.assertTrue(providers._is_network_error(
+            openai.APITimeoutError(request=request)))
+
+    def test_a_wrapper_is_followed_through_cause_and_context(self):
+        import httpx
+        import openai
+        request = httpx.Request("POST", "http://localhost:19999/v1/chat/completions")
+        try:
+            raise openai.APIConnectionError(request=request)
+        except Exception as inner:
+            wrapper = RuntimeError("wrapped by the framework")
+            wrapper.__cause__ = inner
+        self.assertTrue(providers._is_network_error(wrapper))
+        # A __context__-only chain: the wrapper is RAISED inside the handler
+        # (only a raised exception gets its __context__ set, __cause__ None).
+        try:
+            try:
+                raise openai.APITimeoutError(request=request)
+            except Exception:
+                raise RuntimeError("chained")
+        except RuntimeError as chained:
+            self.assertTrue(providers._is_network_error(chained))
+
+    def test_a_renamed_class_keeps_its_known_ancestors(self):
+        class RenamedTimeout(TimeoutError):
+            pass
+        self.assertTrue(providers._is_network_error(RenamedTimeout("timed out")))
+
+    def test_plain_errors_are_not_network_failures(self):
+        self.assertFalse(providers._is_network_error(ValueError("bad json")))
+        self.assertFalse(providers._is_network_error(_StatusError(500, "boom")))
+        self.assertFalse(providers._is_network_error(_StatusError(400, "weird 400")))
+
+
+class KeyCheckedTests(_TempData):
+    """key_checked on the probe reply: True only when the model list really
+    needed the key (a bogus key is refused by the same /models endpoint);
+    has_key rides along for the page's words."""
+
+    OK = {"reachable": True, "models": ["m1"], "loading": False, "error": None}
+    REFUSED = {"reachable": True, "models": [], "loading": False,
+               "error": "Server is running but rejected the API key (HTTP 401)"}
+    LISTED = {"reachable": True, "models": ["a", "b"], "loading": False, "error": None}
+    DOWN = {"reachable": False, "models": [], "loading": False, "error": "connection refused"}
+    EMPTY = {"reachable": True, "models": [], "loading": False, "error": None}
+
+    def _probe_cloud(self, first, second=None, key="sk-test"):
+        memory.save_llm_server("https://api.deepseek.com")
+        if key:
+            memory.save_api_key(key)
+        with patch.object(llm, "test_server",
+                          side_effect=[dict(first)] + ([dict(second)] if second else [])) as probe:
+            return providers.probe("deepseek"), probe
+
+    def test_refused_bogus_key_proves_the_real_one(self):
+        result, probe = self._probe_cloud(self.OK, self.REFUSED)
+        self.assertTrue(result["key_checked"])
+        self.assertTrue(result["has_key"])
+        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(probe.call_args_list[1][0],
+                         ("https://api.deepseek.com", "invalid-key-check"))
+
+    def test_a_listing_without_a_key_proves_nothing(self):
+        result, _ = self._probe_cloud(self.LISTED, self.LISTED)
+        self.assertFalse(result["key_checked"])
+
+    def test_no_extra_call_when_the_listing_failed(self):
+        result, probe = self._probe_cloud(self.DOWN)
+        self.assertFalse(result["key_checked"])
+        self.assertEqual(probe.call_count, 1)
+
+    def test_a_rejected_key_is_not_checked(self):
+        # A listing that itself FAILED (the server answered with a refusal)
+        # proves nothing, whatever the bogus-key follow-up would say - and
+        # the follow-up is not even made.
+        result, probe = self._probe_cloud(self.REFUSED, self.REFUSED)
+        self.assertFalse(result["key_checked"])
+        self.assertEqual(probe.call_count, 1)
+
+    def test_a_successful_empty_listing_proves_nothing(self):
+        # No models at all = a failed listing: there was no key to prove.
+        result, probe = self._probe_cloud(self.EMPTY, self.REFUSED)
+        self.assertFalse(result["key_checked"])
+        self.assertEqual(probe.call_count, 1)
+
+    def test_no_extra_call_without_a_saved_key(self):
+        memory.save_llm_server("https://api.deepseek.com")  # no key at all
+        with patch.object(llm, "test_server", return_value=dict(self.OK)) as probe:
+            result = providers.probe("deepseek")
+        self.assertFalse(result["key_checked"])
+        self.assertFalse(result["has_key"])
+        self.assertEqual(probe.call_count, 1)
+
+    def test_local_is_never_key_checked(self):
+        memory.save_llm_server("http://localhost:11434/v1")
+        with patch.object(llm, "test_server", return_value=dict(self.OK)) as probe:
+            result = providers.probe("ollama")
+        self.assertFalse(result["key_checked"])
+        self.assertEqual(probe.call_count, 1)
+
+    def test_vertex_is_never_key_checked(self):
+        n, e, d = rsa_numbers()
+        with patch.object(vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(vertex_auth, "check_ready", return_value={"ok": True, "error": None}):
+            vertex_auth.save_key(fake_vertex_key(), "global")
+            result = providers.probe("vertex")
+        self.assertFalse(result["key_checked"])
+        self.assertTrue(result["has_key"])
+        self.assertTrue(result["reachable"])
 
 
 if __name__ == "__main__":

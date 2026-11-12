@@ -448,18 +448,20 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: 
     # has changed. If the address moved since we built the client, rebuild it
     # so we never keep talking to a dead port.
     base_url = _server_url()
-    if builtin_llm.active():
+    builtin = builtin_llm.active()
+    if builtin:
         model = builtin_llm.model_name()
 
-    # The user's Model Sampling settings are part of the client identity:
-    # changing them rebuilds the client, so new values apply to the next
-    # message without an app restart.
     # reasoning: one of REASONING_LEVELS. None = the old call shape:
     # enable_thinking=True means "medium", otherwise "off" (helper calls).
     if reasoning not in REASONING_LEVELS:
         reasoning = "medium" if enable_thinking else "off"
+
+    # The user's Model Sampling settings are part of the client identity:
+    # changing them rebuilds the client, so new values apply to the next
+    # message without an app restart.
     thinking = reasoning != "off"
-    sampling_standard, sampling_extra, sent_params = _effective_sampling(base_url, thinking)
+    sampling_standard, sampling_extra, _ = _effective_sampling(base_url, thinking)
     key = (model, reasoning,
            tuple(sorted(sampling_standard.items())),
            tuple(sorted(sampling_extra.items())))
@@ -467,6 +469,31 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: 
     cached = _LLM_CACHE.get(key)
     if cached is not None and _LLM_CACHE_URL.get(key) == base_url:
         return cached
+
+    client, sent_params = _build_client(base_url, api_key, model, reasoning,
+                                        builtin=builtin,
+                                        reply_cap=BUILTIN_MAX_TOKENS if builtin else 4096)
+    _LLM_CACHE[key] = client
+    _LLM_CACHE_URL[key] = base_url
+    _LLM_CACHE_PARAMS[key] = sent_params
+    return client
+
+
+def _build_client(base_url, api_key, model, reasoning, builtin, reply_cap,
+                  timeout=None, max_tokens=None):
+    """Assemble one client for `base_url` + `model` - the one place every
+    Amadeus client is built: get_llm's cached app clients and client_for's
+    one-off Settings test clients share these per-host reasoning fields,
+    the user's sampling settings and the thought-stripping wrapper, so a
+    model that works in chat works in the Settings test, and vice versa.
+
+    `timeout` / `max_tokens` override the built-in ceilings (the test client
+    passes 30 s and a small output cap); None keeps them. With thinking on,
+    a set cap grows by the thinking budget, exactly like the real clients.
+    Returns (client, sent sampling params).
+    """
+    thinking = reasoning != "off"
+    sampling_standard, sampling_extra, sent_params = _effective_sampling(base_url, thinking)
 
     # Local servers still expect *some* key. If Amadeus has none stored yet,
     # send a placeholder - you paste the real one into Amadeus Settings.
@@ -476,7 +503,6 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: 
     # Local servers (Unsloth, vLLM, ...) understand it; public cloud providers
     # may reject unknown body fields, so it is only sent for local/LAN hosts.
     local = _is_local_host(base_url)
-    reply_cap = BUILTIN_MAX_TOKENS if builtin_llm.active() else 4096
 
     if thinking:
         # The thinking client is BOUNDED on purpose: a hard cap on tokens stops
@@ -491,7 +517,7 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: 
             "base_url": base_url,
             "timeout": 240,
             "max_retries": 1,
-            "max_tokens": reply_cap + budget if builtin_llm.active() else max(4096, reply_cap + budget),
+            "max_tokens": reply_cap + budget if builtin else max(4096, reply_cap + budget),
         }
     else:
         kwargs = {
@@ -558,7 +584,55 @@ def get_llm(api_key: str, model: str, enable_thinking: bool = False, reasoning: 
     # user's own output cap when set) override the built-in defaults above.
     kwargs.update(sampling_standard)
 
-    _LLM_CACHE[key] = _ThoughtFreeChatOpenAI(**kwargs)
-    _LLM_CACHE_URL[key] = base_url
-    _LLM_CACHE_PARAMS[key] = sent_params
-    return _LLM_CACHE[key]
+    # The Settings test client's short ceilings (timeout, output cap) override
+    # the defaults - and any user cap - it just inherited. It must also
+    # NEVER retry: with the ~5 s connect ceiling that timeout carries, a dead
+    # server answers in ~5 s instead of after the SDK's retry-with-backoff.
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+        kwargs["max_retries"] = 0
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens + (THINKING_BUDGETS[reasoning] if thinking else 0)
+
+    return _ThoughtFreeChatOpenAI(**kwargs), sent_params
+
+
+def _test_client_timeout(total):
+    """The Settings test client's timeout with a short CONNECT ceiling (~5 s,
+    the openai SDK's own default): a refused or dropped connection must not
+    hold the test for the whole `total`, while a slow-but-working model still
+    gets it. Uses the installed openai SDK's own httpx Timeout type when
+    importable (httpx2 on openai 3.x, then plain httpx); a stack without
+    either keeps the plain float (the old behaviour)."""
+    if not isinstance(total, (int, float)):
+        return total
+    import importlib
+    for module in ("httpx2", "httpx"):
+        try:
+            Timeout = getattr(importlib.import_module(module), "Timeout", None)
+        except ImportError:
+            continue
+        if Timeout is not None:
+            return Timeout(total, connect=5.0)
+    return total
+
+
+def client_for(base_url: str, api_key: str, model: str, reasoning: str = None,
+               timeout: float = 30.0, max_tokens: int = 200):
+    """A one-off client for a chosen address (Settings -> Custom Model ->
+    Test): built the same way as the real chat clients - per-host reasoning
+    fields, the user's sampling settings, the thought-stripping wrapper - so
+    the test feels like a real reply. It never enters _LLM_CACHE and never
+    touches the configured server, and it asks for a short answer (30 s
+    total with a ~5 s connect ceiling, no retries, a small output cap).
+    reasoning=None = the user's "her replies" level.
+    """
+    if reasoning is None:
+        reasoning = reasoning_for("replies")
+    if reasoning not in REASONING_LEVELS:
+        reasoning = "off"
+    client, _ = _build_client(base_url, api_key, model, reasoning,
+                              builtin=False, reply_cap=max_tokens,
+                              timeout=_test_client_timeout(timeout),
+                              max_tokens=max_tokens)
+    return client

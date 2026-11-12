@@ -1529,6 +1529,29 @@ button {
 .conn-row { display: flex; gap: 8px; align-items: center; }
 .conn-row .model-picker { flex: 1; min-width: 0; }
 
+/* Settings -> Connection: the key box's show/hide eye, at the box's right */
+.key-field { position: relative; display: block; }
+.key-field input { padding-right: 40px; }
+.key-visibility {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8b98ab;
+  cursor: pointer;
+  padding: 0;
+}
+.key-visibility:hover:not(:disabled) { color: #cbd4df; background: rgba(255, 255, 255, 0.06); }
+.key-visibility:disabled { opacity: 0.4; cursor: default; }
+
 /* Settings -> Connection -> Custom Model: the Google Vertex JSON key box */
 .vertex-json {
   width: 100%;
@@ -1543,8 +1566,6 @@ button {
   font-size: 12px;
 }
 .vertex-json:focus { border-color: rgba(115, 151, 201, 0.55); }
-.vertex-region { display: inline-flex; align-items: center; gap: 6px; }
-.vertex-region input { width: 110px; padding: 8px; }
 .file-button { display: inline-flex; align-items: center; cursor: pointer; }
 
 /* Settings -> Connection -> Model: "Get more models" (browser download links) */

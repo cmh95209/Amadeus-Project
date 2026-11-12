@@ -75,15 +75,18 @@ def clean_region(region: str) -> str:
     return region
 
 
-def save_key(text: str, region: str = "") -> dict:
-    """Validate and store the JSON key (+ region). Returns info()."""
+def save_key(text: str, region: str = "", keep_region: bool = False) -> dict:
+    """Validate and store the JSON key (+ region; keep_region leaves the
+    saved region file as it is - the Settings page no longer asks for the
+    region, and a blank one would clobber the saved value). Returns info()."""
     parse_key(text)
-    region = clean_region(region)
     os.makedirs(memory.DATA_DIR, exist_ok=True)
     with open(_key_path(), "w", encoding="utf-8") as f:
         f.write(text.strip())
-    with open(_region_path(), "w", encoding="utf-8") as f:
-        f.write(region)
+    if not keep_region:
+        region = clean_region(region)
+        with open(_region_path(), "w", encoding="utf-8") as f:
+            f.write(region)
     forget_token()
     return info()
 

@@ -13,6 +13,7 @@ memory sidecar reads it.
 """
 import json
 import os
+import re
 import threading
 import time
 
@@ -264,26 +265,325 @@ def activate(pid: str, address: str = "") -> dict:
 # ---------- probes (no chat, no model call) --------------------------------
 
 def probe(pid: str, address: str = "") -> dict:
-    """{"reachable", "models", "loading", "error"} for one provider, the
-    same shape llm.test_server returns. Vertex is checked by signing in and
-    asking one free question (vertex_auth.check_ready); the model list is
-    the fixed VERTEX_MODELS. Unknown provider -> ValueError."""
-    if get(pid) is None:
+    """{"reachable", "models", "loading", "error", "has_key", "key_checked"}
+    for one provider, the same shape llm.test_server returns (+ the key
+    facts). Vertex is checked by signing in and asking one free question
+    (vertex_auth.check_ready); its model list is the fixed VERTEX_MODELS.
+    key_checked = the model list the probe loaded really needed a key (a
+    bogus key is refused); a provider that lists models without a key can
+    only be checked with a real test message. Unknown provider -> ValueError."""
+    row = get(pid)
+    if row is None:
         raise ValueError(f"Unknown provider: {pid}")
     if pid == "vertex":
         result = vertex_auth.check_ready()
         if result.get("ok"):
-            return {"reachable": True, "models": list(VERTEX_MODELS),
+            data = {"reachable": True, "models": list(VERTEX_MODELS),
                     "loading": False, "error": None}
-        return {"reachable": False, "models": [], "loading": False,
-                "error": result.get("error") or "Google Vertex sign-in failed."}
-    if pid == "auto":
-        return llm.test_server(llm.autodetect_url(), key_for(pid))
-    address = address_for(pid, address)
-    if pid == "custom" and not address:
-        return {"reachable": False, "models": [], "loading": False,
+        else:
+            data = {"reachable": False, "models": [], "loading": False,
+                    "error": result.get("error") or "Google Vertex sign-in failed."}
+        data["has_key"] = has_key(pid)
+        data["key_checked"] = False
+        return data
+    base_url = llm.autodetect_url() if pid == "auto" else address_for(pid, address)
+    key = key_for(pid)
+    if pid == "custom" and not base_url:
+        data = {"reachable": False, "models": [], "loading": False,
                 "error": "Enter the server address first."}
-    return llm.test_server(address, key_for(pid))
+        data["has_key"] = has_key(pid)
+        data["key_checked"] = False
+        return data
+    data = llm.test_server(base_url, key)
+    data["has_key"] = has_key(pid)
+    data["key_checked"] = _key_proves_listing(row["kind"], base_url, key, data)
+    return data
+
+
+def _key_proves_listing(kind: str, base_url: str, key: str, result: dict) -> bool:
+    """True when a model list the probe just loaded really needed a key:
+    ask the same /models endpoint once with a bogus key. Refused = the good
+    list proves the key is right; a provider that lists models with the
+    bogus key too (OpenRouter, NVIDIA, Hugging Face, NanoGPT) proves
+    nothing, and any other error in this extra check counts as "not
+    proven". Only a SUCCESSFUL listing can prove anything (an error reply
+    or no models at all is a failure, whatever the key says) - and it is
+    only worth trying for cloud providers with a saved key: local servers
+    and Vertex take no key, and a keyless listing has nothing to check."""
+    if kind != "cloud" or not key or not result.get("reachable"):
+        return False
+    if result.get("error") or not (result.get("models") or result.get("any_model")):
+        return False
+    try:
+        fake = llm.test_server(base_url, "invalid-key-check", timeout=10.0)
+    except Exception:
+        return False
+    if not fake.get("reachable"):
+        return False
+    if fake.get("models") or fake.get("any_model"):
+        return False
+    return True
+
+
+# ---------- a real test: one message in her own reply format ---------------
+
+def _test_result(ok: bool, outcome: str, message: str, model: str, started: float) -> dict:
+    """The Settings "Test" reply - the page shows `message` as is (outcome
+    lets it re-use the words; seconds is how long the test took)."""
+    return {"ok": ok, "outcome": outcome, "message": message,
+            "model": model, "seconds": round(time.time() - started, 1)}
+
+
+def _http_status(exc):
+    """The HTTP status of an API error, or None (network and format errors
+    carry no status)."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(exc, "code", None)
+    return status if isinstance(status, int) else None
+
+
+_NETWORK_ERROR_NAMES = ("APIConnectionError", "APITimeoutError", "ConnectionError",
+                        "ConnectTimeout", "ReadTimeout", "Timeout", "TimeoutError")
+
+
+def _network_error_types():
+    """The openai SDK's connection/timeout classes when they are importable
+    (older installs may not have them); an empty tuple means "by name only"."""
+    try:
+        import openai
+    except ImportError:
+        return ()
+    types = []
+    for name in ("APIConnectionError", "APITimeoutError"):
+        cls = getattr(openai, name, None)
+        if isinstance(cls, type):
+            types.append(cls)
+    return tuple(types)
+
+
+def _is_network_error(exc) -> bool:
+    """Connection refused / a timeout - the server never answered at all.
+
+    The openai SDK may raise its connection errors under a wrapper class or
+    a renamed one (and they may carry no status_code), so look three ways:
+    by isinstance against the openai classes (when importable), by class
+    name anywhere in the type's hierarchy, and by walking the __cause__ /
+    __context__ chain of a wrapping exception."""
+    network_types = _network_error_types()
+    seen = set()
+    chain = [exc]
+    while chain:
+        error = chain.pop()
+        if error is None or id(error) in seen:
+            continue
+        seen.add(id(error))
+        if network_types and isinstance(error, network_types):
+            return True
+        if any(name in _NETWORK_ERROR_NAMES
+               for name in (cls.__name__ for cls in type(error).__mro__)):
+            return True
+        chain.extend((getattr(error, "__cause__", None),
+                      getattr(error, "__context__", None)))
+    return False
+
+
+# Account / request ids the provider's raw error bodies carry (user_id,
+# request_id, org ids): never shown to the user, cut out below.
+_ID_TOKENS_RE = re.compile(r"\b(?:user_[A-Za-z0-9_-]+|org-[A-Za-z0-9_-]+|req_[A-Za-z0-9_-]+)\b")
+
+
+def _body_message(body):
+    """The provider's own sentence from a parsed error body - the openai SDK
+    keeps it on .body: {"error": {"message": ...}}, {"message": ...} or a
+    list of such objects (Google's shape). None when there is no message."""
+    items = body if isinstance(body, list) else [body]
+    for item in items:
+        if isinstance(item, str):
+            return item
+        if not isinstance(item, dict):
+            continue
+        holder = item.get("error")
+        message = (holder.get("message") if isinstance(holder, dict)
+                   else item.get("message"))
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+def _test_reason(exc) -> str:
+    """A short, plain provider reason for the "error" outcome - just the
+    provider's OWN sentence, never its raw body: from the error's parsed
+    body when the SDK kept one, else the first 'message': '...' out of the
+    error text, else the text itself; then the key, any Bearer value and
+    the account ids (user_... / org-... / req_...) are cut out, and the
+    result is trimmed to 120 chars - it is shown to the user as is."""
+    text = ""
+    body = getattr(exc, "body", None)
+    if body is not None:
+        text = _body_message(body) or ""
+    if not text:
+        flattened = " ".join(str(exc).split())
+        match = re.search(r"['\"]message['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]", flattened)
+        text = match.group(1) if match else flattened
+    text = re.sub(r"[Bb]earer\s+\S+", "Bearer <key>", text)
+    text = re.sub(r"\bsk[-_][A-Za-z0-9._-]{8,}\b", "<key>", text)
+    text = _ID_TOKENS_RE.sub("<id>", text)
+    return " ".join(text.split())[:120]
+
+
+def _pack_speaks(pack) -> bool:
+    """A usable structured reply: at least one of her lines has a word in it."""
+    for field in ("assistant_reply_JPS", "assistant_reply_ENG"):
+        text = getattr(pack, field, None)
+        if isinstance(text, str) and text.strip():
+            return True
+    return False
+
+
+_MODEL_UNKNOWN_WORDS = (
+    "not found", "not a valid model", "invalid model", "model not found",
+    "model_not_found", "does not exist", "no such model", "unknown model",
+    "is not supported",
+)
+
+
+def _says_model_unknown(text: str) -> bool:
+    """The error says the MODEL itself is the problem (an unknown model id):
+    one of the usual phrases, with the text also mentioning a model."""
+    if "model" not in text:
+        return False
+    return any(word in text for word in _MODEL_UNKNOWN_WORDS)
+
+
+def _kind_word(kind: str) -> str:
+    """The words local and custom servers get say "server" (a custom
+    address is usually someone's own server), not "provider"; cloud and
+    Vertex keep "provider"."""
+    return "server" if kind in ("local", "custom") else "provider"
+
+
+def _classify_http(exc, model: str, started: float, kind: str) -> dict:
+    """One HTTP error from the test call -> the outcome the page shows;
+    the same wording checks chat.py uses in her reply ladder."""
+    import chat  # lazy, as in test_model
+    who = _kind_word(kind)
+    status = _http_status(exc)
+    text = str(exc).lower()
+    if status in (401, 403):
+        return _test_result(False, "bad_key", f"The {who} rejected this key.", model, started)
+    if status == 402:
+        return _test_result(False, "no_credit",
+                            "The provider says this account has no credit or quota left.",
+                            model, started)
+    if status == 429:
+        if chat._is_daily_quota_exhausted(exc) or \
+                any(word in text for word in ("quota", "billing", "credit")):
+            return _test_result(False, "no_credit",
+                                "The provider says this account has no credit or quota left.",
+                                model, started)
+        return _test_result(False, "rate_limited",
+                            "The provider is rate-limiting right now. Try again in a minute.",
+                            model, started)
+    if status == 404:
+        return _test_result(False, "model_missing",
+                            f"The {who} does not know the model {model}.", model, started)
+    if status in (400, 422):
+        if status == 400 and any(word in text for word in ("api key", "api-key", "apikey", "invalid key")):
+            return _test_result(False, "bad_key", f"The {who} rejected this key.", model, started)
+        if _says_model_unknown(text):
+            return _test_result(False, "model_missing",
+                                f"The {who} does not know the model {model}.", model, started)
+    return _test_result(False, "error", f"The test failed: {_test_reason(exc)}", model, started)
+
+
+def _plain_fallback(client, messages, model: str, started: float, kind: str) -> dict:
+    """The structured call came back empty (or its tool format itself
+    failed): one plain call tells "the model answers, but not in the form
+    Amadeus needs" apart from "the model does not answer at all"."""
+    try:
+        reply = client.invoke(messages)
+    except Exception as exc:
+        if _http_status(exc) is not None:
+            return _classify_http(exc, model, started, kind)
+        if _is_network_error(exc):
+            return _test_result(False, "unreachable", "Could not reach the server.", model, started)
+        return _test_result(False, "error", f"The test failed: {_test_reason(exc)}", model, started)
+    text = getattr(reply, "content", None)
+    if isinstance(text, str) and text.strip():
+        return _test_result(False, "wrong_format",
+                            "The model answers, but not in the form Amadeus needs.",
+                            model, started)
+    return _test_result(False, "error",
+                        "The test failed: the model did not answer.", model, started)
+
+
+def test_model(pid: str, address: str = "", model: str = "") -> dict:
+    """The Settings "Test" button: one short message through the chosen
+    model, in Amadeus's own reply format (the forced tool call her real
+    replies use) - so it proves the provider, the key and the model work
+    for HER, not just that the model list loads. Nothing is saved or
+    changed: no key, provider, model or client of the running app is
+    touched. ValueError for an unknown provider id.
+
+    Outcomes (the page shows the matching words): ok, no_model, no_key,
+    bad_key, model_missing, no_credit, rate_limited, wrong_format,
+    unreachable, error.
+    """
+    import chat  # lazy: chat imports llm and api wires providers - a
+                 # top-level import here would be a circle
+    row = get(pid)
+    if row is None:
+        raise ValueError(f"Unknown provider: {pid}")
+    started = time.time()
+    model = (model or "").strip()
+    if not model:
+        return _test_result(False, "no_model", "Pick a model first.", "", started)
+    if row["kind"] == "vertex":
+        info = vertex_auth.info()
+        if not info["configured"]:
+            return _test_result(False, "no_key", "No JSON key saved yet.", "", started)
+        base_url = vertex_auth.base_url(info["project"], info["region"])
+        try:
+            key = vertex_auth.token()
+        except vertex_auth.VertexSignInError as exc:
+            return _test_result(False, "bad_key", str(exc)[:160], model, started)
+        model = vertex_auth.model_name(model)
+    else:
+        # Like the probe: "auto" asks autodetect (the first local port that
+        # answers), everyone else their table address (or the typed one).
+        base_url = (llm.autodetect_url() if pid == "auto" else address_for(pid, address)
+                    or "").strip()
+        key = key_for(pid)
+        if row["kind"] == "cloud" and not key:
+            return _test_result(False, "no_key", "No key saved yet.", "", started)
+    if not base_url:
+        return _test_result(False, "error",
+                            "The test failed: no server address for this provider.",
+                            model, started)
+
+    client = llm.client_for(base_url, key, model)
+    messages = [
+        {"role": "system",
+         "content": "You are Amadeus. This is a connection test. Reply with one short greeting."},
+        {"role": "user", "content": "Hello"},
+    ]
+    try:
+        result = chat._structured(client, chat.AmadeusPack, messages)
+    except Exception as exc:
+        if _http_status(exc) is not None:
+            return _classify_http(exc, model, started, row["kind"])
+        if _is_network_error(exc):
+            return _test_result(False, "unreachable", "Could not reach the server.", model, started)
+        # A non-HTTP failure (often the tool format itself): the model may
+        # still answer in plain text - one plain call tells the two apart.
+        return _plain_fallback(client, messages, model, started, row["kind"])
+    if result is not None and _pack_speaks(result):
+        return _test_result(True, "ok",
+                            f"Works with Amadeus. {model} replied in {time.time() - started:.1f} s.",
+                            model, started)
+    return _plain_fallback(client, messages, model, started, row["kind"])
+
 
 
 def listing() -> dict:
