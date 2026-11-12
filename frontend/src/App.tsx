@@ -129,7 +129,7 @@ import type {
   ReasoningKey,
   ReasoningLevel,
 } from "./api";
-import { probeStatus, providerForAddress, shouldAutoProbe } from "./providers";
+import { connectionUnsaved, probeStatus, providerForAddress, shouldAutoProbe } from "./providers";
 
 // Settings -> Connection: the key box's show/hide eye (inline, two states:
 // the open eye = the key is visible, the slashed one = it is hidden).
@@ -306,6 +306,9 @@ export default function App() {
   const [providerTest, setProviderTest] = useState<ProviderTestResult | null>(null);
   const [providerTestBusy, setProviderTestBusy] = useState(false);
   const [testModel, setTestModel] = useState("");
+  // The model the backend has saved (the Model field may hold a new pick
+  // that is not saved yet - Test saves it first).
+  const [savedModel, setSavedModel] = useState("");
   // The key box: what the user typed (dirty) vs a saved key shown on demand.
   const [keyDirty, setKeyDirty] = useState(false);
   const [keyShown, setKeyShown] = useState(false);
@@ -341,7 +344,7 @@ export default function App() {
     providerId === "vertex" && vertexError
       ? { tone: "fail" as const, text: vertexError }
       : pendingEndpoint
-        ? { tone: "warn" as const, text: "Press Save to use this endpoint." }
+        ? { tone: "warn" as const, text: "Press Save or Test to use this endpoint." }
         : probeStatus(
             providerProbe, selectedProvider, providerListing?.vertex ?? null,
             providerBusy, providerTest, providerTestBusy, testModel,
@@ -1269,15 +1272,20 @@ export default function App() {
   // left as is when the list could not be loaded); the reply's check
   // becomes the status line and loads the model list, and the rest of the
   // app (footer dot, key gate) re-reads from the backend.
-  async function saveKeyNow() {
+  // The model picked in the Model field goes along and is stored as the
+  // choice (2026-11-12: it used to be dropped, and the old saved model came
+  // back on screen). Returns whether the save went through (Test saves
+  // first and only tests after a good save).
+  async function saveKeyNow(): Promise<boolean> {
     const row = selectedProvider;
-    if (!row || row.kind === "vertex" || providerBusy || settingsBusy) return;
+    if (!row || row.kind === "vertex" || providerBusy || settingsBusy) return false;
     const key = apiKey.trim();
     setProviderBusy(true);
     setKeyHelpError("");
     setSettingsError("");
     try {
-      const result = await saveProviderKey(row.id, key, row.kind === "custom" ? serverAddress.trim() : "");
+      const result = await saveProviderKey(
+        row.id, key, row.kind === "custom" ? serverAddress.trim() : "", model.trim());
       // The switch is done on the backend: mirror who is active now, the
       // address it uses, and the chosen row's key state in the table.
       setProviderListing((current) => current
@@ -1302,15 +1310,18 @@ export default function App() {
       setApiKeyInput("");
       setKeyDirty(false);
       setKeyShown(false);
-      // The model she uses from now on: the one the backend kept or
-      // cleared ("" = "No Model Selected.").
+      // The model she uses from now on: the one picked, or (none picked)
+      // the one the backend kept or cleared ("" = "No Model Selected.").
       setModelName(result.model);
+      setSavedModel(result.model);
       // The connection changed underneath the rest of the app: the footer
       // dot and the key gate re-read from the backend.
       void refreshConnection();
       void refreshHasApiKey();
+      return true;
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "Could not save the key.");
+      return false;
     } finally {
       setProviderBusy(false);
     }
@@ -1356,13 +1367,17 @@ export default function App() {
   // when not, left as is when the catalogue could not be loaded); the
   // reply's check + model list become the panel's, and the rest of the app
   // (footer dot, key gate) re-reads from the backend.
-  async function saveVertexNow() {
+  // The model picked in the Model field goes along and is stored as the
+  // choice (2026-11-12: it used to be dropped - switch endpoint, pick a
+  // model, Save, and the old model came back). Returns whether the save
+  // went through (Test saves first and only tests after a good save).
+  async function saveVertexNow(): Promise<boolean> {
     const vertex = providerListing?.vertex;
-    if (!vertex || providerBusy || settingsBusy) return;
+    if (!vertex || providerBusy || settingsBusy) return false;
     const hasJson = vertexJson.trim().length > 0;
     if (!hasJson && !vertex.configured) {
       setVertexError("Paste or choose your JSON key first.");
-      return;
+      return false;
     }
     setProviderBusy(true);
     setVertexError("");
@@ -1370,9 +1385,10 @@ export default function App() {
     try {
       // A blank endpoint (the list not loaded yet) is left out of the
       // request, so it keeps the saved one instead of clobbering it.
+      const picked = model.trim();
       const result = hasJson
-        ? await saveVertex({ json: vertexJson, region: vertexRegion })
-        : await saveVertex({ region: vertexRegion });
+        ? await saveVertex({ json: vertexJson, region: vertexRegion, model: picked })
+        : await saveVertex({ region: vertexRegion, model: picked });
       setProviderListing((current) => current
         ? {
             ...current,
@@ -1400,14 +1416,18 @@ export default function App() {
         has_key: result.has_key,
         catalogue: result.catalogue,
       });
-      // The model she uses from now on: the one the backend kept, cleared
-      // or left as is against the endpoint's catalogue.
+      // The model she uses from now on: the one picked, or (none picked)
+      // the one the backend kept, cleared or left as is against the
+      // endpoint's catalogue.
       setModelName(result.model);
+      setSavedModel(result.model);
       setVertexJson("");
       setProviderTest(null);
       setTestModel("");
+      return true;
     } catch (error) {
       setVertexError(error instanceof Error ? error.message : "Could not save - the server did not answer.");
+      return false;
     } finally {
       setProviderBusy(false);
     }
@@ -1417,6 +1437,10 @@ export default function App() {
   // Amadeus's own reply format - it proves the provider, the key and the
   // model for her (the model list alone does not). The answer lands in the
   // status line; with no model chosen it says so without sending anything.
+  // Anything changed but not saved yet (provider, key, endpoint, address,
+  // model) is SAVED FIRST, then tested (MH 2026-11-12: Test tests the new
+  // choice). A failed save stops there (its error shows); a failed test
+  // after a save says the new choice IS saved.
   async function runTest() {
     const row = selectedProvider;
     if (!row || settingsBusy || providerBusy || providerTestBusy) return;
@@ -1429,13 +1453,30 @@ export default function App() {
       setTestModel("");
       return;
     }
+    const unsaved = connectionUnsaved({
+      providerId: row.id,
+      activeId: providerListing?.active ?? "",
+      keyTyped: keyDirty && apiKey.trim().length > 0,
+      vertexJsonTyped: row.kind === "vertex" && vertexJson.trim().length > 0,
+      pendingEndpoint,
+      model: modelName,
+      savedModel,
+      address: serverAddress,
+      savedAddress: providerListing?.address ?? "",
+    });
+    if (unsaved) {
+      const saved = row.kind === "vertex" ? await saveVertexNow() : await saveKeyNow();
+      if (!saved) return;
+    }
     setProviderTest(null);
     setTestModel(modelName);
     setProviderTestBusy(true);
     try {
       const result = await testProviderModel(
         row.id, modelName, row.kind === "custom" ? serverAddress.trim() : "");
-      setProviderTest(result);
+      setProviderTest(unsaved && !result.ok
+        ? { ...result, message: `Saved, but the test failed: ${result.message}` }
+        : result);
     } catch (error) {
       setProviderTest({
         ok: false, outcome: "error",
@@ -1490,6 +1531,7 @@ export default function App() {
 
       setMessages(memory);
       setModelName(currentModel === "No Model Selected." ? "" : currentModel);
+      setSavedModel(currentModel === "No Model Selected." ? "" : currentModel);
       setHasApiKey(configured);
       setWebAccessState(webOn);
       setReasoningState(reasoningInfo);
@@ -1810,10 +1852,17 @@ export default function App() {
           setKeyDirty(false);
           setKeyShown(false);
         }
+        // A Vertex endpoint picked in the dropdown but not saved yet goes
+        // into use with this Save too (2026-11-12: it used to be left
+        // behind, and the dropdown snapped back to the old endpoint).
+        if (row.id === "vertex" && pendingEndpoint && providerListing?.vertex?.configured) {
+          await saveVertex({ region: vertexRegion, model: noModelYet ? "" : nextModel });
+        }
         const addressToSave = row.kind === "custom" ? serverAddress.trim() : "";
         const activated = await activateProvider(
           row.id, addressToSave, noModelYet ? "" : nextModel);
         setModelName(activated.model);
+        setSavedModel(activated.model);
         setProviderTest(null);
         setTestModel("");
         // The switch changed what is active: the panel (and the footer dot)
@@ -3571,7 +3620,7 @@ export default function App() {
                   </div>
                   <p className="settings-help">
                     Type to search the list, or type a model name it does not
-                    show. Press Save below to use it.
+                    show. Save and test model above.
                   </p>
                 </>)}
               </div>

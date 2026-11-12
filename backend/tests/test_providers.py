@@ -912,6 +912,22 @@ class RouteTests(_FreshAppTests):
         self.vertex_auth.forget_token()
         self.addCleanup(self.vertex_auth.forget_token)
 
+    def _track_picked_saves(self):
+        """api's own setLLMModel, tracked: every call is the row Save's
+        picked-model store (_save_picked_model). The settle path calls
+        chat.setLLMModel directly, so it never lands in this list."""
+        calls = []
+        real = self.api.setLLMModel
+
+        def fake(model):
+            calls.append(model)
+            return real(model)
+
+        p = patch.object(self.api, "setLLMModel", fake)
+        p.start()
+        self.addCleanup(p.stop)
+        return calls
+
     def test_listing_shape(self):
         res = self.client.get("/llm/providers")
         self.assertEqual(res.status_code, 200)
@@ -1077,6 +1093,57 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(body["model"], "llama-x")
         self.assertEqual(self.memory.load_llm_model(), "llama-x")
         self.assertEqual(self.chat.LLM_Model, "llama-x")
+
+    def test_top_save_a_picked_model_is_stored_as_is_and_not_settled(self):
+        # The model picked in the Model field rides along with the row
+        # Save: it is THE choice - stored as is and returned, never
+        # settled away (the Test button is the proof). The new server
+        # lists none of the models involved, yet the old saved model
+        # ("llama-x") is replaced by the pick - not cleared to "".
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        self.chat.setLLMModel("llama-x")
+        calls = self._track_picked_saves()
+
+        def fake_test_server(base_url, api_key="", timeout=5.0):
+            return {"reachable": True, "models": ["only-this-model"],
+                    "loading": False, "error": None}
+        with patch.object(self.providers.llm, "test_server",
+                          side_effect=fake_test_server):
+            res = self.client.post("/llm/key",
+                                   json={"provider": "groq", "key": "gsk-new",
+                                         "model": "gpt-picked-1"})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "groq")
+        self.assertEqual(body["model"], "gpt-picked-1")
+        self.assertEqual(self.memory.load_llm_model(), "gpt-picked-1")
+        self.assertEqual(self.chat.LLM_Model, "gpt-picked-1")
+        # One picked-model save - and no settle (which would have called
+        # chat.setLLMModel and left "" behind).
+        self.assertEqual(calls, ["gpt-picked-1"])
+
+    def test_top_save_without_a_model_still_settles(self):
+        # No model in the request: the old behaviour stands - the saved
+        # model is settled against the new server's list (cleared here:
+        # "llama-x" is not listed), and the picked-model store is not used.
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        self.chat.setLLMModel("llama-x")
+        calls = self._track_picked_saves()
+
+        def fake_test_server(base_url, api_key="", timeout=5.0):
+            return {"reachable": True, "models": ["only-this-model"],
+                    "loading": False, "error": None}
+        with patch.object(self.providers.llm, "test_server",
+                          side_effect=fake_test_server):
+            res = self.client.post("/llm/key",
+                                   json={"provider": "groq", "key": "gsk-new"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["active"], "groq")
+        self.assertEqual(res.json["model"], "")
+        self.assertEqual(self.memory.load_llm_model(), "")
+        self.assertEqual(calls, [])
 
     def test_models_route(self):
         res = self.client.post("/llm/models", json={"provider": "deepseek"})
@@ -1265,6 +1332,166 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.5-flash")
         self.assertTrue(res.json["reachable"])
         self.assertFalse(res.json["catalogue"])
+
+    def test_vertex_save_a_picked_model_is_stored_prefixed_and_untouched(self):
+        # The picked model rides along with the Vertex Save: stored as
+        # google/<name> and returned - even when the endpoint's catalogue
+        # lists it not (the old saved model, not in the catalogue either,
+        # would have been settled away to ""). A name that already has the
+        # prefix is kept as is (not prefixed twice).
+        n, e, d = rsa_numbers()
+        catalogue = ["gemini-4-argon", "gemini-3.5-flash"]
+
+        def vertex_ok(models):
+            # _rsa_numbers too: the save re-parses the key, and the reply
+            # re-reads it (info) - the placeholder PEM parses only with it.
+            return [patch.object(self.vertex_auth, "_rsa_numbers",
+                                 return_value=(n, e, d)),
+                    patch.object(self.vertex_auth, "token",
+                                 return_value="ya29-offline-pass"),
+                    patch.object(self.vertex_auth, "check_ready",
+                                 return_value={"ok": True, "error": None}),
+                    patch.object(self.vertex_auth, "list_models",
+                                 return_value=models)]
+
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        self.memory.save_llm_model("google/gemini-4-hydrogen")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex", json={
+            "json": fake_vertex_key(), "region": "us-central1",
+            "model": "gemini-3.8-flash"})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "vertex")
+        self.assertEqual(body["model"], "google/gemini-3.8-flash")
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.8-flash")
+
+        # The already-prefixed pick, on a region-only save (the key now
+        # stands): stored as is, the prefix not doubled.
+        self.memory.save_llm_model("google/gemini-4-hydrogen")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex",
+                               json={"region": "global",
+                                     "model": "google/gemini-4-argon"})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["model"], "google/gemini-4-argon")
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-4-argon")
+
+    def test_vertex_save_a_blank_model_settles_like_before(self):
+        # A blank / whitespace model is the same as none: the saved model
+        # is settled against the endpoint's catalogue as before - in the
+        # list -> kept (WITH its "google/" prefix), not in it -> cleared.
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
+        catalogue = ["gemini-4-argon", "gemini-3.5-flash"]
+
+        def vertex_ok(models):
+            return [patch.object(self.vertex_auth, "_rsa_numbers",
+                                 return_value=(n, e, d)),
+                    patch.object(self.vertex_auth, "token",
+                                 return_value="ya29-offline-pass"),
+                    patch.object(self.vertex_auth, "check_ready",
+                                 return_value={"ok": True, "error": None}),
+                    patch.object(self.vertex_auth, "list_models",
+                                 return_value=models)]
+
+        # Not in the catalogue: the blank model still settles -> cleared.
+        self.memory.save_llm_model("google/gemini-4-hydrogen")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex",
+                               json={"region": "global", "model": ""})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["model"], "")
+        self.assertEqual(self.memory.load_llm_model(), "")
+
+        # In the catalogue: a whitespace model still settles -> kept.
+        self.memory.save_llm_model("google/gemini-3.5-flash")
+        patches = vertex_ok(catalogue)
+        for p in patches:
+            p.start()
+        res = self.client.post("/llm/vertex",
+                               json={"region": "global", "model": "   "})
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json["model"], "google/gemini-3.5-flash")
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.5-flash")
+
+    def test_vertex_sign_in_failure_does_not_store_the_picked_model(self):
+        # Google refuses the sign-in: Vertex does not become active, and
+        # the picked model must not be stored (the previous provider would
+        # get a google/ model name). The saved model is settled (left as
+        # is - the vertex check could not load anything) and returned.
+        self.memory.save_llm_server("https://openrouter.ai/api/v1")
+        self.memory.save_api_key("sk-or")
+        self.memory.save_llm_model("llama-x")
+        calls = self._track_picked_saves()
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token",
+                          side_effect=self.vertex_auth.VertexSignInError(
+                              "Google Vertex refused the sign-in.")), \
+             patch.object(self.vertex_auth, "check_ready",
+                          return_value={"ok": False,
+                                        "error": "Google Vertex refused the sign-in."}):
+            res = self.client.post("/llm/vertex", json={
+                "json": fake_vertex_key(), "region": "global",
+                "model": "gemini-3.8-flash"})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertIn("refused the sign-in", body["message"])
+        self.assertEqual(body["active"], "openrouter")
+        self.assertEqual(self.providers.active_id(), "openrouter")
+        self.assertEqual(body["model"], "llama-x")
+        self.assertEqual(self.memory.load_llm_model(), "llama-x")
+        self.assertEqual(calls, [])   # the picked model was never stored
+
+    def test_reported_scenario_new_endpoint_and_new_model_together(self):
+        # The bug report (2026-11-12): on Vertex with
+        # google/gemini-4-hydrogen saved, switching the endpoint
+        # (asia-east1) and picking gemini-3.8-flash, the row Save used to
+        # drop the pick - the old model came back on screen. Now the reply
+        # carries the picked model, stored as google/gemini-3.8-flash, even
+        # though the endpoint's catalogue lists neither name.
+        n, e, d = rsa_numbers()
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)):
+            self.vertex_auth.save_key(fake_vertex_key(), "global")
+        self.memory.save_llm_server(
+            self.vertex_auth.base_url("amadeus-offline-test", "global"))
+        Path("data/llm_provider.txt").write_text("vertex", encoding="utf-8")
+        self.memory.save_llm_model("google/gemini-4-hydrogen")
+        with patch.object(self.vertex_auth, "_rsa_numbers", return_value=(n, e, d)), \
+             patch.object(self.vertex_auth, "token", return_value="ya29-offline-pass"), \
+             patch.object(self.vertex_auth, "check_ready",
+                          return_value={"ok": True, "error": None}), \
+             patch.object(self.vertex_auth, "list_models",
+                          return_value=["gemini-4-argon"]):
+            res = self.client.post("/llm/vertex",
+                                   json={"region": "asia-east1",
+                                         "model": "gemini-3.8-flash"})
+        self.assertEqual(res.status_code, 200)
+        body = res.json
+        self.assertEqual(body["active"], "vertex")
+        self.assertEqual(body["vertex"]["region"], "asia-east1")
+        self.assertIn("asia-east1-aiplatform", body["vertex"]["address"])
+        self.assertEqual(body["model"], "google/gemini-3.8-flash")
+        self.assertNotIn("hydrogen", body["model"])
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.8-flash")
+        self.assertIn("asia-east1-aiplatform", self.memory.load_llm_server())
 
     def test_vertex_route_rejects_an_invalid_region_before_writing(self):
         # The clean_region rule, with the existing message - and nothing is
@@ -1505,6 +1732,53 @@ class RouteTests(_FreshAppTests):
         self.assertEqual(res.json["vertex"]["region"], "us-central1")
         self.assertIn("us-central1-aiplatform", res.json["vertex"]["address"])
         self.assertTrue(res.json["vertex"]["configured"])
+
+
+class SavePickedModelTests(_FreshAppTests):
+    """The row-Save model helper itself (api._save_picked_model): the model
+    picked in Settings is stored as is (Vertex: as google/<name>, a name
+    that already holds a slash is kept) and returned; a missing, blank or
+    non-string name stores nothing and returns None (the caller then
+    settles the saved model against the new server's list as before)."""
+
+    def _picked(self, provider, value):
+        """_save_picked_model with api's setLLMModel tracked: the list is
+        the calls the helper made (the settle path never calls it - it
+        goes through chat.setLLMModel directly)."""
+        calls = []
+        real = self.api.setLLMModel
+
+        def fake(model):
+            calls.append(model)
+            return real(model)
+
+        with patch.object(self.api, "setLLMModel", fake):
+            saved = self.api._save_picked_model(provider, value)
+        return saved, calls
+
+    def test_missing_or_blank_names_store_nothing(self):
+        for value in (None, 12345, ["gemini-x"], "", "   "):
+            saved, calls = self._picked("groq", value)
+            self.assertIsNone(saved, repr(value))
+            self.assertEqual(calls, [], repr(value))
+
+    def test_a_plain_name_is_stored_stripped(self):
+        saved, calls = self._picked("groq", "  llama-x  ")
+        self.assertEqual(saved, "llama-x")
+        self.assertEqual(calls, ["llama-x"])
+        self.assertEqual(self.memory.load_llm_model(), "llama-x")
+        self.assertEqual(self.chat.LLM_Model, "llama-x")
+
+    def test_a_vertex_name_gets_the_google_prefix(self):
+        saved, calls = self._picked("vertex", "gemini-3.8-flash")
+        self.assertEqual(saved, "google/gemini-3.8-flash")
+        self.assertEqual(calls, ["google/gemini-3.8-flash"])
+        self.assertEqual(self.memory.load_llm_model(), "google/gemini-3.8-flash")
+
+    def test_a_prefixed_vertex_name_is_kept_as_is(self):
+        saved, calls = self._picked("vertex", "google/gemini-3.5-flash")
+        self.assertEqual(saved, "google/gemini-3.5-flash")
+        self.assertEqual(calls, ["google/gemini-3.5-flash"])
 
 
 # ---------- llm.py: the pieces this feature added ----------

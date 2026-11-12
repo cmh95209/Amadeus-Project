@@ -32,6 +32,45 @@ export function shouldAutoProbe(row: ProviderRow, vertex: VertexInfo | null): bo
   return row.has_key === true;
 }
 
+/** What the Connection panel holds next to what the backend has saved. */
+export type ConnectionDraft = {
+  /** The provider row shown, and the one in use. */
+  providerId: string;
+  activeId: string;
+  /** A key typed into the key box (not saved yet). */
+  keyTyped: boolean;
+  /** JSON text in the Vertex key box (not saved yet). */
+  vertexJsonTyped: boolean;
+  /** A Vertex endpoint picked in the dropdown but not saved yet. */
+  pendingEndpoint: boolean;
+  /** The Model field, and the model saved. */
+  model: string;
+  savedModel: string;
+  /** The custom server address in the box, and the one saved. */
+  address: string;
+  savedAddress: string;
+};
+
+/** Whether "Test" must save the connection first (2026-11-12, MH: a Test
+ * after switching provider, key, endpoint, address or model tests the NEW
+ * choice - so it is saved first, then tested). Vertex model names compare
+ * without their "google/" prefix (saved as google/<name>, listed bare);
+ * case and surrounding spaces of the model are not ignored otherwise. */
+export function connectionUnsaved(d: ConnectionDraft): boolean {
+  if (d.providerId !== d.activeId) return true;
+  if (d.keyTyped || d.vertexJsonTyped || d.pendingEndpoint) return true;
+  if (d.providerId === "custom"
+      && d.address.trim().replace(/\/+$/, "") !== d.savedAddress.trim().replace(/\/+$/, "")) {
+    return true;
+  }
+  const bare = (name: string) => {
+    const clean = name.trim();
+    return d.providerId === "vertex" && clean.startsWith("google/")
+      ? clean.slice("google/".length) : clean;
+  };
+  return bare(d.model) !== bare(d.savedModel);
+}
+
 export type ProbeStatus = {
   tone: "" | "ok" | "warn" | "fail";
   text: string;
@@ -43,9 +82,9 @@ export type ProbeStatus = {
  * address or model moves on); `busy` = a check is running right now;
  * `testing` = a test message is on its way to `testModel`; `hasModel` =
  * a model is saved or chosen in the Model field (the listing lines end
- * with "press Test." once a model is chosen - the connection is already
- * saved, so only a test is left; with none saved they end with "pick a
- * model and press Save below.", which stores it). */
+ * with "press Test." once a model is chosen - Test saves anything still
+ * unsaved first; with none chosen they end with "pick a model, then save
+ * and test it above."). */
 export function probeStatus(
   probe: ProviderProbe | null,
   row: ProviderRow | null,
@@ -58,8 +97,8 @@ export function probeStatus(
 ): ProbeStatus {
   // The "next step" tail of the status lines: with no model saved yet the
   // next Save stores one, with a model chosen only a Test is left.
-  const nudgeLower = hasModel ? "press Test." : "pick a model and press Save below.";
-  const nudge = hasModel ? "Press Test." : "Pick a model and press Save below.";
+  const nudgeLower = hasModel ? "press Test." : "pick a model, then save and test it above.";
+  const nudge = hasModel ? "Press Test." : "Pick a model, then save and test it above.";
   if (busy) return { tone: "", text: "Checking..." };
   if (testing) {
     return { tone: "", text: `Sending a test message to ${testModel || "the model"}...` };

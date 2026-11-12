@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { providerForAddress, probeStatus, shouldAutoProbe } from "../src/providers";
+import { connectionUnsaved, providerForAddress, probeStatus, shouldAutoProbe } from "../src/providers";
 import type { ProviderRow, ProviderTestResult, VertexInfo } from "../src/api";
 
 // Settings -> Connection -> Custom Model: which provider a typed address
@@ -98,20 +98,20 @@ assert.deepEqual(
   { tone: "warn", text: "The server is still loading its model." });
 
 // Vertex: signed in (the saved endpoint is named). The listing lines end
-// with "pick a model and press Save below." while no model is saved (that
+// with "pick a model, then save and test it above." while no model is saved (that
 // Save stores it) and with just "press Test." once a model is chosen (the
 // connection is already saved). With the endpoint's own catalogue loaded
 // the count is its (a listed model can still 404 - the Test button stays
 // the proof); without it only the sign-in is known.
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null }, byId("vertex"), vertexSaved, false, null),
-  { tone: "ok", text: "Signed in to Google Vertex (global). Not tested yet - pick a model and press Save below." });
+  { tone: "ok", text: "Signed in to Google Vertex (global). Not tested yet - pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null }, byId("vertex"), vertexSaved, false, null, false, "", true),
   { tone: "ok", text: "Signed in to Google Vertex (global). Not tested yet - press Test." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, catalogue: true }, byId("vertex"), vertexUs, false, null),
-  { tone: "ok", text: "Signed in to Google Vertex (us-central1), 2 models listed. Not tested yet - pick a model and press Save below." });
+  { tone: "ok", text: "Signed in to Google Vertex (us-central1), 2 models listed. Not tested yet - pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a"], loading: false, error: null, catalogue: true }, byId("vertex"), vertexUs, false, null, false, "", true),
   { tone: "ok", text: "Signed in to Google Vertex (us-central1), 1 model listed. Not tested yet - press Test." });
@@ -120,19 +120,19 @@ assert.deepEqual(
 // wordings, and the next step (both wordings: model chosen / not yet).
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null }, byId("ollama"), null, false, null),
-  { tone: "ok", text: "Connected, 2 models. Pick a model and press Save below." });
+  { tone: "ok", text: "Connected, 2 models. Pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null }, byId("ollama"), null, false, null, false, "", true),
   { tone: "ok", text: "Connected, 2 models. Press Test." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a"], loading: false, error: null }, byId("ollama"), null, false, null),
-  { tone: "ok", text: "Connected, 1 model. Pick a model and press Save below." });
+  { tone: "ok", text: "Connected, 1 model. Pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a"], loading: false, error: null }, byId("ollama"), null, false, null, false, "", true),
   { tone: "ok", text: "Connected, 1 model. Press Test." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null }, byId("ollama"), null, false, null),
-  { tone: "ok", text: "Connected. Pick a model and press Save below." });
+  { tone: "ok", text: "Connected. Pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null }, byId("ollama"), null, false, null, false, "", true),
   { tone: "ok", text: "Connected. Press Test." });
@@ -150,13 +150,13 @@ assert.deepEqual(
 // again both "next step" wordings (model chosen / not yet).
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, has_key: true, key_checked: true }, byId("openai"), null, false, null),
-  { tone: "ok", text: "Key accepted, 2 models listed. Not tested yet - pick a model and press Save below." });
+  { tone: "ok", text: "Key accepted, 2 models listed. Not tested yet - pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, has_key: true, key_checked: true }, byId("openai"), null, false, null, false, "", true),
   { tone: "ok", text: "Key accepted, 2 models listed. Not tested yet - press Test." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a"], loading: false, error: null, has_key: true, key_checked: true }, byId("openai"), null, false, null),
-  { tone: "ok", text: "Key accepted, 1 model listed. Not tested yet - pick a model and press Save below." });
+  { tone: "ok", text: "Key accepted, 1 model listed. Not tested yet - pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a"], loading: false, error: null, has_key: true, key_checked: true }, byId("openai"), null, false, null, false, "", true),
   { tone: "ok", text: "Key accepted, 1 model listed. Not tested yet - press Test." });
@@ -164,7 +164,7 @@ assert.deepEqual(
 // Key saved but the provider does not check it on listings (both wordings).
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, has_key: true }, byId("openrouter"), null, false, null),
-  { tone: "", text: "Key saved, 2 models listed. This server does not check the key here - pick a model and press Save below." });
+  { tone: "", text: "Key saved, 2 models listed. This server does not check the key here - pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, has_key: true }, byId("openrouter"), null, false, null, false, "", true),
   { tone: "", text: "Key saved, 2 models listed. This server does not check the key here - press Test." });
@@ -173,13 +173,13 @@ assert.deepEqual(
 // with a key saved the key words stay.
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, has_key: false }, byId("custom"), null, false, null),
-  { tone: "ok", text: "Connected, 2 models. Pick a model and press Save below." });
+  { tone: "ok", text: "Connected, 2 models. Pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: [], loading: false, error: null, has_key: false }, byId("custom"), null, false, null),
-  { tone: "ok", text: "Connected. Pick a model and press Save below." });
+  { tone: "ok", text: "Connected. Pick a model, then save and test it above." });
 assert.deepEqual(
   probeStatus({ reachable: true, models: ["a", "b"], loading: false, error: null, has_key: true }, byId("custom"), null, false, null),
-  { tone: "", text: "Key saved, 2 models listed. This server does not check the key here - pick a model and press Save below." });
+  { tone: "", text: "Key saved, 2 models listed. This server does not check the key here - pick a model, then save and test it above." });
 
 // A custom address that is still empty: the fix is to type it in.
 assert.deepEqual(
@@ -214,4 +214,40 @@ assert.deepEqual(
   probeStatus({ reachable: false, models: [], loading: false, error: null }, byId("openai"), null, false, null),
   { tone: "fail", text: "Can't connect: no answer from the server" });
 
+// connectionUnsaved: whether Test must save first (MH 2026-11-12 - Test
+// tests the NEW choice, so anything changed is saved, then tested).
+const draft = {
+  providerId: "vertex", activeId: "vertex", keyTyped: false, vertexJsonTyped: false,
+  pendingEndpoint: false, model: "gemini-3.8-flash", savedModel: "google/gemini-3.8-flash",
+  address: "", savedAddress: "",
+};
+// Nothing changed (the saved Vertex name carries "google/", the field not).
+assert.equal(connectionUnsaved(draft), false);
+assert.equal(connectionUnsaved({ ...draft, model: "google/gemini-3.8-flash" }), false);
+// The reported case: Hydrogen saved, another model picked (and/or a new endpoint).
+assert.equal(connectionUnsaved({ ...draft, savedModel: "google/gemini-4-hydrogen" }), true);
+assert.equal(connectionUnsaved({ ...draft, pendingEndpoint: true }), true);
+assert.equal(connectionUnsaved({ ...draft, vertexJsonTyped: true }), true);
+// Another provider row shown than the one in use; a typed key.
+assert.equal(connectionUnsaved({ ...draft, providerId: "openrouter", activeId: "vertex",
+  model: "x", savedModel: "x" }), true);
+const plain = { ...draft, providerId: "openrouter", activeId: "openrouter",
+  model: "google/gemini-3.8-flash", savedModel: "google/gemini-3.8-flash" };
+assert.equal(connectionUnsaved(plain), false);
+assert.equal(connectionUnsaved({ ...plain, keyTyped: true }), true);
+// "google/" is ignored only for Vertex (on OpenRouter it is part of the name).
+assert.equal(connectionUnsaved({ ...plain, model: "gemini-3.8-flash" }), true);
+// Surrounding spaces in the field do not count as a change.
+assert.equal(connectionUnsaved({ ...plain, model: "  google/gemini-3.8-flash " }), false);
+// A first pick when no model was saved is a change; clearing it too.
+assert.equal(connectionUnsaved({ ...plain, savedModel: "" }), true);
+assert.equal(connectionUnsaved({ ...plain, model: "" }), true);
+// Custom server: a changed address counts (a trailing slash does not);
+// for other rows the address box is not theirs and is ignored.
+const custom = { ...plain, providerId: "custom", activeId: "custom",
+  address: "http://192.168.0.10:8000/v1", savedAddress: "http://192.168.0.10:8000/v1" };
+assert.equal(connectionUnsaved(custom), false);
+assert.equal(connectionUnsaved({ ...custom, address: "http://192.168.0.10:8000/v1/" }), false);
+assert.equal(connectionUnsaved({ ...custom, address: "http://192.168.0.11:8000/v1" }), true);
+assert.equal(connectionUnsaved({ ...plain, address: "http://elsewhere/v1" }), false);
 console.log("providers.test.ts: ok");

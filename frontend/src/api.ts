@@ -1056,13 +1056,19 @@ export type ProviderSaveResult = {
   model: string;
 } & ProviderProbe;
 
+/** `model` = the model picked in Settings: stored as THE choice (absent =
+ * the saved one is kept or cleared against the new server's list). */
 export async function saveProviderKey(
-  provider: string, key: string, address = "",
+  provider: string, key: string, address = "", model = "",
 ): Promise<ProviderSaveResult> {
   const data = await parseResponse(await fetch(`${API_BASE}/llm/key`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider, key, ...(address ? { address } : {}) }),
+    body: JSON.stringify({
+      provider, key,
+      ...(address ? { address } : {}),
+      ...(model ? { model } : {}),
+    }),
   }));
   return {
     status: typeof data.status === "string" ? data.status : "ok",
@@ -1135,6 +1141,9 @@ export type VertexSave = {
   json?: string;
   /** The region, e.g. "global" (absent = keep the saved one). */
   region?: string;
+  /** The model picked in Settings, stored as THE choice (absent = the saved
+   * one is kept or cleared against the endpoint's catalogue). */
+  model?: string;
 };
 
 export type VertexSaveResult = {
@@ -1166,6 +1175,7 @@ export async function saveVertex(fields: VertexSave): Promise<VertexSaveResult> 
     body: JSON.stringify({
       ...(fields.json ? { json: fields.json } : {}),
       ...(fields.region ? { region: fields.region } : {}),
+      ...(fields.model ? { model: fields.model } : {}),
     }),
   }));
   if (data.vertex === undefined || data.vertex === null) {

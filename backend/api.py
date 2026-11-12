@@ -1588,7 +1588,11 @@ def llm_save_key():
     except vertex_auth.VertexSignInError as exc:
         return jsonify({"message": str(exc)}), 400
     probe = providers.probe(provider, address)
-    model = _settle_model_after_switch(provider, probe)
+    # A model the user picked in Settings rides along: it is THE choice
+    # (stored as is, never settled away - the Test button is the proof).
+    model = _save_picked_model(provider, data.get("model"))
+    if model is None:
+        model = _settle_model_after_switch(provider, probe)
     return jsonify({"status": "ok", "active": result["id"],
                     "address": result["address"],
                     "has_key": providers.has_key(provider),
@@ -1684,7 +1688,14 @@ def llm_save_vertex():
             body["message"] = str(exc)
     body["active"] = providers.active_id()
     probe = providers.probe("vertex")
-    body["model"] = _settle_model_after_switch("vertex", probe)
+    # The model picked in Settings rides along (2026-11-12: it used to be
+    # dropped, and the old saved model came back on screen). Stored only
+    # when Vertex really is the connection now - a sign-in failure keeps
+    # the previous provider, which must not get a google/ model name.
+    picked = (_save_picked_model("vertex", data.get("model"))
+              if body["active"] == "vertex" else None)
+    body["model"] = (picked if picked is not None
+                     else _settle_model_after_switch("vertex", probe))
     return jsonify({**body, **probe})
 
 
@@ -1851,6 +1862,19 @@ def _model_in_list(model_name: str, server_models: list[str]) -> bool:
         if isinstance(mid, str) and mid.strip().rsplit("/", 1)[-1] == name_base:
             return True
     return False
+
+
+def _save_picked_model(provider: str, model) -> "str | None":
+    """Store the model the user picked in Settings with a provider / Vertex
+    row Save (or the Save a Test does first). Vertex names are stored as
+    google/<name>, like /llm/provider does. Returns the model now saved, or
+    None when no model came with the request (the caller then settles the
+    saved one against the new server's list as before)."""
+    if not isinstance(model, str) or not model.strip():
+        return None
+    saved = vertex_auth.model_name(model) if provider == "vertex" else model.strip()
+    setLLMModel(saved)
+    return saved
 
 
 def _settle_model_after_switch(provider: str, probe: dict) -> str:
