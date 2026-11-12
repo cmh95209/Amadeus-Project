@@ -2203,6 +2203,7 @@ export default function App() {
       setStatus("Loading version...");
       await activateReplyVersion(targetId);
       setMessages(await getMemory());
+      setStatus("Online");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not switch version");
     }
