@@ -1352,14 +1352,21 @@ def compute_greeting_situation(conversation_id: int,
     # Up to 2 other-tab digests (the anchor tab is named in the truth line
     # when it is elsewhere, so "others" skips it - other_conversation_facts
     # already lists every non-anchor tab, newest first).
-    for entry in (other.get("others") or [])[:2]:
+    # Settings -> Preferences -> "Remember my other chats" off: no other-tab
+    # digests in the greeting either (cross_tab.py).
+    try:
+        import cross_tab   # late import: cross_tab imports this module
+        digests_on = cross_tab.catch_up_on()
+    except Exception:
+        digests_on = True
+    for entry in (other.get("others") or [])[:2] if digests_on else []:
         if entry.get("conversation_id") == conversation_id:
             continue
         out["other_digests"].append({
             "title": entry["title"], "phrase": entry["phrase"],
             "digest": entry["digest"],
         })
-    if previous_conversation_id is not None:
+    if previous_conversation_id is not None and digests_on:
         try:
             out["previous_tab"] = load_previous_tab_summary(
                 previous_conversation_id,
@@ -3231,6 +3238,13 @@ def text_context_budget(conversation_id=None) -> int:
     minimum budget)."""
     budget = effective_context_budget()
     reserve = picture_reserve_tokens(conversation_id)
+    try:
+        import cross_tab   # late import: cross_tab imports this module
+        # Room for the cross-tab blocks (built-in model only - its context
+        # window is small and fixed; 0 elsewhere).
+        reserve += cross_tab.reserve_tokens()
+    except Exception:
+        pass
     return max(MIN_CONTEXT_BUDGET, budget - reserve) if reserve else budget
 
 

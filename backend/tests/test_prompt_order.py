@@ -96,6 +96,9 @@ class PromptOrderTests(unittest.TestCase):
                 (chat, "_finalize", lambda p, llm: p),
                 (chat, "_web_off_honesty_net", lambda p: p),
                 (chat, "_right_now_note", lambda: self.right_now),
+                # Cross-tab blocks: their placement has its own tests below.
+                (chat.cross_tab, "catch_up_block", lambda *a, **k: None),
+                (chat.cross_tab, "search_block", lambda *a, **k: None),
                 (cm_bridge, "fetch_memory_block",
                  lambda _cid: {"role": "system", "content": memory_text}),
                 # A made-up chat: no pictures from whatever the data folder holds.
@@ -164,6 +167,40 @@ class RightNowNoteTests(PromptOrderTests):
         msgs = chat._ordered_prompt({"role": "system", "content": "R"},
                                     {"role": "system", "content": "W"}, [], [], right_now=True)
         self.assertTrue(msgs[-1]["content"].startswith(chat._RIGHT_NOW_LABEL))
+
+
+class CrossTabPlacementTests(unittest.TestCase):
+    """The catch-up is the last FIXED block (kept by the prompt cache); the
+    search result is in the changing part (this reply only)."""
+
+    def _build(self, right_now):
+        catch = {"role": "system", "content": "CATCH-UP"}
+        with mock.patch.object(chat.cross_tab, "catch_up_block", lambda *a, **k: catch), \
+                mock.patch.object(store, "load_default_personality_messages", lambda: [_PERSONALITY]), \
+                mock.patch.object(ja_voice, "build_voice_rules",
+                                  lambda: {"role": "system", "content": "VOICE"}), \
+                mock.patch.object(ja_voice, "build_closeness_context",
+                                  lambda t: {"role": "system", "content": "CLOSENESS"}), \
+                mock.patch.object(stats, "load_stat", lambda _n: 50), \
+                mock.patch.object(chat.feelings, "feelings_line", lambda **k: ""), \
+                mock.patch.object(chat.concerns, "prompt_line", lambda *a, **k: ""):
+            return chat._ordered_prompt(
+                {"role": "system", "content": "RULES"}, {"role": "system", "content": "WEB"},
+                [{"role": "system", "content": "FOUND"}],
+                [{"role": "user", "content": "hi"}], right_now=right_now)
+
+    def test_order_a(self):
+        msgs = self._build(False)
+        head = msgs[0]["content"]
+        self.assertLess(head.index("WEB"), head.index("CATCH-UP"))
+        self.assertLess(head.index("CATCH-UP"), head.index("CLOSENESS"))
+        self.assertLess(head.index("CATCH-UP"), head.index("FOUND"))
+
+    def test_order_b(self):
+        msgs = self._build(True)
+        self.assertTrue(msgs[0]["content"].endswith("CATCH-UP"))
+        self.assertIn("FOUND", msgs[-1]["content"])
+        self.assertNotIn("FOUND", msgs[0]["content"])
 
 
 class WhichOrderTests(unittest.TestCase):

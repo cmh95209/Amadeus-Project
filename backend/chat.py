@@ -28,6 +28,7 @@ import webreader
 import websearch
 import weather
 import cm_bridge
+import cross_tab
 import attachments
 
 default_LLM_Model = store.DEFAULT_LLM_MODEL
@@ -2566,11 +2567,16 @@ _RIGHT_NOW_LABEL = ("RIGHT NOW (what you know at this moment - use it freely; "
                     "the user did not write this):\n\n")
 
 
-def _ordered_prompt(rules_block, web_block, changing, context, right_now=False):
+def _ordered_prompt(rules_block, web_block, changing, context, right_now=False,
+                    conversation_id=None):
+    # Cross-tab catch-up (cross_tab.py): last of the fixed blocks - it changes
+    # only when ANOTHER tab changes, so it keeps the reused prompt start.
+    catch_up = cross_tab.catch_up_block(conversation_id)
     fixed = (store.load_default_personality_messages()
              + [ja_voice.build_voice_rules()]
              + [rules_block]
-             + [web_block])
+             + [web_block]
+             + ([catch_up] if catch_up else []))
     trust = stats.load_stat("trust")
     # Her short-term feelings (2026-10-30): one line after the closeness
     # block, only when one of them is away from normal - otherwise the
@@ -4648,6 +4654,7 @@ def generate_greeting(mode: str = "startup",
                                                previous_conversation_id
                                                if switch else None))],
             ctx,
+            conversation_id=conversation_id,
         )
         if _is_local(client):
             # Local model: plain Japanese line + translated English line. An
@@ -4941,18 +4948,23 @@ def getResponsePacked(message_context, internal_context=None) -> AmadeusPack:
     # switch while she answers can never mix two chats' pictures.
     picture_conv = store.load_active_conversation()
     picture_index = attachments.picture_index_message(picture_conv)
+    # Cross-tab search (cross_tab.py): other tabs' lines matching what the
+    # user just wrote - this reply only, so it rides in the changing part.
+    found = cross_tab.search_block(_content_text(last_user), picture_conv)
 
     messages = _ordered_prompt(
         pack_rules,
         PROACTIVE_SEARCH_BLOCK if web_on else NO_WEB_BLOCK,
         book_messages
         + ([memory_block] if memory_block else [])
+        + ([found] if found else [])
         + ([lookup_index] if lookup_index else [])
         + ([picture_index] if picture_index else [])
         + ([link_note] if link_note else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
         right_now=_right_now_note(),
+        conversation_id=picture_conv,
     )
     # Her pictures (the newest message's + her desk), in this reply call only;
     # with web ON that includes her search decision (MH P1 b).
@@ -5127,16 +5139,19 @@ def getResponsePackedVoiceFirst(message_context, internal_context=None) -> Amade
         memory_block = None
     picture_conv = store.load_active_conversation()   # once for this reply's pictures
     picture_index = attachments.picture_index_message(picture_conv)
+    found = cross_tab.search_block(_content_text(last_user), picture_conv)   # cross_tab.py
 
     messages = _ordered_prompt(
         _PLAIN_RULES_JA if plain else _PACK_RULES_JA_ONLY,
         NO_WEB_BLOCK,
         book_messages
         + ([memory_block] if memory_block else [])
+        + ([found] if found else [])
         + ([picture_index] if picture_index else [])
         + [internal_context if internal_context is not None else store.load_internal_context()],
         message_context,
         right_now=_right_now_note(),
+        conversation_id=picture_conv,
     )
     messages = attachments.with_pictures(messages, picture_conv)   # her pictures (reply call only)
 
