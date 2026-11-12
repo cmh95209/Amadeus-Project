@@ -138,10 +138,10 @@ class ClientHookTests(unittest.TestCase):
                             "message": {"role": "assistant", "content": "hi"}}],
                "timings": {"prompt_n": 7, "cache_n": 3, "prompt_ms": 1.0,
                            "predicted_n": 2, "predicted_ms": 1.0}}
-        timing.start_reports()
+        llm.timing.start_reports()
         result = client._create_chat_result(raw)
         self.assertEqual(result.generations[0].message.content, "hi")
-        reports = timing.take_reports()
+        reports = llm.timing.take_reports()
         self.assertEqual(reports[0]["new"], 7)
 
     def test_stopwatch_failure_does_not_break_the_answer(self):
@@ -150,7 +150,8 @@ class ClientHookTests(unittest.TestCase):
         raw = {"id": "1", "object": "chat.completion", "created": 0, "model": "x",
                "choices": [{"index": 0, "finish_reason": "stop",
                             "message": {"role": "assistant", "content": "hi"}}]}
-        with patch("timing.parse_server_report", side_effect=RuntimeError("boom")):
+        with patch.object(llm.timing, "parse_server_report",
+                          side_effect=RuntimeError("boom")):
             result = client._create_chat_result(raw)
         self.assertEqual(result.generations[0].message.content, "hi")
 

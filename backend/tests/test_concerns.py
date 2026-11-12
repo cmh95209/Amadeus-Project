@@ -2,7 +2,7 @@
 import os
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -153,9 +153,13 @@ class CheckTests(Base):
             chat._apply_check_concerns(reply)
 
     def test_new_concern_with_date(self):
-        self.apply("TRUST: 1\nCONCERN: chemistry exam\nWHEN: 2026-11-03\nDONE: none\nASKED: none")
+        # The check's date must survive the day it was written: ten days
+        # out, computed at run time (a hard-coded "future" date rots).
+        future = date.today() + timedelta(days=10)
+        self.apply("TRUST: 1\nCONCERN: chemistry exam\nWHEN: " + future.isoformat() +
+                   "\nDONE: none\nASKED: none")
         item = concerns.load(self.path)[0]
-        self.assertEqual((item["text"], item["due"]), ("chemistry exam", date(2026, 11, 3)))
+        self.assertEqual((item["text"], item["due"]), ("chemistry exam", future))
 
     def test_done_and_asked_use_the_numbered_list(self):
         self.add("exam")

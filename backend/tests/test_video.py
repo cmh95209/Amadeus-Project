@@ -508,14 +508,18 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(transcribe.status()["total"], transcribe.MODEL_BYTES)
 
     def test_card_or_processor(self):
-        with patch("timing.gpu_memory", return_value=(5.5, 8.0)):
+        # The device choice asks timing.gpu_memory: patch THE object the
+        # code under test really uses (transcribe.timing), not whatever
+        # sys.modules happens to hold for "timing" when the suite re-
+        # imported it.
+        with patch.object(transcribe.timing, "gpu_memory", return_value=(5.5, 8.0)):
             self.assertEqual(transcribe.pick_device(), "cuda")
-        with patch("timing.gpu_memory", return_value=(7.0, 8.0)):
+        with patch.object(transcribe.timing, "gpu_memory", return_value=(7.0, 8.0)):
             self.assertEqual(transcribe.pick_device(), "cpu")     # her model fills the card
-        with patch("timing.gpu_memory", return_value=None):
+        with patch.object(transcribe.timing, "gpu_memory", return_value=None):
             self.assertEqual(transcribe.pick_device(), "cpu")
         with patch.dict(os.environ, {"AMADEUS_SPEECH_DEVICE": "cpu"}), \
-                patch("timing.gpu_memory", return_value=(0.0, 32.0)):
+                patch.object(transcribe.timing, "gpu_memory", return_value=(0.0, 32.0)):
             self.assertEqual(transcribe.pick_device(), "cpu")
 
     def test_helper_result_and_card_fallback(self):
