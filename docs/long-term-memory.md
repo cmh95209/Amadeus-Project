@@ -23,6 +23,22 @@ The memory engine is built on **CharacterMemory** by
 runs as a separate helper process. See `memory_sidecar/LICENSE-NOTE.md` for
 the full license notes.
 
+## Across chat tabs (v3.1)
+
+Each chat tab keeps its own recent messages and a running summary. Since v3.1
+she also remembers your OTHER tabs (Settings → Preferences, both on by default):
+
+- **Remember my other chats** — a short catch-up on your other tabs (newest
+  first: what each was about and its last lines).
+- **Search old chats** — your newest message is searched for in all other
+  tabs, in any language, and the best few matches (with the tab's name and
+  date) go to her for that reply. No extra model calls.
+- When you leave a tab with several new messages, her long-term memory learns
+  from it right away instead of waiting for more.
+
+Turning both switches off keeps her long-term memory and what she knows about
+you; only the other tabs' conversations are left out.
+
 The launcher starts the sidecar automatically (its one-time setup takes a few
 minutes on first launch). It follows the same LLM settings as the app, so
 there is nothing extra to configure.

@@ -4,20 +4,25 @@ Configuration, launching, manual startup, the Live2D WebUI, updates, and where h
 
 ## Configuration
 
-### Model Server, API Key, and Active Model
+### Provider, Key, and Model (v3.1)
 
-These are set in the app's **Settings → Connection** panel (the first-meeting
-flow), and are stored locally as plain text:
+**Settings → Connection → Custom Model**:
 
-- **Model server address** — `backend/llm_server.txt`. Leave empty to
-  auto-detect local ports (8888, 8000), or set a full URL such as
-  `http://127.0.0.1:8080/v1` (local) or an OpenRouter URL.
-- **API key** — `backend/data/api_key.txt`. Needed for cloud endpoints such
-  as OpenRouter; local servers that don't check keys can use any value or
-  none.
-- **Active model** — `backend/data/llm_model.txt`. The exact model name the
-  server serves (the "Test connection" button shows the real list; avoid
-  variants like `:batch` unless you know why you want them).
+1. **Provider** — pick from the list: a local server (auto-detect, Ollama,
+   LM Studio), a cloud provider (OpenRouter, Google Gemini, OpenAI, DeepSeek,
+   Groq, Mistral, xAI, Together AI, Cerebras, NVIDIA, Hugging Face, Moonshot AI,
+   NanoGPT), **Google Vertex AI** (paste or choose your service-account JSON
+   key and pick an endpoint), or **Custom address** for any OpenAI-compatible
+   server.
+2. **Key** — paste the provider's API key and press **Save**. Each provider
+   keeps its own key, so switching back and forth does not lose them. Local
+   servers need no key unless yours asks for one.
+3. **Model** — pick one from the list that appears, then press **Test**: she
+   sends one real message through it and the status line says whether it
+   works with Amadeus (or why not - wrong key, unknown model, no credit...).
+
+Everything is stored locally as plain text (`backend/llm_server.txt`,
+`backend/data/llm_model.txt`, the keys in `backend/data/`).
 
 The memory sidecar follows these same settings automatically — there is no
 separate memory configuration.
@@ -38,6 +43,19 @@ the chip's graphics (Metal) and shares the Mac's memory with everything else:
 close memory-hungry programs for the best speed. Macs with 16-23 GB get the
 3-bit Gemma 4 12B, Macs with 24 GB or more the 12B QAT with a longer
 conversation memory. Intel Macs and Macs with less memory use option B.
+
+### Memory Across Chat Tabs (v3.1)
+
+**Settings → Preferences** has two switches, both on by default:
+
+- **Remember my other chats** — she keeps up with your other chat tabs: what
+  each was about and how it ended, newest first.
+- **Search old chats** — each time you write, she looks through all your other
+  chats for the same topic and remembers the best matches. It works in any
+  language and costs no extra model calls.
+
+With both off she only knows the open tab, plus her long-term memory and what
+she knows about you. More in [Long-term memory](long-term-memory.md).
 
 ### Reasoning
 

@@ -120,10 +120,10 @@ For other users who use cloud model or their custom model server,
 1. Open **Settings → Connection** in the app.
 2. Point her at a language model — **any** of these work:
    - a local server on your own GPU (llama.cpp, vLLM, or any OpenAI-compatible server)
-   - or a cloud model through any OpenAI-compatible
-     endpoint with your API key.
-3. Pick the model name (the server's real model list appears as clickable
-   chips, and "Test connection" verifies it before you commit).
+   - or a cloud provider from the list (OpenRouter, Google Gemini, Google Vertex AI,
+     OpenAI, DeepSeek, Groq and more) with your own key.
+3. Pick the model from the list and press **Test** - one real message tells you
+   whether it works with Amadeus.
 4. Save. She speaks her real wake-up line, and the conversation begins.
 
 Prefer to install EVERYTHING manually? Visit the **Manual Installation**
@@ -162,8 +162,9 @@ You type a message
 ### Does Amadeus run a local LLM?
 
 **Yes it can.** The conversational LLM can run **on your own GPU**
-with its built-in model **or** remotely through **OpenRouter** with your
-own API key, **or** your own custom server for advanced users.
+with its built-in model **or** remotely through a cloud provider (OpenRouter,
+Google Gemini / Vertex AI, OpenAI and more) with your own key, **or** your own
+custom server for advanced users.
 
 For built-in users, it is a plug and play experience. Install the app and you can use it immediately.
 
@@ -190,7 +191,7 @@ What runs locally:
 
 What can run remotely:
 
-- **LLM inference** — through OpenRouter (or any OpenAI-compatible endpoint)
+- **LLM inference** — through a cloud provider (OpenRouter, Google Gemini / Vertex AI, OpenAI, ...) or any OpenAI-compatible endpoint
 
 Since v3.0 the installers can also set up **her own built-in local model**
 (Gemma 4 through llama.cpp) - choose option A at the start of the install. On

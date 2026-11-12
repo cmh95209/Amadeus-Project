@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.1.0 — Pick Your Provider, Memory Across Chats, Cheaper Cloud Replies — November 2026
+
+**Re-run the installers to update your app.**
+
+**NEW:**
+- **Provider list** (Settings -> Connection -> Custom Model): pick OpenRouter, Google Gemini,
+  Google Vertex AI (JSON key), OpenAI, DeepSeek, Groq, Mistral, xAI and more, or a local
+  server (Ollama, LM Studio, auto-detect) or your own address. Each provider keeps its own key.
+- **Test button**: sends one real message through the chosen model and tells you plainly
+  whether it works with Amadeus (or why not: wrong key, unknown model, no credit...).
+- **Local servers need no key.** Save connects at once.
+- **She remembers your other chat tabs** (Settings -> Preferences, both on by default):
+  "Remember my other chats" keeps her up to date on your other tabs; "Search old chats"
+  looks through all your past chats for what you just said. Works in any language.
+- Her long-term memory now learns from a tab as soon as you leave it.
+
+**Fixes:**
+- Cloud replies cost less: her fixed instructions are now reused between replies (about a
+  third of the price per reply on OpenRouter).
+- A cloud request that hangs is sent again once instead of waiting a long time.
+- The status line returns to Online after switching a reply version.
+
 ## v3.0.4 — Older NVIDIA Cards, Her Vision File, Clearer Errors — November 2026
 
 **Fixed: her model would not load on older NVIDIA cards (RTX 20 and older)**

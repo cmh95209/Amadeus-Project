@@ -1,9 +1,16 @@
-# Latest features (v3.0)
+# Latest features (v3.1)
 
 Everything Amadeus can do today.
 
 
-The current version (v3.0) includes:
+The current version (v3.1) includes:
+
+- **Provider list + Test button** (v3.1): OpenRouter, Google Gemini, Google Vertex AI,
+  OpenAI, DeepSeek, Groq and more, or a local server - each with its own key; Test sends
+  one real message and says plainly whether it works
+- **Memory across chat tabs** (v3.1): she keeps up with your other tabs and searches your
+  old chats for what you just said, in any language (Settings -> Preferences)
+- **Cheaper cloud replies** (v3.1): her fixed instructions are reused between replies
 
 - **Her own built-in local model** (v3.0): Gemma 4 through llama.cpp, set up by
   the installer to fit your graphics card (Windows) or your Mac's memory (Apple
