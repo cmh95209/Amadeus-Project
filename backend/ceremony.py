@@ -107,14 +107,14 @@ CEREMONY_LINES = {
     "need_connection": (
         "Thank you, I've got your name. But my brain still isn't connected. "
         "Under Connection in the settings menu, enter the LLM server address "
-        "and API key, choose a model, and press Save connection. Make sure "
+        "and API key, choose a model, and press Save. Make sure "
         "the model is running.",
         "ありがとう、名前は受け取ったわ。でも、私の頭脳はまだつながっていないの。\n"
         "設定メニューの「Connection」で、LLMサーバーのアドレスとAPIキーを入力して、"
-        "モデルを選んでから「Save connection」を押してね。モデルが起動していることも確認してね。",
+        "モデルを選んでから「Save」を押してね。モデルが起動していることも確認してね。",
         "ありがとう、名前は受け取ったわ。でも、私の頭脳はまだつながっていないの。\n"
         "設定メニューのコネクションで、エルエルエムサーバーのアドレスとエーピーアイキーを入力して、"
-        "モデルを選んでから、セーブコネクションを押してね。モデルが起動していることも確認してね。",
+        "モデルを選んでから、セーブを押してね。モデルが起動していることも確認してね。",
     ),
     "fallback": (
         "I can't reach the model. Please reconfirm your settings - or "

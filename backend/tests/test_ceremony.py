@@ -395,7 +395,8 @@ class CeremonyLineTextsTests(_FreshAppTests):
         self.assertIn("プリファレンス", ja_voice)
         en, ja_display, ja_voice = self.ceremony.line("need_connection")
         self.assertIn("I've got your name", en)
-        self.assertIn("Save connection", en)
+        self.assertIn("press Save.", en)
+        self.assertNotIn("Save connection", en)  # the button is "Save" since v3.1
         self.assertIn("LLMサーバー", ja_display)
         self.assertIn("エルエルエムサーバー", ja_voice)
         self.assertIn("エーピーアイキー", ja_voice)

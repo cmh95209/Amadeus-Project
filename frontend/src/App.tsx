@@ -320,6 +320,9 @@ export default function App() {
   const [keyHelpError, setKeyHelpError] = useState("");
   // The Google Vertex JSON-key area (the pass itself never reaches the page).
   const [vertexJson, setVertexJson] = useState("");
+  // The pasted JSON key shows as dots until the eye is pressed (2026-11-14:
+  // the private key used to sit on screen in plain text).
+  const [vertexShown, setVertexShown] = useState(false);
   const [vertexError, setVertexError] = useState("");
   // The endpoints the Vertex panel may offer: the project's location list
   // ("global" first, then the regions - the multi-regions refuse chat
@@ -336,6 +339,12 @@ export default function App() {
   const providerIdRef = useRef("");
   providerIdRef.current = providerId;
   const selectedProvider = providerListing?.providers.find((r) => r.id === providerId) ?? null;
+  // Custom Model: her built-in model only needs a word when it still holds
+  // memory (loaded / loading). "Not loaded" is the normal state for a cloud
+  // or own-server user and only confused them (2026-11-14 new-user test).
+  const builtinStillRunning = Boolean(
+    brain?.available && builtinModel &&
+    (builtinModel.state === "loaded" || builtinModel.state === "loading"));
   // Custom Model: the status line under the key area (a failed Vertex save
   // shows its message instead; a finished Test shows its words). Choosing a
   // different endpoint in the dropdown saves nothing by itself - the line
@@ -1221,6 +1230,12 @@ export default function App() {
     }
     setProviderTest(null);
     setTestModel("");
+    // The Model box belongs to the provider in use: another row starts
+    // empty (2026-11-14 new-user test: a local model name rode along into
+    // Google Vertex as "google/my-local-model", and a failed wake-up then
+    // ended the first-launch setup with a model Vertex does not have);
+    // going back to the provider in use shows its saved model again.
+    setModelName(id === listing.active ? savedModel : "");
     const nextAddress = address !== undefined
       ? address
       : id === "custom"
@@ -1371,6 +1386,7 @@ export default function App() {
   async function loadVertexFile(file: File) {
     try {
       const text = await file.text();
+      setVertexShown(false);
       setVertexJson(text);
       setVertexError("");
     } catch {
@@ -1859,12 +1875,18 @@ export default function App() {
     setSettingsError("");
     setSettingsNotice("");
     let keySaved = false;
+    // A connection that could not be saved no longer stops the rest
+    // (2026-11-14 new-user test: a pasted but unsaved Vertex key made the
+    // whole Save fail, and the user's NAME was lost with it - the first-
+    // launch setup then still asked for the name). The rest is saved, and
+    // the connection's own words are shown.
+    let connectionError = "";
     try {
       if (!builtinMode) {
+       try {
         // The provider row the panel shows (its address is filled from the
         // table; a custom address rides along). A newly typed key is stored
-        // FIRST, so it is the one the switch goes into use with. A failure
-        // here stops the whole save (the name etc. is not stored either).
+        // FIRST, so it is the one the switch goes into use with.
         const row = selectedProvider;
         if (!row) throw new Error("Choose a model provider first.");
         if (keyDirty && apiKey.trim()) {
@@ -1873,6 +1895,19 @@ export default function App() {
           setApiKeyInput("");
           setKeyDirty(false);
           setKeyShown(false);
+        }
+        // Google Vertex: a JSON key pasted or chosen in the box but not
+        // saved with its own row button is stored here too, like a typed
+        // API key above (with the endpoint and the picked model). A sign-in
+        // failure stops the connection part with Google's words.
+        if (row.id === "vertex" && vertexJson.trim()) {
+          const result = await saveVertex({
+            json: vertexJson, region: vertexRegion, model: noModelYet ? "" : nextModel,
+          });
+          keySaved = true;
+          setVertexJson("");
+          setVertexError("");
+          if (result.message) throw new Error(result.message);
         }
         // A Vertex endpoint picked in the dropdown but not saved yet goes
         // into use with this Save too (2026-11-12: it used to be left
@@ -1920,6 +1955,12 @@ export default function App() {
           setProviderProbe(null);
           setProviderBusy(false);
         }
+       } catch (error) {
+        connectionError =
+          (keySaved ? "Key saved, but the connection could not be switched: " : "") +
+          (error instanceof Error ? error.message : "Could not save the connection");
+        setSettingsSection("connection");
+       }
       }
       const savedName = await setUsername(userName, userNameReading);
       await setVoiceRetention(voiceRetention);
@@ -1963,6 +2004,11 @@ export default function App() {
       // the probe's job).
       void fireGreeting(true);
 
+      if (connectionError) {
+        setStatus("Settings saved");
+        setSettingsError(connectionError + " Everything else was saved.");
+        return;
+      }
       setStatus(builtinMode || noModelYet ? "Settings saved" : `Model set to ${nextModel}`);
       setSettingsNotice(
         (profileSaved
@@ -3409,8 +3455,9 @@ export default function App() {
                     <>
                       <label>
                           JSON key
+                          <span className="key-field vertex-key-field">
                           <textarea
-                            className="vertex-json"
+                            className={`vertex-json${vertexShown ? "" : " masked"}`}
                             rows={6}
                             value={vertexJson}
                             disabled={settingsBusy || providerBusy}
@@ -3422,8 +3469,21 @@ export default function App() {
                               ? `A JSON key is saved (project ${providerListing.vertex.project}) - paste or choose a new one to replace it`
                               : "Paste the contents of your JSON key file"}
                             spellCheck={false}
+                            autoComplete="off"
                             aria-describedby="vertex-json-help"
                           />
+                          <button
+                            type="button"
+                            className="key-visibility"
+                            title={vertexShown ? "Hide key" : "Show key"}
+                            aria-label={vertexShown ? "Hide key" : "Show key"}
+                            aria-pressed={vertexShown}
+                            disabled={settingsBusy || providerBusy || !vertexJson}
+                            onClick={() => setVertexShown((v) => !v)}
+                          >
+                            {vertexShown ? eyeIcon : eyeOffIcon}
+                          </button>
+                          </span>
                       </label>
                       <label>
                         Endpoint
@@ -3649,7 +3709,7 @@ export default function App() {
 
               {/* Custom Model: its status line sits under the key area, so this
                   section only appears when it has something to say. */}
-              {(builtinMode || (brain?.available && builtinModel)) && (
+              {(builtinMode || builtinStillRunning) && (
               <div className="conn-section">
                 <span className="conn-section-title">Status</span>
                 {builtinMode && builtinModel && !brain?.runner_missing ? (
@@ -3705,13 +3765,9 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
-                {!builtinMode && brain?.available && builtinModel && (
+                {!builtinMode && builtinStillRunning && builtinModel && (
                   <p className="settings-help">
-                    {builtinModel.state === "unloaded"
-                      ? "Her built-in model: not loaded (its program is stopped)."
-                      : builtinModel.state === "failed"
-                        ? "Her built-in model: not loaded (it could not start)."
-                        : `Her built-in model: still ${builtinModel.state} - switch to Built-in and press Unload to stop it.`}
+                    {`Her built-in model: still ${builtinModel.state} - switch to Built-in and press Unload to stop it.`}
                   </p>
                 )}
               </div>
@@ -3839,6 +3895,13 @@ export default function App() {
                       // The reading belonged to the old name.
                       setUserNameReading("");
                       setReadingNote("");
+                    }}
+                    onKeyDown={(event) => {
+                      // Enter saves, like the key boxes (2026-11-14 new-user test).
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void saveModel();
+                      }
                     }}
                     placeholder="what she should call you"
                     autoComplete="off"

@@ -1566,6 +1566,10 @@ button {
   font-size: 12px;
 }
 .vertex-json:focus { border-color: rgba(115, 151, 201, 0.55); }
+/* the JSON key shows as dots until the eye is pressed; the eye sits top right */
+.vertex-json.masked { -webkit-text-security: disc; }
+.vertex-key-field .vertex-json { padding-right: 40px; }
+.vertex-key-field .key-visibility { top: 8px; transform: none; }
 
 /* Settings -> Connection -> Model: "Get more models" (browser download links) */
 .model-catalog summary { cursor: pointer; color: #c9d2df; font-size: 13px; }
