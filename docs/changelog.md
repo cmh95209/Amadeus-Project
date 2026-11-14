@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.1.1 — Easier First Setup, One Version Number, Installers for Every Release — November 2026
+
+**NEW:**
+- **Installers share the app's version number** (they were Windows v4.13.x, Linux v1.x,
+  Mac v1.x before). The normal installers keep installing the latest version.
+- **An installer for each release from v3.0 on**, attached to that release: it installs
+  exactly that version. It will not put an older version over a newer one (that could
+  damage her memories); on Windows it can install it next to your current one instead.
+- **Update Amadeus.bat** in the Amadeus-Project folder: double-click it to update.
+
+**Fixes:**
+- First setup: the bottom Save also saves a pasted Vertex AI key, and keeps your name and
+  other settings even when the connection fails.
+- Picking another provider empties the Model box (no old model carried over).
+- Her setup reminder and the installers' last screen name the current buttons.
+- Enter in the name box saves; the Vertex key box is hidden like the other keys.
+
 ## v3.1.0 — Pick Your Provider, Memory Across Chats, Cheaper Cloud Replies — November 2026
 
 **Re-run the installers to update your app.**
