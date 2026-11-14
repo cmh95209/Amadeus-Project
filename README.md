@@ -62,8 +62,15 @@ To install into a different folder, add a parameter at the end of the command:
 Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.com/cmh95209/Amadeus-Project/main/scripts/install_windows.ps1" -OutFile "$HOME\Downloads\install_windows.ps1"; & "$HOME\Downloads\install_windows.ps1" -InstallDir "D:\Amadeus"
 ```
 
-Prefer to download the installer by hand? Both installer scripts are attached
-to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v3.0).
+Prefer to download the installer by hand? The installers are attached to each
+[release](https://github.com/cmh95209/Amadeus-Project/releases).
+
+**To update later:** double-click `Update Amadeus.bat` in the `Amadeus-Project` folder.
+
+**Need one exact version?** Each release from v3.0 on also has a *pinned* installer
+(`Install-Amadeus-v3.x.x.bat` for Windows, `install_linux-v3.x.x.sh`,
+`install_macos-v3.x.x.sh`) that installs exactly that version. It never puts an older
+version over a newer one; on Windows it can install it next to your current one.
 
 ## macOS (Apple Silicon and Intel)
 
@@ -84,8 +91,10 @@ to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v
    To start her without her model (when another program needs the memory),
    double-click `start_macos_no_model.command` instead.
 
-Prefer to download the installer by hand? Both installer scripts are attached
-to the [v3.0 release](https://github.com/cmh95209/Amadeus-Project/releases/tag/v3.0).
+Prefer to download the installer by hand? The installers (and a pinned installer
+for each exact version) are attached to each
+[release](https://github.com/cmh95209/Amadeus-Project/releases). To update later,
+run the line above again.
 
 ## Linux (new)
 

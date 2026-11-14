@@ -111,7 +111,7 @@ class SaveRuntimePathsTests(unittest.TestCase):
     def test_installer_calls_it_after_the_smoke_test(self):
         text = _INSTALLER.read_text(encoding="utf-8")
         self.assertIn("Save-RuntimePaths $proj $amPy $conda", text)
-        self.assertRegex(text, r'\$InstallerVersion = "v4\.13\.\d+"')
+        self.assertRegex(text, r'\$InstallerVersion = "v3\.\d+\.\d+"')
 
 
 @unittest.skipUnless(_WINDOWS, "Windows only")
@@ -194,6 +194,7 @@ class BatLookupTests(unittest.TestCase):
         text = (_ROOT / "start_windows.bat").read_text(encoding="utf-8")
         self.assertIn("install_log.txt", text)
         self.assertIn("Install Amadeus.bat", text)
+        self.assertIn("Update Amadeus.bat", text)
 
 
 def _load_launcher():

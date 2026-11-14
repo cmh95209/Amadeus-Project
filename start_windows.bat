@@ -43,7 +43,8 @@ if defined AMADEUS_PY goto :found_python
 
 echo ERROR: Amadeus's Python (conda env "%AMADEUS_ENV%") could not be found.
 echo Most often the install did not finish. Run the Amadeus installer again
-echo (Install Amadeus.bat) - it continues where it stopped.
+echo (Update Amadeus.bat in this folder, or Install Amadeus.bat) - it continues
+echo where it stopped.
 echo If this message comes back, send your helper the file install_log.txt
 echo from the folder that holds Amadeus-Project.
 pause

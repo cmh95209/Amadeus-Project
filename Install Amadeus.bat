@@ -6,6 +6,8 @@ rem  It downloads the latest Amadeus installer from GitHub into this same
 rem  folder (install_windows.ps1, next to this file) and runs it in this
 rem  window: the same installer as the PowerShell line in the README.
 rem  Safe to run again: the installer continues where it stopped.
+rem  To update an installed Amadeus, use "Update Amadeus.bat" inside its
+rem  Amadeus-Project folder (it finds the copy wherever it was installed).
 rem
 rem  Windows may first say "Windows protected your PC" (this file is not
 rem  signed by a company): click "More info", then "Run anyway".

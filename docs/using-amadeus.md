@@ -320,8 +320,9 @@ generated speech.
 
 ## Updating Amadeus
 
-**Re-run the installer** (Windows: `Install Amadeus.bat`; Mac: the installer
-line from the README). It updates the project, adds new packages and models,
+**Windows:** double-click `Update Amadeus.bat` in the `Amadeus-Project` folder
+(installs from before v3.1.1 do not have it yet: re-run `Install Amadeus.bat`
+once). **Mac and Linux:** run the installer line from the README again. It updates the project, adds new packages and models,
 skips what is already in place, and keeps your own files: your chats and her
 memory, your saved connection, and her personality if you edited it (Settings
 then offers the new default personality instead of overwriting yours).
