@@ -318,7 +318,7 @@ class ScreenTests(_Base):
         self.assertFalse(s["model_ok"])
         self.assertFalse(s["server_ok"])
         self.assertTrue(s["simulated"])
-        self.assertRegex(s["installer"], r"^linux-v1\.\d+$")
+        self.assertRegex(s["installer"], r"^linux-v3\.\d+\.\d+$")
         self.assertIn("(answer: Y)", (self.inst / "install_linux.log").read_text(encoding="utf-8"))
 
     def test_older_nvidia_driver_gets_the_older_cuda_build(self):

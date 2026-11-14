@@ -125,7 +125,7 @@ class InstallerNodeWiringTests(unittest.TestCase):
 
     def test_version(self):
         # v4.13.1 brought the Node.js check; later hotfixes keep it.
-        self.assertRegex(self.text, r'\$InstallerVersion = "v4\.13\.\d+"')
+        self.assertRegex(self.text, r'\$InstallerVersion = "v3\.\d+\.\d+"')
 
     def test_step2_uses_own_copy_when_the_pc_node_has_a_problem(self):
         self.assertIn("$sysNodeProblem = Get-NodeProblem $sysNode.Source", self.text)

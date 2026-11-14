@@ -1,11 +1,14 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.5  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v3.1.1  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
 #
-#  WHAT'S NEW IN v4.13.5 (November 2026, app v3.1):
+#  WHAT'S NEW IN v3.1.1 (November 2026):
+#   - Installers now carry the app's version number (this file was
+#     Windows installer v4.13.x before). A pinned installer for each release (v3.0 on)
+#     installs exactly that version; this one installs the latest.
 #   - The last screen names the Settings buttons the app has now
 #     (provider, Save, Test) and reminds you to enter your name.
 #
@@ -281,7 +284,7 @@ param(
     # -SkipLlmDownload): no programs, environments or project download.
     [switch]$LlmScreensOnly
 )
-$InstallerVersion = "v4.13.5"
+$InstallerVersion = "v3.1.1"
 # Set in step 2 when the PC's own Node.js could not run her web page and
 # Amadeus' own copy is used instead (step 9 then sets the web page's parts up
 # again with it).
@@ -2295,9 +2298,11 @@ try {
                     if ($LASTEXITCODE -eq 0) { Log "  Updated to the latest version." "Green" }
                     elseif (Move-ToRewrittenHistory "fork/$Branch" $personal) { Log "  Updated to the latest version (your own settings and personality were kept)." "Green" }
                     else { Log "  Could not fast-forward (local commits present?) - leaving it as is." "Yellow" }
-                } elseif ($current -eq $LegacyBranch -and -not $status) {
-                    # An install from an older installer (feature branch): move
-                    # it to main - only when it holds nothing of the user's own.
+                } elseif (($current -eq $LegacyBranch -or ($current -eq "HEAD" -and $Branch -eq "main" -and (& git describe --tags --exact-match HEAD 2>$null) -match '^v\d')) -and -not $status) {
+                    # An install from an older installer (feature branch), or
+                    # one made by a PINNED installer (v3.1.1: it sits on a
+                    # release tag, not on a branch): move it to main - only
+                    # when it holds nothing of the user's own.
                     if (Move-ToRewrittenHistory "fork/$Branch" $personal) {
                         & git checkout -q -B $Branch 2>$null | Out-Null
                         & git branch -q --set-upstream-to "fork/$Branch" $Branch 2>$null | Out-Null

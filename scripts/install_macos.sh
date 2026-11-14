@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.8  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v3.1.1  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -49,7 +49,10 @@
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
 #
-#  WHAT'S NEW IN v1.8 (November 2026, app v3.1):
+#  WHAT'S NEW IN v3.1.1 (November 2026):
+#   - Installers now carry the app's version number (this file was
+#     Mac installer v1.x before). A pinned installer for each release (v3.0 on)
+#     installs exactly that version; this one installs the latest.
 #   - The last screen names the Settings buttons the app has now
 #     (provider, Save, Test) and reminds you to enter your name.
 #
@@ -188,7 +191,7 @@ REPO_URL="https://github.com/cmh95209/Amadeus-Project"
 # on the old feature branch and are moved to main in step 3 (when they hold
 # nothing of the user's own).
 BRANCH="main"
-INSTALLER_VERSION="v1.8"
+INSTALLER_VERSION="v3.1.1"
 LEGACY_BRANCH="feature/character-memory-spike"
 GPT_REPO_URL="https://github.com/RVC-Boss/GPT-SoVITS.git"
 # Her voice's model files: only the 8 she loads (about 1.2 GB), pinned to
