@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.7  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR MAC OS   v1.8  (resumable / safe to re-run)
 #  This is the official macOS installer, served from the fork to new Mac
 #  installs. (Any local test copy made outside the repo during development
 #  is never committed.)
@@ -48,6 +48,10 @@
 #   - Every Git-LFS failure now shows its real reason in the install log
 #     (plus what the downloaded archive contains) instead of a generic line.
 #   - Step 1 now prints the actual chip name (the first version had a typo).
+#
+#  WHAT'S NEW IN v1.8 (November 2026, app v3.1):
+#   - The last screen names the Settings buttons the app has now
+#     (provider, Save, Test) and reminds you to enter your name.
 #
 #  WHAT'S NEW IN v1.7 (November 2026, app v3.0.3):
 #   - Her voice models: only the files she uses are downloaded (about
@@ -184,7 +188,7 @@ REPO_URL="https://github.com/cmh95209/Amadeus-Project"
 # on the old feature branch and are moved to main in step 3 (when they hold
 # nothing of the user's own).
 BRANCH="main"
-INSTALLER_VERSION="v1.7"
+INSTALLER_VERSION="v1.8"
 LEGACY_BRANCH="feature/character-memory-spike"
 GPT_REPO_URL="https://github.com/RVC-Boss/GPT-SoVITS.git"
 # Her voice's model files: only the 8 she loads (about 1.2 GB), pinned to
@@ -1929,10 +1933,11 @@ log "  1) Double-click this file to START Amadeus:"
 log "       $PROJ/start_macos.command"
 log "  2) When she opens in your browser, read her introduction message -"
 log "     it walks you through connecting your model, step by step."
-log "  3) (Shortcut) You can also open Settings -> Connection and click"
-log "     'Test connection' - the dot turns green when she can reach"
-log "     your model. Pick your model from the chips (or type its name)"
-log "     and paste its API key, if your provider has one."
+log "  3) (Shortcut) You can also open Settings -> Connection, pick your"
+log "     provider (or type your server's address), paste its API key and"
+log "     press Save. Then pick your model (type to search) and press Test."
+log "     Also enter your name under Preferences and press Save - she waits"
+log "     for it."
 log "     On a Mac, good choices: a cloud service (OpenRouter, OpenAI...)"
 log "     or a local model server like Ollama, LM Studio or llama.cpp."
 if [ "$LLM_READY" = 1 ]; then

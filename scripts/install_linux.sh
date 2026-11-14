@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR LINUX   v1.1  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR LINUX   v1.2  (resumable / safe to re-run)
 #  This is the official Linux installer, served from the fork to new Linux
 #  installs. It follows the macOS installer (install_macos.sh) step for step,
 #  with the Windows installer's graphics-card rules for her built-in model.
@@ -42,6 +42,10 @@
 #     --hardware-check-only [--json]   only show which model this PC gets
 #     --skip-llm-download       all screens, but no model downloads
 #     --llm-screens-only        ONLY the model screens + its settings file
+#
+#  WHAT'S NEW IN v1.2 (November 2026, app v3.1):
+#   - The last screen names the Settings buttons the app has now
+#     (provider, Save, Test) and reminds you to enter your name.
 #
 #  WHAT'S NEW IN v1.1 (November 2026, app v3.0.3):
 #   - Her voice models: only the files she uses are downloaded (about
@@ -138,7 +142,7 @@ copy_install_log() {
 # ----------------------------------------------------------------------------
 REPO_URL="https://github.com/cmh95209/Amadeus-Project"
 BRANCH="main"
-INSTALLER_VERSION="v1.1"
+INSTALLER_VERSION="v1.2"
 LEGACY_BRANCH="feature/character-memory-spike"
 GPT_REPO_URL="https://github.com/RVC-Boss/GPT-SoVITS.git"
 # Her voice's model files: only the 8 she loads (about 1.2 GB), pinned to
@@ -2182,10 +2186,11 @@ log "  1) START Amadeus: choose \"Amadeus\" in your app menu, or run:"
 log "       $PROJ/start_linux.sh"
 log "  2) When she opens in your browser, read her introduction message -"
 log "     it walks you through connecting your model, step by step."
-log "  3) (Shortcut) You can also open Settings -> Connection and click"
-log "     'Test connection' - the dot turns green when she can reach"
-log "     your model. Pick your model from the chips (or type its name)"
-log "     and paste its API key, if your provider has one."
+log "  3) (Shortcut) You can also open Settings -> Connection, pick your"
+log "     provider (or type your server's address), paste its API key and"
+log "     press Save. Then pick your model (type to search) and press Test."
+log "     Also enter your name under Preferences and press Save - she waits"
+log "     for it."
 if [ "$LLM_READY" = 1 ]; then
     log "  To run a GGUF model on this PC instead: put the file in"
     log "       $MODELS_DIR"

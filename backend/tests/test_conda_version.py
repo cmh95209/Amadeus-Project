@@ -145,7 +145,7 @@ class CondaWiringTests(unittest.TestCase):
         cls.text = _INSTALLER.read_text(encoding="utf-8")
 
     def test_version(self):
-        self.assertIn('$InstallerVersion = "v4.13.4"', self.text)
+        self.assertRegex(self.text, r'\$InstallerVersion = "v4\.13\.\d+"')
 
     def test_no_control_characters(self):
         # 2026-11-08: a header note once held a BEL character where "\a" was

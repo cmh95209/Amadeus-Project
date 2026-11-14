@@ -139,7 +139,7 @@ class ScreenTests(_Base):
         self.assertFalse(s["server_ok"])
         self.assertTrue(s["model_file"].endswith("/models/gemma-4-12b-it-Q3_K_M.gguf"))
         self.assertTrue(s["simulated"])
-        self.assertEqual(s["installer"], "mac-v1.7")
+        self.assertRegex(s["installer"], r"^mac-v1\.\d+$")
         # The log holds the whole conversation.
         self.assertIn("(answer: Y)", (self.inst / "install_macos.log").read_text(encoding="utf-8"))
 

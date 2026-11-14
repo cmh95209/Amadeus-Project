@@ -1,9 +1,13 @@
 # ============================================================================
-#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.4  (resumable / safe to re-run)
+#  AMADEUS - ONE-SHOT INSTALLER FOR WINDOWS   v4.13.5  (resumable / safe to re-run)
 #  Installs everything Amadeus needs to run.
 #
 #  This is the official installer for this fork. It is also attached to the
 #  latest release on GitHub, if you prefer downloading it from there.
+#
+#  WHAT'S NEW IN v4.13.5 (November 2026, app v3.1):
+#   - The last screen names the Settings buttons the app has now
+#     (provider, Save, Test) and reminds you to enter your name.
 #
 #  WHAT'S NEW IN v4.13.4 (November 2026, app v3.0):
 #   - A Miniconda already on the PC that is too old (before 23.10 for a new
@@ -277,7 +281,7 @@ param(
     # -SkipLlmDownload): no programs, environments or project download.
     [switch]$LlmScreensOnly
 )
-$InstallerVersion = "v4.13.4"
+$InstallerVersion = "v4.13.5"
 # Set in step 2 when the PC's own Node.js could not run her web page and
 # Amadeus' own copy is used instead (step 9 then sets the web page's parts up
 # again with it).
@@ -2712,9 +2716,11 @@ try {
     Log ("       " + (Join-Path $proj "start_windows.bat"))
     Log "  2) When she opens in your browser, read her introduction message -"
     Log "     it walks you through connecting your model, step by step."
-    Log "  3) (Shortcut) You can also open Settings -> Connection, enter the"
-    Log "     server address and API key, press 'Refresh list' and pick your"
-    Log "     model (type to search), then press 'Use this model'."
+    Log "  3) (Shortcut) You can also open Settings -> Connection, pick your"
+    Log "     provider (or type your server's address), paste its API key and"
+    Log "     press Save. Then pick your model (type to search) and press Test."
+    Log "     Also enter your name under Preferences and press Save - she waits"
+    Log "     for it."
     if ($llmReady) {
         Log "  To run a GGUF model on this PC instead: put the file in"
         Log ("       " + $ModelsDir)
